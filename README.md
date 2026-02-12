@@ -1,4 +1,4 @@
-# ml-lab
+# ml-labs
 
 A structured machine learning experimentation framework for building, managing, and evaluating ML pipelines with cross-validation, caching, and multi-framework support.
 
