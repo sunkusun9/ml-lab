@@ -199,6 +199,7 @@ class Experimenter():
             splitter=trainer_splitter,
             splitter_params=trainer_splitter_params,
             logger=self.logger,
+            cache=self.cache
         )
         self.trainers[name] = trainer
         self._save()
