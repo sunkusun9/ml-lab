@@ -170,7 +170,7 @@ class Experimenter():
         self._save()
         return collector
 
-    def add_trainer(self, name, data=None, splitter=None, splitter_params=None, exist='skip'):
+    def add_trainer(self, name, data=None, splitter="same", splitter_params=None, exist='skip'):
         if name in self.trainers:
             if exist == 'skip':
                 return self.trainers[name]

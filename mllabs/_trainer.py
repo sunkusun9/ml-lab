@@ -2,6 +2,7 @@ import os
 import shutil
 import pickle as pkl
 import traceback
+import warnings
 import numpy as np
 from pathlib import Path
 
@@ -28,6 +29,7 @@ class Trainer:
         self.node_objs = {}
 
         self.split_indices = self._make_splits()
+        self.save()
 
     # ------------------------------------------------------------------
     # node selection
@@ -109,14 +111,24 @@ class Trainer:
             node_obj.start_build()
             self.node_objs[node_name] = node_obj
 
-        for node_name in target_nodes:
+        n_splits = self.get_n_splits()
+        self.logger.start_progress("Train", len(target_nodes))
+        for ni, node_name in enumerate(target_nodes):
+            self.logger.update_progress(ni)
+            self.logger._progress[-1][0] = node_name
             node_obj = self.node_objs[node_name]
             node_attrs = self.pipeline.get_node_attrs(node_name)
+            self.logger.start_progress("Split", n_splits)
             for split_idx, data_dict in enumerate(self.get_data(node_attrs['edges'])):
+                self.logger.update_progress(split_idx)
                 if node_obj.status == 'error':
                     break
                 try:
-                    node_obj.build_split(split_idx, node_attrs, data_dict, self.logger)
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter("always")
+                        node_obj.build_split(split_idx, node_attrs, data_dict, self.logger)
+                        for w in caught:
+                            self.logger.warning(f"[{node_name}] split {split_idx}: {w.category.__name__}: {w.message}")
                 except Exception as e:
                     node_obj.status = 'error'
                     node_obj.error = {
@@ -125,9 +137,19 @@ class Trainer:
                         'traceback': traceback.format_exc(),
                         'split': split_idx,
                     }
+                    self.logger.info(f"[{node_name}] Train error at split {split_idx}: {type(e).__name__}: {e}")
+                    self.logger.info(traceback.format_exc())
                     self.cache.clear_nodes([node_name])
+            self.logger.end_progress(n_splits)
             if node_obj.status != 'error':
                 node_obj.end_build()
+        self.logger.end_progress(len(target_nodes))
+
+        error_nodes = [n for n in target_nodes if self.node_objs[n].status == 'error']
+        if error_nodes:
+            self.logger.info(f"Train complete: {len(target_nodes) - len(error_nodes)}/{len(target_nodes)} node(s), {len(error_nodes)} error(s): {error_nodes}")
+        else:
+            self.logger.info(f"Train complete: {len(target_nodes)} node(s)")
 
         self.save()
 
