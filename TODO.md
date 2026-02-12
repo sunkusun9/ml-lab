@@ -11,11 +11,6 @@
 - [x] 파일럿 노트북에서 StackingCollector로 LGB+XGB+CB 결과 수집
 - [x] 2nd level 모델: get_dataset → 새 Experimenter 생성
 
-## 3. 테스트 코드 작성 (Frozen → ml-lab 분리 후 진행)
-- [ ] Pipeline 핵심 로직 unit test
-- [ ] Experimenter 빌드/실험 흐름 test
-- [ ] Collector 수집/조회 test
-
 ## 4. 프레임워크 사용성 개선 (Frozen → ml-lab 분리 후 진행)
 - [x] Node error 상태 구현 (build/exp 중 에러 시 error 상태 전환, 나머지 노드 계속 진행)
 - [x] Experimenter 상태 요약 (`desc_status`: Stage/Head 상태 통계 + 에러 상세)
