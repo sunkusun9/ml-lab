@@ -119,6 +119,7 @@ class Experimenter():
         self.collectors = {}
         self.trainers = {}
         self.status = "open"
+        self._save()
 
     def _check_open(self):
         """상태가 open인지 확인하고, 아니면 에러 발생"""

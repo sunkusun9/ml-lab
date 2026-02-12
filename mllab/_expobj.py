@@ -106,6 +106,39 @@ class StageObj():
         else:
             self.status = 'built'
 
+    def start_exp(self, finalize = False):
+        if finalize:
+            raise ValueError("StageObj cannot be finalized after Experiment")
+
+    def exp_idx(self, idx, node_attrs, data_dict_it, logger, include_input = True, include_output = True):
+        if self.status == "built":
+            for data_dict, (obj, train_, spec) in zip(data_dict_it, self.objs_[idx]):
+                # X key로 데이터 가져오기
+                (train_X, train_v_X), valid_X = data_dict['X']
+                sub_result = {'spec': spec, 'object': obj}
+                if include_output:
+                    if train_ is None:
+                        train_result = obj.process(train_X)
+                    else:
+                        train_result = train_
+                    if train_v_X is not None:
+                        train_v_result = obj.process(train_v_X)
+                    else:
+                        train_v_result = None
+                    if include_output:
+                        sub_result['output_train'] = (train_result, train_v_result)
+                        sub_result['output_valid'] = obj.process(valid_X)
+                    if include_input:
+                        sub_result['input'] = data_dict
+                    yield sub_result
+        elif self.status == "finalized":
+            raise RuntimeError(f"Node is finalized and cannot be re-experimented")
+        else:
+            raise RuntimeError(f"StageObj cannot be experimented unless built")
+    
+    def end_exp(self):
+        pass
+    
     def start_build(self):
         self.objs_ = list()
         if not os.path.isdir(self.path):
