@@ -93,6 +93,10 @@ class DataWrapper(ABC):
         """
         pass
 
+    @abstractmethod
+    def squeeze(self):
+        pass
+
     def to_native(self):
         """Get native data object
 
@@ -264,6 +268,9 @@ class PandasWrapper(DataWrapper):
         else:
             raise TypeError(f"Cannot convert {type(output)} to pandas DataFrame")
     
+    def squeeze(self):
+        return PandasWrapper(self.data.squeeze())
+
     @staticmethod
     def mode(iterator):
         data_list = [unwrap(i) for i in iterator]
@@ -385,6 +392,11 @@ class PolarsWrapper(DataWrapper):
             cnt += 1
         return wrap(ret / cnt)
 
+    def squeeze(self):
+        if isinstance(self.data, pl.DataFrame) and self.data.shape[1] == 1:
+            return PolarsWrapper(self.data.to_series())
+        return self
+
     @staticmethod
     def mode(iterator):
         data_list = [unwrap(i) for i in iterator]
@@ -494,6 +506,9 @@ class CudfWrapper(DataWrapper):
         # 변환 불가능한 경우 에러 발생
         else:
             raise TypeError(f"Cannot convert {type(output)} to cudf DataFrame")
+
+    def squeeze(self):
+        return CudfWrapper(self.data.squeeze())
 
     @staticmethod
     def mode(iterator):
@@ -635,6 +650,9 @@ class NumpyWrapper(DataWrapper):
         else:
             raise TypeError(f"Cannot convert {type(output)} to numpy array")
         
+    def squeeze(self):
+        return NumpyWrapper(np.squeeze(self.data))
+
     @staticmethod
     def mode(iterator):
         from scipy import stats

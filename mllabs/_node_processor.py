@@ -118,7 +118,7 @@ class TransformProcessor():
         if train_y is None:
             self.obj.fit(train_X_native, **fit_params)
         else:
-            train_y_native = unwrap(train_y)
+            train_y_native = unwrap(train_y.squeeze())
             self.obj.fit(train_X_native, train_y_native, **fit_params)
 
         # 컬럼명 결정 (get_feature_names_out이 있으면 사용)
@@ -163,7 +163,7 @@ class TransformProcessor():
         if train_y is None:
             result = self.obj.fit_transform(train_X_native, **fit_params)
         else:
-            train_y_native = unwrap(train_y)
+            train_y_native = unwrap(train_y.squeeze())
             result = self.obj.fit_transform(train_X_native, train_y_native, **fit_params)
 
         # train의 Wrapper 타입으로 변환
@@ -233,7 +233,7 @@ class PredictProcessor():
             # 비지도학습
             self.obj.fit(train_X_native, **fit_params)
         else:
-            train_y_native = unwrap(train_y)
+            train_y_native = unwrap(train_y.squeeze())
             # 지도학습
             self.obj.fit(train_X_native, train_y_native, **fit_params)
 
@@ -292,7 +292,7 @@ class PredictProcessor():
             predictions = self.obj.fit_predict(train_X_native, **fit_params)
         else:
             # 지도학습
-            train_y_native = unwrap(train_y)
+            train_y_native = unwrap(train_y.squeeze())
             predictions = self.obj.fit_predict(train_X_native, train_y_native, **fit_params)
 
         # 컬럼명 결정
