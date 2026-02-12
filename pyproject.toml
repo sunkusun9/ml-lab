@@ -22,6 +22,10 @@ catboost = ["catboost>=1.1"]
 shap = ["shap>=0.42"]
 polars = ["polars>=0.19"]
 all = ["xgboost>=1.7", "lightgbm>=3.3", "catboost>=1.1", "shap>=0.42", "polars>=0.19"]
+dev = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["mllab*"]

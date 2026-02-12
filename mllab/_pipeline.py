@@ -496,8 +496,8 @@ class Pipeline:
             raise ValueError(f"Cannot remove node '{name}': has {len(descendants)} dependent node(s): {descendants_list}")
 
         node = self.nodes[name]
-
-        self._update_output_edges(name, node.edges, None)
+        node_attr = node.get_attrs(self.grps)
+        self._update_output_edges(name, node_attr['edges'], None)
 
         grp_name = node.grp
         if grp_name is not None and grp_name in self.grps:
@@ -554,7 +554,7 @@ class Pipeline:
         old_node = None
         if is_update:
             old_node = self.nodes[name]
-            old_edges = old_node.edges
+            old_edges = old_node.get_attrs(self.grps)['edges']
             old_output_edges = old_node.output_edges
 
         node = PipelineNode(
@@ -578,7 +578,7 @@ class Pipeline:
             cycle_info = ", ".join([f"'{e}'" for e in cycle_edges])
             raise ValueError(f"Cannot add node '{name}': would create cycle through edge(s) {cycle_info}")
 
-        self._update_output_edges(name, old_edges, edges)
+        self._update_output_edges(name, old_edges, attrs['edges'])
 
         if old_output_edges is not None:
             node.output_edges = old_output_edges
