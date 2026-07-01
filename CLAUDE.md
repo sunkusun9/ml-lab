@@ -62,8 +62,9 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `__dict__` 있는 객체 → `__dict__` 재귀 비교 (lgb_early_stopping 등 콜백 처리)
   - `__dict__` 없는 객체(primitive, C-ext) → `==` fallback (try/except)
   - 같은 타입이어야 equal 가능, 다른 타입 → False
-- **Pipeline**: 노드 그래프 관리
+- **Pipeline**: 노드 그래프 + 실험/트레이너 루트 컨테이너
   - `nodes`: `{name: PipelineNode}` (`None` → `DataSourceNode`), `grps`: `{name: PipelineGroup}` (`'__datasource__'` 항상 존재)
+  - `experiments`: `{name: Experimenter}`, `trainers`: `{name: Trainer}`
   - `datasource`: `nodes[None]` 반환 property
   - `set_datasource(schema, targets=None)`: DataSource 스키마/target 설정, 변경 시 downstream serial 자동 bump
   - `set_grp(exist='diff'|'skip'|'error'|'replace')`, `set_node(exist=...)`, `rename_grp`, `remove_grp`, `remove_node`
@@ -71,6 +72,10 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `_bump_serials(node_names)`: 지정 노드들의 serial을 새 UUID로 교체
   - `copy()`, `copy_stage()`, `copy_nodes(node_names)` — 선택적 복사
   - `compare_nodes(nodes)` → `{processor_name: DataFrame}` (params 차이 + edges['X'] stage별 변수 차이)
+  - `add_experiment(name, data, sp, sp_v, splitter_params, collectors, tags, path, exist)`: Experimenter 생성·등록, data와 datasource schema 호환성 체크
+  - `add_trainer(name, data, splitter, splitter_params, path, tags, exist)`: Trainer 생성·등록, tags로 head 자동 선택
+  - `get_experiment(name)`, `remove_experiment(name)`, `get_trainer(name)`, `remove_trainer(name)`
+  - `desc_pipeline(max_depth, direction)`, `desc_node(node_name, direction, show_params)`: Mermaid 다이어그램
 
 - **DataSourceNode** (`PipelineNode` 서브클래스):
   - `schema`: `{col: var_type}` — var_type은 VAR_TYPES 중 하나
@@ -84,7 +89,7 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `diff(processor, edges, method, parent, adapter, params)`: 달라진 필드명 리스트 반환 (`desc` 제외 → desc-only 변경은 rebuild 미유발)
 
 - **PipelineNode**: 개별 노드
-  - 속성: `name`, `grp`, `processor`, `edges`, `method`, `adapter`, `params`, `desc`, **`serial`** (UUID str)
+  - 속성: `name`, `grp`, `processor`, `edges`, `method`, `adapter`, `params`, `desc`, **`serial`** (UUID str), **`tag`** (`list[str]`)
   - `serial`: 노드 정의가 변경될 때마다 `_bump_serials`에 의해 새 UUID로 교체 → 아티팩트 무결성 추적
   - `output_edges`: 이 노드를 입력으로 사용하는 노드명 리스트
   - `get_attrs(grps)`: 그룹 속성과 노드 속성 병합 (`serial` 포함)
@@ -93,8 +98,9 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 
 ### Experimenter (`_experimenter.py`)
 - 생성자: `(data, path, ..., cache_maxsize=4GB, logger, aug_data=None)`
-- `pipeline`: Pipeline 인스턴스 — **Pipeline 편집은 반드시 `exp.pipeline.*` 을 통해 수행**
-- `cache`: DataCache (LRU, 용량 기반)
+- `pipeline`: `attach(pipeline)` 호출로 받음 — **직접 소유하지 않음**; `pipeline.add_experiment()` 사용 권장
+- `attach(pipeline)`: Pipeline 연결 (pipeline_id 일치 검증); `load()` 후에도 별도 호출 필요
+- `cache`: DataCache (LRU, 용량 기반) — `_cache.py`에 분리
 - 실행: `build(nodes, rebuild=False)` (stage), `exp(nodes, finalize=False, include_train=True)` (head)
   - build/exp 시작 시 serial mismatch 노드 자동 감지 → `reset_nodes()` 후 재빌드
 - `close_exp()`: open→closed 전환, Stage 객체 일괄 정리 (Collector 데이터 유지)
@@ -104,16 +110,13 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 - `get_collector(name)`: Collector 반환 (없으면 None)
 - `remove_collector(name)`: Collector 제거 후 `_save()`
 - `get_collect_status(collector, nodes=None)`: `{node: status}` 반환 — `'collected'`/`'not_collected'`/`'finalized'`/`'error'`
-- `get_trainer(name)`: Trainer 반환 (없으면 None)
-- `remove_trainer(name)`: Trainer 제거 후 `_save()`
 - `collect(collector, nodes=None, exist='skip')`: ad-hoc 수집 (빌드 완료된 head 노드 대상, nodes로 범위 제한 가능, progress 포함)
 - `get_node_output(node, idx, v=None)`, `get_node_train_output(node, idx, v=None)`, `get_node_valid_output(node, idx, v=None)`: 노드 출력 추출 (파라미터 순서: node → idx)
 - `aug_data`: 외부 데이터를 DataSource 수준에서 inner train split에 append — 미퍼시스트, create/load 시 전달
-- `add_trainer(name, ..., aug_data=None)`: Trainer 생성 시 aug_data 전달 가능
-- 저장/로드: `_save()`, `load(filepath, data, data_key)`
-  - pipeline, node_obj_keys, collector_keys 저장/복원
+- 저장/로드: `_save()`, `load(filepath, data, data_key)` → 로드 후 `attach(pipeline)` 필요
+  - collector_keys 저장/복원 (pipeline은 별도 attach)
 
-### DataCache (`_experimenter.py`)
+### DataCache (`_cache.py`)
 - `cachetools.LRUCache` 기반, 용량(bytes) 단위 관리
 - `get_data(node, typ, idx)`, `put_data(node, typ, idx, data)`
 - `clear_nodes(nodes)`: 특정 노드들의 캐시 삭제
@@ -180,6 +183,7 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `output_var`, `metric_func`, `include_train`
   - target: `context['input']['y']`, 예측값: `resolve_columns(output_valid, output_var)`
   - `_on_attach`: `metric_func`에 `on_attach`가 있으면 자동 전파
+  - 저장: `push()` 오버라이드로 inner fold 결과 발생 시 즉시 `metrics.db` INSERT (per-node pkl 없음)
   - 쿼리: `get_metric(node)`, `get_metrics(nodes)`, `get_metrics_agg(nodes, inner_fold, outer_fold, include_std)`
 
 - **ProbToLabel** (`_metric.py`): predict_proba → label 변환 후 metric 적용
@@ -309,10 +313,16 @@ exp.pipeline.set_grp('scale', role='stage', processor=StandardScaler,
 
 ## 저장 구조
 ```
+{pipeline.path}/
+  pipeline.db                       # Pipeline 노드/그룹 정의 (SQLite)
+  __experiments/{name}/             # pipeline.add_experiment() 기본 경로
+  __trainers/{name}/                # pipeline.add_trainer() 기본 경로
+
 {experimenter.path}/
-  __exp.pkl                         # pipeline, collector_keys, trainer_keys, 메타정보
+  __exp.pkl                         # collector_keys, 메타정보 (pipeline은 별도 attach)
   __collector/{name}/
-    __config.pkl                    # Collector 설정 + 데이터
+    __config.pkl                    # Collector 설정
+    metrics.db                      # MetricCollector 결과 (node, idx, inner_idx, split, value)
     {node}.pkl                      # StackingCollector 노드별 데이터
     {node}/{idx}_{inner_idx}.pkl    # OutputCollector fold별 데이터
   __folds/{outer_idx}/{inner_idx}/{node_name}/
