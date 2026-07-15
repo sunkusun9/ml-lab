@@ -4,6 +4,13 @@ import threading
 from abc import ABC, abstractmethod
 
 
+def resolve_logger(logger):
+    """Return *logger* if given, else the shared process-wide DefaultLogger."""
+    if logger is None:
+        return DefaultLogger.get_instance(level=['info', 'progress'])
+    return logger
+
+
 class BaseLogger(ABC):
     def __init__(self, level=['info', 'warning', 'progress'], n_store_warning=1000):
         self._progress = list()
@@ -128,7 +135,25 @@ class DefaultLogger(BaseLogger):
 
     Falls back to plain printing when stdout is not a TTY (e.g. Jupyter,
     pipes) — in that case progress is not rendered.
+
+    Since progress rendering owns the terminal cursor (a resource shared
+    across the whole process), independent instances writing at the same
+    time will corrupt each other's output. Use :meth:`get_instance` to
+    share one process-wide instance instead of constructing directly.
     """
+
+    _instance = None
+
+    @classmethod
+    def get_instance(cls, level=['info', 'warning', 'progress'], n_store_warning=1000):
+        """Return the shared process-wide DefaultLogger, creating it on first use.
+
+        ``level``/``n_store_warning`` only apply to the first call that
+        creates the instance — later calls return the same object as-is.
+        """
+        if cls._instance is None:
+            cls._instance = cls(level=level, n_store_warning=n_store_warning)
+        return cls._instance
 
     def __init__(self, level=['info', 'warning', 'progress'], n_store_warning=1000):
         super().__init__(level, n_store_warning)

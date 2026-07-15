@@ -62,9 +62,8 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `__dict__` 있는 객체 → `__dict__` 재귀 비교 (lgb_early_stopping 등 콜백 처리)
   - `__dict__` 없는 객체(primitive, C-ext) → `==` fallback (try/except)
   - 같은 타입이어야 equal 가능, 다른 타입 → False
-- **Pipeline**: 노드 그래프 + 실험/트레이너 루트 컨테이너
+- **Pipeline**: 노드 그래프 자료구조. Experimenter/Trainer를 소유/등록하지 않음 (아래 참조) — 순수 노드 그래프 정의 + serial 무결성 추적 역할만 담당
   - `nodes`: `{name: PipelineNode}` (`None` → `DataSourceNode`), `grps`: `{name: PipelineGroup}` (`'__datasource__'` 항상 존재)
-  - `experiments`: `{name: Experimenter}`, `trainers`: `{name: Trainer}`
   - `datasource`: `nodes[None]` 반환 property
   - `set_datasource(schema, targets=None)`: DataSource 스키마/target 설정, 변경 시 downstream serial 자동 bump
   - `set_grp(exist='diff'|'skip'|'error'|'replace')`, `set_node(exist=...)`, `rename_grp`, `remove_grp`, `remove_node`
@@ -72,10 +71,9 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `_bump_serials(node_names)`: 지정 노드들의 serial을 새 UUID로 교체
   - `copy()`, `copy_stage()`, `copy_nodes(node_names)` — 선택적 복사
   - `compare_nodes(nodes)` → `{processor_name: DataFrame}` (params 차이 + edges['X'] stage별 변수 차이)
-  - `add_experiment(name, data, sp, sp_v, splitter_params, collectors, tags, path, exist)`: Experimenter 생성·등록, data와 datasource schema 호환성 체크
-  - `add_trainer(name, data, splitter, splitter_params, path, tags, exist)`: Trainer 생성·등록, tags로 head 자동 선택
-  - `get_experiment(name)`, `remove_experiment(name)`, `get_trainer(name)`, `remove_trainer(name)`
+  - `check_data_compatibility(data)`: datasource schema 컬럼이 모두 `data`에 있는지 체크 (schema 미정의 시 no-op). `Experimenter.build/exp`, `Trainer.select_head/train` 시작 시 자동 호출
   - `desc_pipeline(max_depth, direction)`, `desc_node(node_name, direction, show_params)`: Mermaid 다이어그램
+  - **Pipeline은 Experimenter/Trainer를 소유하지 않음** — `add_experiment`/`add_trainer`/`get_experiment`/`get_trainer` 등 registry 없음. `Experimenter`/`Trainer`는 사용자가 직접 생성해 변수로 들고 있다가, `build`/`exp`/`train` 등 호출 시마다 `pipeline`을 인자로 넘김 (아래 참조)
 
 - **DataSourceNode** (`PipelineNode` 서브클래스):
   - `schema`: `{col: var_type}` — var_type은 VAR_TYPES 중 하나
@@ -97,24 +95,26 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `set_grp`/`set_node`: `desc` 파라미터 수락; exist='diff' skip 경로에서도 `desc`는 업데이트됨
 
 ### Experimenter (`_experimenter.py`)
-- 생성자: `(data, path, ..., cache_maxsize=4GB, logger, aug_data=None)`
-- `pipeline`: `attach(pipeline)` 호출로 받음 — **직접 소유하지 않음**; `pipeline.add_experiment()` 사용 권장
-- `attach(pipeline)`: Pipeline 연결 (pipeline_id 일치 검증); `load()` 후에도 별도 호출 필요
+- 생성자: `(data, path, ..., cache_maxsize=4GB, logger, aug_data=None, tags=None)`
+- **Pipeline을 보유하지 않음** — `self.pipeline`/`attach()` 없음. 노드 그래프가 필요한 메소드마다 `pipeline`을 인자로 명시적으로 전달하고, 매 호출마다 노드 `serial` 비교로 디스크 아티팩트를 그 pipeline과 동기화함
+- `tags` (list[str]): `exp(pipeline)`를 `nodes=None`으로 호출하면 tag가 교집합인 head만 대상 (비어있으면 전체 head)
 - `cache`: DataCache (LRU, 용량 기반) — `_cache.py`에 분리
-- 실행: `build(nodes, rebuild=False)` (stage), `exp(nodes, finalize=False, include_train=True)` (head)
-  - build/exp 시작 시 serial mismatch 노드 자동 감지 → `reset_nodes()` 후 재빌드
-- `close_exp()`: open→closed 전환, Stage 객체 일괄 정리 (Collector 데이터 유지)
-- 상태관리: `reset_nodes(nodes)` - cache, collectors 초기화
-- 에러 조회: `show_error_nodes(nodes=None, traceback=False)` - error 상태 노드 출력
-- `add_collector(collector)`: Collector 등록 (path 설정, save)
+- **pipeline 필요**:
+  - `build(pipeline, nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None)` (stage), `exp(pipeline, nodes=None, finalize=False, n_jobs=1, gpu_id_list=None)` (head)
+    - 시작 시 `pipeline.check_data_compatibility(self.data)` 호출 후 serial mismatch 노드 자동 감지 → `reset_nodes()` 후 재빌드
+  - `collect(pipeline, collector, nodes=None, exist='skip')`: ad-hoc 수집 (빌드 완료된 head 노드 대상, nodes로 범위 제한 가능, progress 포함)
+  - `get_collect_status(pipeline, collector, nodes=None)`: `{node: status}` 반환 — `'collected'`/`'not_collected'`/`'finalized'`/`'error'`
+  - `reopen_exp(pipeline)`: closed→open, Stage 노드 초기화 후 `build(pipeline)` 재호출
+  - `get_node_info(pipeline)`: 노드 요약 Markdown
+- **pipeline 불필요** (디스크 상태만으로 동작): `get_status(node_name)`, `finalize(nodes)`, `reinitialize(nodes)`, `close_exp()`, `reset_nodes(nodes)`, `show_error_nodes(nodes=None, traceback=False)`, `get_objs(node_name, outer_idx=0, inner_idx=0)`
+  - **주의**: 같은 fold의 `train_data_flows[j]`와 `artifact_stores[j]`는 디스크상 동일 디렉토리를 가리키지만 서로 독립적인 lazy info 캐시(`NodeStore._info_cache`)를 가짐. 양쪽을 합쳐 하나의 상태로 캐싱한 뒤 한쪽만 mutate(예: finalize)하면 다른 쪽 캐시가 stale해짐 — 그래서 `get_status`는 pipeline으로 role을 판별해 해당 store 하나만 조회함(`_reset_serial_stale_nodes`도 동일 패턴). `finalize`/`reinitialize`/`reset_nodes`/`close_exp`는 store별로 조회 직후 바로 그 store에 실행(check-and-act, 캐싱된 판단을 다른 store에 넘기지 않음)하는 구조라 pipeline 없이도 안전함
+- `add_collector(collector, exist='skip')`: Collector **등록만** (path 설정, save) — pipeline 불필요, **자동 수집 안 함**. 이미 빌드된 head에서 즉시 수집하려면 별도로 `collect(pipeline, collector)` 호출
 - `get_collector(name)`: Collector 반환 (없으면 None)
 - `remove_collector(name)`: Collector 제거 후 `_save()`
-- `get_collect_status(collector, nodes=None)`: `{node: status}` 반환 — `'collected'`/`'not_collected'`/`'finalized'`/`'error'`
-- `collect(collector, nodes=None, exist='skip')`: ad-hoc 수집 (빌드 완료된 head 노드 대상, nodes로 범위 제한 가능, progress 포함)
-- `get_node_output(node, idx, v=None)`, `get_node_train_output(node, idx, v=None)`, `get_node_valid_output(node, idx, v=None)`: 노드 출력 추출 (파라미터 순서: node → idx)
+- `get_train_data(edges, o_idx=0, i_idx=0)` / `get_valid_data(...)` / `get_test_data(...)`, `get_node_train_data(pipeline, node, o_idx=0, i_idx=0)` / `get_node_valid_data(...)` / `get_node_test_data(...)`: 노드 출력 추출 헬퍼
 - `aug_data`: 외부 데이터를 DataSource 수준에서 inner train split에 append — 미퍼시스트, create/load 시 전달
-- 저장/로드: `_save()`, `load(filepath, data, data_key)` → 로드 후 `attach(pipeline)` 필요
-  - collector_keys 저장/복원 (pipeline은 별도 attach)
+- 저장/로드: `_save()`, `load(filepath, data, data_key)` — pipeline은 저장 대상 아님(직접 보유 안 하므로); 로드 후 매 호출 시 pipeline을 인자로 전달
+  - collector_keys, tags 저장/복원
 
 ### DataCache (`_cache.py`)
 - `cachetools.LRUCache` 기반, 용량(bytes) 단위 관리
@@ -143,16 +143,18 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `get_missing_stages(pipeline)`: 미빌드 stage 목록
 
 ### Trainer (`_trainer.py`)
-- 생성자: `(name, pipeline, data, path, splitter, splitter_params, cache, logger)`
-- `train_folds`: `[TrainFold]` — split별 `(TrainDataFlow, NodeStore)` 쌍
-- `selected_stages`, `selected_heads`: `select_head(nodes)`로 설정
+- 생성자: `(name, data, path, splitter, splitter_params, cache, logger, tags=None, aug_data=None)` — **Pipeline을 생성자에서 받지 않음** (Experimenter와 동일하게 pipeline 미보유, 호출마다 전달)
+- `tags` (list[str]): `select_head(pipeline)`를 `nodes=None`으로 호출하면 tag가 교집합인 head만 자동 선택 (비어있으면 전체 head)
+- `train_folds`: `[TrainFold]` — split별 `(TrainDataFlow, NodeStore)` 쌍, 둘은 같은 fold 디렉토리를 공유 (Experimenter의 outer_fold와 동일 구조)
+- `selected_stages`, `selected_heads`: `select_head(pipeline, nodes=None)`로 설정
 - `cache`: Experimenter에서 전달받은 DataCache 공유
-- `select_head(nodes)`: head 노드 지정 + upstream stage 자동 수집, 위상 순서 정렬
-- `train()`: serial mismatch 자동 감지 후 미빌드 노드만 대상으로 학습
+- `select_head(pipeline, nodes=None)`: `pipeline.check_data_compatibility(self.data)` 호출 후 head 노드 지정 + upstream stage 자동 수집, 위상 순서 정렬
+- `train(pipeline, n_jobs=1, gpu_id_list=None)`: serial mismatch 자동 감지 후 미빌드 노드만 대상으로 학습
+- `get_status(node_name)`: pipeline 불필요 — `artifact_stores`만 조회(`train_data_flows`와 동일 디렉토리를 공유하므로 role 구분 없이도 정확함)
 - `process(data, v=None)`: generator, split마다 head output을 v로 필터 후 concat하여 yield
-- `to_inferencer(v=None)`: 학습된 Processor를 추출하여 Inferencer 생성
-- `reset_nodes(nodes)`: 하위 종속 노드 포함 초기화
-- 저장/로드: `save()`, `_load(path, pipeline, data, cache, logger)`
+- `to_inferencer(pipeline, v=None)`: 학습된 Processor를 추출하여 Inferencer 생성
+- `reset_nodes(pipeline, nodes)`: 하위 종속 노드 포함 초기화
+- 저장/로드: `save()`, `_load(path, data, cache, logger, aug_data=None)` — pipeline 인자 없음
 
 ### Inferencer (`_inferencer.py`)
 - 생성자: `(pipeline, selected_stages, selected_heads, n_splits, node_objs, v=None)`
@@ -230,9 +232,10 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 - dict 형태: `{key: [(node_name, var_spec), ...], ...}`
 - key: 변수 집합 이름 (예: 'X', 'y', 'sample_weight')
 - node_name: stage 노드명 (None=DataSource)
-- var_spec: 변수 선택 (None=전체, str, list, callable, tuple)
+- var_spec: 변수 선택 (stage 노드 대상: None=전체, str, list, callable, tuple)
 - 같은 key의 데이터는 column 방향으로 concat
 - 상위→하위 병합: 같은 key면 extend
+- **DataSource edge (`node_name=None`)**: var_spec은 반드시 컬럼명 explicit list — 아니면 `set_grp`/`set_node`가 ValueError (`_check_edges`). datasource schema가 정의돼 있으면 리스트의 모든 컬럼이 schema에 존재해야 함 — 없으면 ValueError (schema 미정의 시 이 검사는 skip). [[feedback_datasource_edges_explicit_vars]]
 
 ## exist 파라미터 (set_grp, set_node, collect)
 - `'diff'` (default, set_grp/set_node): 제공된 파라미터가 기존과 다를 때만 업데이트, 동일하면 skip
@@ -312,14 +315,13 @@ exp.pipeline.set_grp('scale', role='stage', processor=StandardScaler,
   - `_dproc.py`: `get_type_df` (수치형만 f32/i32/i16/i8 판정), `get_type_pl`, `get_type_pd`, `merge_type_df`
 
 ## 저장 구조
+Pipeline/Experimenter/Trainer는 서로의 경로를 관리하지 않음 — 각자 생성 시 `path`를 직접 받음.
 ```
 {pipeline.path}/
   pipeline.db                       # Pipeline 노드/그룹 정의 (SQLite)
-  __experiments/{name}/             # pipeline.add_experiment() 기본 경로
-  __trainers/{name}/                # pipeline.add_trainer() 기본 경로
 
 {experimenter.path}/
-  __exp.pkl                         # collector_keys, 메타정보 (pipeline은 별도 attach)
+  __exp.pkl                         # collector_keys, tags, 메타정보 (pipeline은 미보유 — 매 호출 시 인자로 전달)
   __collector/{name}/
     __config.pkl                    # Collector 설정
     metrics.db                      # MetricCollector 결과 (node, idx, inner_idx, split, value)
@@ -329,11 +331,13 @@ exp.pipeline.set_grp('scale', role='stage', processor=StandardScaler,
     obj.pkl                         # processor 객체
     result.pkl                      # fit_transform/fit_predict 출력
     info.pkl                        # {status, build_id, node_serial, fit_time, edges, ...}
+    # 주의: 이 {inner_idx} 디렉토리는 Stage(train_data_flows)와 Head(artifact_stores)가
+    # 공유함 — 같은 경로를 서로 다른 NodeStore 인스턴스(독립된 info 캐시)로 감싸고 있을 뿐임
 
 {trainer.path}/
-  __trainer.pkl                     # name, splitter, selected_stages/heads, split_indices
+  __trainer.pkl                     # name, splitter, tags, selected_stages/heads, split_indices
   {split_idx}/{node_name}/
-    obj.pkl / result.pkl / info.pkl
+    obj.pkl / result.pkl / info.pkl # 마찬가지로 train_data_flows/artifact_stores가 {split_idx} 디렉토리를 공유
 
 {inferencer_path}/
   __inferencer.pkl                  # pipeline, selected_stages/heads, n_splits, node_objs, v (단일 파일)

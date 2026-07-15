@@ -82,14 +82,7 @@ def resolve_columns(data, X, y=None, processor=None):
         for x in X:
             if x is None or isinstance(x, list):
                 raise ValueError(f"list 요소에 list나 None은 허용되지 않음: {x}")
-        seen = set()
-        ret = list()
-        for x in X:
-            for col in resolve_columns(data, x, processor=processor):
-                if col not in seen:
-                    seen.add(col)
-                    ret.append(col)
-        return ret
+        return X
     else:
         # 단일 값이면 리스트로 변환
         ret = list()

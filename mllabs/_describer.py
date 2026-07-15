@@ -466,14 +466,14 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
 
     return "\n".join(lines)
 
-def desc_status(exp):
+def desc_status(exp, pipeline):
     stage_nodes = []
     head_nodes = []
-    for name in exp.pipeline.nodes.keys():
+    for name in pipeline.nodes.keys():
         if name is None:
             continue
-        node = exp.pipeline.get_node(name)
-        grp = exp.pipeline.get_grp(node.grp)
+        node = pipeline.get_node(name)
+        grp = pipeline.get_grp(node.grp)
         if grp.role == 'stage':
             stage_nodes.append(name)
         elif grp.role == 'head':
@@ -530,8 +530,8 @@ def desc_status(exp):
         lines.append("")
         for name in error_nodes:
             err = exp.node_objs[name].error
-            node = exp.pipeline.get_node(name)
-            grp = exp.pipeline.get_grp(node.grp)
+            node = pipeline.get_node(name)
+            grp = pipeline.get_grp(node.grp)
             lines.append(f"### {name} ({grp.role})")
             lines.append(f"- **fold**: {err['fold']}")
             lines.append(f"- **{err['type']}**: {err['message']}")

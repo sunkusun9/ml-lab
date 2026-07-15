@@ -95,6 +95,11 @@ class NodeStore:
     def get_info(self, name):
         return self._load_info(name)
 
+    def list_nodes(self):
+        if not self.path.exists():
+            return []
+        return [p.name for p in self.path.iterdir() if p.is_dir()]
+
     # -------------------------------------------------------------------------
     # Status / lifecycle (instance)
     # -------------------------------------------------------------------------

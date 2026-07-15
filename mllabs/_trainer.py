@@ -7,6 +7,7 @@ from ._data_wrapper import wrap, unwrap, DataWrapperProvider
 from ._flow import TrainDataFlow
 from ._store import NodeStore
 from ._node_processor import resolve_columns
+from ._logger import resolve_logger
 
 
 class TrainFold:
@@ -45,25 +46,28 @@ class TrainFold:
 class Trainer:
     """Runs cross-validation training on a subset of Pipeline nodes.
 
-    Created via :meth:`~mllabs.Experimenter.add_trainer`. Shares the
-    Experimenter's Pipeline and DataCache.
+    No Pipeline reference is held between calls — pass ``pipeline`` explicitly
+    to :meth:`select_head`, :meth:`train`, and other node-graph-aware methods
+    each time; artifacts are reconciled against it via node ``serial``
+    comparison on every call.
 
     Attributes:
         name (str): Trainer name.
+        tags (list[str]): When set, ``select_head(pipeline)`` without an
+            explicit ``nodes`` targets only Head nodes whose ``tag`` intersects it.
         selected_stages (list[str]): Stage nodes included in training.
         selected_heads (list[str]): Head nodes to train.
         train_folds (list[TrainFold]): Per-split data flows and artifact stores.
     """
 
-    def __init__(self, name, pipeline, data, path, splitter, splitter_params, cache, logger, aug_data=None):
+    def __init__(self, name, data, path, splitter, splitter_params, cache, tags=None, aug_data=None):
         self.name = name
-        self.pipeline = pipeline
         self.data = data
         self.path = Path(path)
         self.splitter = splitter
         self.splitter_params = splitter_params
         self.cache = cache
-        self.logger = logger
+        self.tags = list(tags) if tags is not None else []
         self.aug_data = wrap(aug_data) if aug_data is not None else None
 
         self.selected_stages = []
@@ -110,38 +114,47 @@ class Trainer:
     # node selection
     # ------------------------------------------------------------------
 
-    def select_head(self, nodes):
+    def select_head(self, pipeline, nodes=None):
         """Specify Head nodes to train and auto-collect their upstream Stages.
 
         Args:
-            nodes: Node query — ``list``, regex ``str``, or ``None`` (all heads).
+            pipeline (Pipeline): Pipeline defining the node graph.
+            nodes: Node query — ``list``, regex ``str``, or ``None`` (all heads
+                matching ``self.tags`` if set, else all heads).
         """
-        node_names = self.pipeline.get_node_names(nodes)
+        pipeline.check_data_compatibility(self.data)
+        if nodes is None and self.tags:
+            node_names = [
+                n for n in pipeline.get_node_names(None)
+                if n is not None and set(pipeline.nodes[n].tag) & set(self.tags)
+            ]
+        else:
+            node_names = [n for n in pipeline.get_node_names(nodes) if n is not None]
 
         selected = set(self.selected_stages + self.selected_heads)
         for name in node_names:
             selected.add(name)
-            self._collect_upstream(name, selected)
+            self._collect_upstream(pipeline, name, selected)
 
-        all_ordered = self.pipeline._get_affected_nodes([None])
+        all_ordered = pipeline._get_affected_nodes([None])
         self.selected_stages = []
         self.selected_heads = []
         for n in all_ordered:
             if n is None or n not in selected:
                 continue
-            grp = self.pipeline.get_grp(self.pipeline.get_node(n).grp)
+            grp = pipeline.get_grp(pipeline.get_node(n).grp)
             if grp.role == 'stage':
                 self.selected_stages.append(n)
             elif grp.role == 'head':
                 self.selected_heads.append(n)
 
-    def _collect_upstream(self, node_name, selected):
-        node_attrs = self.pipeline.get_node_attrs(node_name)
+    def _collect_upstream(self, pipeline, node_name, selected):
+        node_attrs = pipeline.get_node_attrs(node_name)
         for key, edge_list in node_attrs['edges'].items():
             for source_node, var in edge_list:
                 if source_node is not None and source_node not in selected:
                     selected.add(source_node)
-                    self._collect_upstream(source_node, selected)
+                    self._collect_upstream(pipeline, source_node, selected)
 
     # ------------------------------------------------------------------
     # status
@@ -167,14 +180,14 @@ class Trainer:
                 return info.get('error')
         return None
 
-    def reset_nodes(self, nodes):
+    def reset_nodes(self, pipeline, nodes):
         selected_set = set(self.selected_stages + self.selected_heads)
         affected = set(n for n in nodes if n in selected_set)
 
         queue = list(affected)
         while queue:
             n = queue.pop(0)
-            node = self.pipeline.get_node(n)
+            node = pipeline.get_node(n)
             for downstream in node.output_edges:
                 if downstream in selected_set and downstream not in affected:
                     affected.add(downstream)
@@ -194,33 +207,40 @@ class Trainer:
     # train
     # ------------------------------------------------------------------
 
-    def _reset_serial_stale_nodes(self, node_names):
+    def _reset_serial_stale_nodes(self, pipeline, node_names, logger):
         stale = []
         for name in node_names:
-            current_serial = self.pipeline.nodes[name].serial
+            current_serial = pipeline.nodes[name].serial
             for fold in self.train_folds:
                 info = fold.artifact_stores[0].get_info(name)
                 if info is not None and info.get('node_serial') != current_serial:
                     stale.append(name)
                     break
         if stale:
-            self.reset_nodes(stale)
-            self.logger.info(f"Serial mismatch: reset {len(stale)} node(s): {sorted(stale)}")
+            self.reset_nodes(pipeline, stale)
+            logger.info(f"Serial mismatch: reset {len(stale)} node(s): {sorted(stale)}")
 
-    def train(self, n_jobs=1, gpu_id_list=None):
+    def train(self, pipeline, n_jobs=1, gpu_id_list=None, logger=None):
         """Train all unbuilt selected nodes across all splits.
 
         Stages are trained first (topological order), then Head nodes.
 
         Args:
+            pipeline (Pipeline): Pipeline defining the node graph. Compared
+                against the artifacts already on disk — nodes whose ``serial``
+                no longer matches are reset and retrained automatically.
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
             gpu_id_list (list, optional): GPU IDs for GPU-enabled nodes.
+            logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
         """
         from ._executor import _build_flow_single, _build_flow_multi, _experiment_single, _experiment_multi
         from ._tracker import LoggerExecuteTracker
 
+        logger = resolve_logger(logger)
+
+        pipeline.check_data_compatibility(self.data)
         candidate_nodes = self.selected_stages + self.selected_heads
-        self._reset_serial_stale_nodes(candidate_nodes)
+        self._reset_serial_stale_nodes(pipeline, candidate_nodes, logger)
 
         target_stages = [
             n for n in self.selected_stages
@@ -232,32 +252,32 @@ class Trainer:
         ]
 
         if not target_stages and not target_heads:
-            self.logger.info("No nodes to train")
+            logger.info("No nodes to train")
             return
 
         total = len(self.train_folds) * (len(target_stages) + len(target_heads))
-        tracker = LoggerExecuteTracker(total, n_jobs, self.logger)
+        tracker = LoggerExecuteTracker(total, n_jobs, logger)
         error_nodes = set()
         try:
             if target_stages:
                 if n_jobs > 1:
                     stage_errors = _build_flow_multi(
-                        self.train_folds, self.pipeline, target_stages, n_jobs,
+                        self.train_folds, pipeline, target_stages, n_jobs,
                         gpu_id_list=gpu_id_list, tracker=tracker)
                 else:
                     stage_errors = _build_flow_single(
-                        self.train_folds, self.pipeline, target_stages,
+                        self.train_folds, pipeline, target_stages,
                         gpu_id_list=gpu_id_list, tracker=tracker)
                 error_nodes.update(n for _, _, n in stage_errors)
 
             if target_heads:
                 if n_jobs > 1:
                     head_errors = _experiment_multi(
-                        self.train_folds, self.pipeline, target_heads, n_jobs,
+                        self.train_folds, pipeline, target_heads, n_jobs,
                         gpu_id_list=gpu_id_list, tracker=tracker)
                 else:
                     head_errors = _experiment_single(
-                        self.train_folds, self.pipeline, target_heads,
+                        self.train_folds, pipeline, target_heads,
                         gpu_id_list=gpu_id_list, tracker=tracker)
                 error_nodes.update(n for _, n in head_errors)
         finally:
@@ -266,12 +286,12 @@ class Trainer:
         target_all = target_stages + target_heads
         n_ok = len(target_all) - len(error_nodes)
         if error_nodes:
-            self.logger.info(
+            logger.info(
                 f"Train complete: {n_ok}/{len(target_all)} node(s), "
                 f"{len(error_nodes)} error(s): {sorted(error_nodes)}"
             )
         else:
-            self.logger.info(f"Train complete: {len(target_all)} node(s)")
+            logger.info(f"Train complete: {len(target_all)} node(s)")
 
         self.save()
 
@@ -316,12 +336,13 @@ class Trainer:
     # to_inferencer
     # ------------------------------------------------------------------
 
-    def to_inferencer(self, v=None):
+    def to_inferencer(self, pipeline, v=None):
         """Export trained processors to a standalone :class:`~mllabs.Inferencer`.
 
         All selected nodes must be in ``built`` state.
 
         Args:
+            pipeline (Pipeline): Pipeline defining the node graph.
             v: Output column filter passed to the Inferencer.
 
         Returns:
@@ -344,8 +365,8 @@ class Trainer:
                 objs.append(fold.artifact_stores[0].get_obj(name))
             node_objs[name] = objs
 
-        pipeline = self.pipeline.copy_nodes(self.selected_heads)
-        return Inferencer(pipeline, list(self.selected_stages), list(self.selected_heads),
+        inf_pipeline = pipeline.copy_nodes(self.selected_heads)
+        return Inferencer(inf_pipeline, list(self.selected_stages), list(self.selected_heads),
                           self.get_n_splits(), node_objs, v=v)
 
     # ------------------------------------------------------------------
@@ -368,6 +389,7 @@ class Trainer:
             'name': self.name,
             'splitter': self.splitter,
             'splitter_params': self.splitter_params,
+            'tags': self.tags,
             'selected_stages': self.selected_stages,
             'selected_heads': self.selected_heads,
             'split_indices': split_indices,
@@ -376,20 +398,19 @@ class Trainer:
             pkl.dump(save_data, f)
 
     @classmethod
-    def _load(cls, path, pipeline, data, cache, logger, aug_data=None):
+    def _load(cls, path, data, cache, aug_data=None):
         path = Path(path)
         with open(path / '__trainer.pkl', 'rb') as f:
             save_data = pkl.load(f)
 
         trainer = object.__new__(cls)
         trainer.name = save_data['name']
-        trainer.pipeline = pipeline
         trainer.data = data
         trainer.path = path
         trainer.splitter = save_data['splitter']
         trainer.splitter_params = save_data['splitter_params']
         trainer.cache = cache
-        trainer.logger = logger
+        trainer.tags = save_data.get('tags', [])
         trainer.selected_stages = save_data['selected_stages']
         trainer.selected_heads = save_data['selected_heads']
         trainer.aug_data = wrap(aug_data) if aug_data is not None else None

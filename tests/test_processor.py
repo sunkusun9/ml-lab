@@ -864,7 +864,7 @@ class TestPipelineDesc:
         from mllabs._pipeline import Pipeline
         p = Pipeline()
         p.set_grp('g1', role='stage')
-        p.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, None)]}, method='fit_transform')
+        p.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform')
         return p
 
     # --- 기본값 ---
@@ -884,14 +884,14 @@ class TestPipelineDesc:
         assert p.grps['g1'].desc == 'my group'
 
     def test_set_node_desc(self, pipeline):
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, None)]}, method='fit_transform', desc='my node', exist='replace')
+        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='my node', exist='replace')
         assert pipeline.nodes['n1'].desc == 'my node'
 
     # --- get_attrs에 desc 포함 안 됨 (상속 없음) ---
 
     def test_desc_not_in_get_attrs(self, pipeline):
         pipeline.set_grp('g1', role='stage', desc='group desc', exist='replace')
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, None)]}, method='fit_transform', desc='node desc', exist='replace')
+        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='node desc', exist='replace')
         attrs = pipeline.get_node_attrs('n1')
         assert 'desc' not in attrs
 
@@ -908,7 +908,7 @@ class TestPipelineDesc:
         assert p.grps['g1'].copy().desc == 'group desc'
 
     def test_node_copy_preserves_desc(self, pipeline):
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, None)]}, method='fit_transform', desc='node desc', exist='replace')
+        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='node desc', exist='replace')
         assert pipeline.nodes['n1'].copy().desc == 'node desc'
 
     # --- desc 변경은 affected_nodes에 영향 없음 ---
@@ -925,14 +925,14 @@ class TestPipelineDesc:
         assert pipeline.grps['g1'].desc == 'new'
 
     def test_set_node_desc_only_change_returns_skip(self, pipeline):
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, None)]}, method='fit_transform', desc='old', exist='replace')
-        result = pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, None)]}, method='fit_transform', desc='new')
+        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='old', exist='replace')
+        result = pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='new')
         assert result['result'] == 'skip'
         assert result['affected_nodes'] == []
 
     def test_set_node_desc_only_change_updates_desc(self, pipeline):
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, None)]}, method='fit_transform', desc='old', exist='replace')
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, None)]}, method='fit_transform', desc='new')
+        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='old', exist='replace')
+        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='new')
         assert pipeline.nodes['n1'].desc == 'new'
 
     # --- 모델 속성 변경 시 affected_nodes 정상 동작 확인 ---

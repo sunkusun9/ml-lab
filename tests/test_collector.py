@@ -2,6 +2,7 @@ import pytest
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from collections import namedtuple
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeClassifier
@@ -10,6 +11,8 @@ from sklearn.model_selection import ShuffleSplit, KFold
 from mllabs._pipeline import Pipeline
 from mllabs._experimenter import Experimenter
 from mllabs import Connector, MetricCollector, StackingCollector, ModelAttrCollector, OutputCollector, ProcessCollector
+
+Built = namedtuple('Built', ['e', 'p'])
 
 
 class FailPredictor:
@@ -42,51 +45,54 @@ def sample_data():
 @pytest.fixture
 def built_exp(tmp_path, sample_data):
     p = Pipeline(path=tmp_path / 'pipeline_built')
+    p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
     p.set_grp('scale', role='stage', processor=StandardScaler,
               method='transform', edges={'X': [(None, ['f1', 'f2', 'f3'])]})
     p.set_node('scaler', grp='scale')
     p.set_grp('model', role='head', processor=DecisionTreeClassifier,
               method='predict',
-              edges={'X': [('scaler', None)], 'y': [(None, 'target')]},
+              edges={'X': [('scaler', None)], 'y': [(None, ['target'])]},
               params={'max_depth': 3, 'random_state': 42})
     p.set_node('dt', grp='model')
-    e = p.add_experiment('main', data=sample_data,
-                         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-    e.build()
-    e.exp()
-    return e
+    exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_built',
+                           sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
+    exp_obj.build(p)
+    exp_obj.exp(p)
+    return Built(e=exp_obj, p=p)
 
 
 @pytest.fixture
 def built_exp_inner(tmp_path, sample_data):
     p = Pipeline(path=tmp_path / 'pipeline_inner')
+    p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
     p.set_grp('model', role='head', processor=DecisionTreeClassifier,
               method='predict',
-              edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
+              edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, ['target'])]},
               params={'max_depth': 3, 'random_state': 42})
     p.set_node('dt', grp='model')
-    e = p.add_experiment('main', data=sample_data,
-                         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
-                         sp_v=KFold(n_splits=3, shuffle=True, random_state=42))
-    e.build()
-    e.exp()
-    return e
+    exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_inner',
+                           sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
+                           sp_v=KFold(n_splits=3, shuffle=True, random_state=42))
+    exp_obj.build(p)
+    exp_obj.exp(p)
+    return Built(e=exp_obj, p=p)
 
 
 @pytest.fixture
 def multi_head_exp(tmp_path, sample_data):
     p = Pipeline(path=tmp_path / 'pipeline_multi')
+    p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
     p.set_grp('model', role='head', processor=DecisionTreeClassifier,
               method='predict',
-              edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
+              edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, ['target'])]},
               params={'max_depth': 3, 'random_state': 42})
     p.set_node('dt1', grp='model')
     p.set_node('dt2', grp='model', params={'max_depth': 5})
-    e = p.add_experiment('main', data=sample_data,
-                         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-    e.build()
-    e.exp()
-    return e
+    exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_multi',
+                           sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
+    exp_obj.build(p)
+    exp_obj.exp(p)
+    return Built(e=exp_obj, p=p)
 
 
 class TestConnector:
@@ -117,7 +123,7 @@ class TestConnector:
     def test_match_edges(self):
         edges_req = {'X': [(None, ['f1'])]}
         c = Connector(edges=edges_req)
-        node_attrs = {'name': 'dt', 'edges': {'X': [(None, ['f1']), ('s', None)], 'y': [(None, 'target')]}}
+        node_attrs = {'name': 'dt', 'edges': {'X': [(None, ['f1']), ('s', None)], 'y': [(None, ['target'])]}}
         assert c.match(node_attrs) is True
 
     def test_match_edges_missing_key(self):
@@ -135,13 +141,15 @@ class TestMetricCollector:
     def test_collect_basic(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
         assert mc.has('dt')
 
     def test_get_metric(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
         result = mc.get_metric('dt')
         assert isinstance(result, pd.Series)
         assert result.name == 'dt'
@@ -151,7 +159,8 @@ class TestMetricCollector:
     def test_get_metrics(self, multi_head_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        multi_head_exp.add_collector(mc)
+        multi_head_exp.e.add_collector(mc)
+        multi_head_exp.e.collect(multi_head_exp.p, mc)
         result = mc.get_metrics()
         assert isinstance(result, pd.DataFrame)
         assert 'dt1' in result.index.get_level_values(0)
@@ -160,7 +169,8 @@ class TestMetricCollector:
     def test_get_metrics_with_node_filter(self, multi_head_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        multi_head_exp.add_collector(mc)
+        multi_head_exp.e.add_collector(mc)
+        multi_head_exp.e.collect(multi_head_exp.p, mc)
         result = mc.get_metrics(nodes=['dt1'])
         assert 'dt1' in result.index.get_level_values(0)
         assert 'dt2' not in result.index.get_level_values(0)
@@ -168,14 +178,16 @@ class TestMetricCollector:
     def test_get_metrics_regex(self, multi_head_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        multi_head_exp.add_collector(mc)
+        multi_head_exp.e.add_collector(mc)
+        multi_head_exp.e.collect(multi_head_exp.p, mc)
         result = mc.get_metrics(nodes='dt1')
         assert len(result) > 0
 
     def test_get_metrics_agg(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
         mean, std = mc.get_metrics_agg()
         assert isinstance(mean, pd.DataFrame)
         assert std is None
@@ -183,7 +195,8 @@ class TestMetricCollector:
     def test_get_metrics_agg_with_std(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
         mean, std = mc.get_metrics_agg(include_std=True)
         assert isinstance(mean, pd.DataFrame)
         assert isinstance(std, pd.DataFrame)
@@ -191,49 +204,56 @@ class TestMetricCollector:
     def test_get_metrics_agg_inner_only(self, built_exp_inner):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp_inner.add_collector(mc)
+        built_exp_inner.e.add_collector(mc)
+        built_exp_inner.e.collect(built_exp_inner.p, mc)
         mean, std = mc.get_metrics_agg(inner_fold=True, outer_fold=False)
         assert isinstance(mean, pd.DataFrame)
 
     def test_get_metrics_agg_no_fold(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
         result = mc.get_metrics_agg(inner_fold=False, outer_fold=False)
         assert isinstance(result, pd.DataFrame)
 
     def test_get_metrics_agg_invalid(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
         with pytest.raises(ValueError):
             mc.get_metrics_agg(inner_fold=False, outer_fold=True)
 
     def test_include_train(self, built_exp):
         mc = MetricCollector('acc_train', Connector(), output_var=None,
                              metric_func=accuracy_metric, include_train=True)
-        built_exp.add_collector(mc)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
         result = mc.get_metric('dt')
         assert 'train' in result.index.get_level_values(-1)
 
     def test_inner_split_metrics(self, built_exp_inner):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp_inner.add_collector(mc)
+        built_exp_inner.e.add_collector(mc)
+        built_exp_inner.e.collect(built_exp_inner.p, mc)
         result = mc.get_metric('dt')
         assert len(result) > 2
 
     def test_connector_filter(self, multi_head_exp):
         mc = MetricCollector('acc', Connector(node_query=['dt1']),
                              output_var=None, metric_func=accuracy_metric)
-        multi_head_exp.add_collector(mc)
+        multi_head_exp.e.add_collector(mc)
+        multi_head_exp.e.collect(multi_head_exp.p, mc)
         assert mc.has('dt1')
         assert not mc.has('dt2')
 
     def test_reset_nodes(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
         assert mc.has('dt')
         mc.reset_nodes(['dt'])
         assert not mc.has('dt')
@@ -241,7 +261,8 @@ class TestMetricCollector:
     def test_save_load(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
         loaded = MetricCollector.load(mc.path)
         assert loaded.has('dt')
         result_orig = mc.get_metric('dt')
@@ -251,10 +272,12 @@ class TestMetricCollector:
     def test_ad_hoc_collect(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
         mc2 = MetricCollector('acc2', Connector(), output_var=None,
                               metric_func=dummy_metric)
-        built_exp.add_collector(mc2)
+        built_exp.e.add_collector(mc2)
+        built_exp.e.collect(built_exp.p, mc2)
         assert mc2.has('dt')
         result = mc2.get_metric('dt')
         assert all(v == 0.5 for v in result.values)
@@ -263,61 +286,69 @@ class TestMetricCollector:
 class TestStackingCollector:
     def test_collect_basic(self, built_exp):
         sc = StackingCollector('stk', Connector(), output_var=None)
-        built_exp.add_collector(sc)
+        built_exp.e.add_collector(sc)
+        built_exp.e.collect(built_exp.p, sc)
         assert sc.has_node('dt')
 
     def test_get_dataset(self, built_exp):
         sc = StackingCollector('stk', Connector(
-            edges={'y': [(None, 'target')]}
+            edges={'y': [(None, ['target'])]}
         ), output_var=None)
-        built_exp.add_collector(sc)
+        built_exp.e.add_collector(sc)
+        built_exp.e.collect(built_exp.p, sc)
         ds = sc.get_dataset()
         assert isinstance(ds, pd.DataFrame)
-        assert len(ds) == int(len(built_exp.data.data) * 0.2) * 2 # ShuffleSplit, n_splits = 2, test_size = 0.2
+        assert len(ds) == int(len(built_exp.e.data.data) * 0.2) * 2 # ShuffleSplit, n_splits = 2, test_size = 0.2
         assert 'target' in ds.columns
 
     def test_get_dataset_no_target(self, built_exp):
         sc = StackingCollector('stk', Connector(), output_var=None)
-        built_exp.add_collector(sc)
+        built_exp.e.add_collector(sc)
+        built_exp.e.collect(built_exp.p, sc)
         ds = sc.get_dataset(include_target=False)
         assert isinstance(ds, pd.DataFrame)
         assert 'target' not in ds.columns
 
     def test_get_dataset_multi_nodes(self, multi_head_exp):
         sc = StackingCollector('stk', Connector(
-            edges={'y': [(None, 'target')]}
+            edges={'y': [(None, ['target'])]}
         ), output_var=None)
-        multi_head_exp.add_collector(sc)
+        multi_head_exp.e.add_collector(sc)
+        multi_head_exp.e.collect(multi_head_exp.p, sc)
         ds = sc.get_dataset()
         assert ds.shape[1] > 2
 
     def test_get_dataset_node_filter(self, multi_head_exp):
         sc = StackingCollector('stk', Connector(
-            edges={'y': [(None, 'target')]}
+            edges={'y': [(None, ['target'])]}
         ), output_var=None)
-        multi_head_exp.add_collector(sc)
+        multi_head_exp.e.add_collector(sc)
+        multi_head_exp.e.collect(multi_head_exp.p, sc)
         ds = sc.get_dataset(nodes=['dt1'])
         assert isinstance(ds, pd.DataFrame)
 
     def test_method_mean(self, built_exp_inner):
         sc = StackingCollector('stk_mean', Connector(
-            edges={'y': [(None, 'target')]}
+            edges={'y': [(None, ['target'])]}
         ), output_var=None, method='mean')
-        built_exp_inner.add_collector(sc)
+        built_exp_inner.e.add_collector(sc)
+        built_exp_inner.e.collect(built_exp_inner.p, sc)
         assert sc.has_node('dt')
 
     def test_reset_nodes(self, built_exp):
         sc = StackingCollector('stk', Connector(), output_var=None)
-        built_exp.add_collector(sc)
+        built_exp.e.add_collector(sc)
+        built_exp.e.collect(built_exp.p, sc)
         assert sc.has_node('dt')
         sc.reset_nodes(['dt'])
         assert not sc.has_node('dt')
 
     def test_save_load(self, built_exp):
         sc = StackingCollector('stk', Connector(
-            edges={'y': [(None, 'target')]}
+            edges={'y': [(None, ['target'])]}
         ), output_var=None)
-        built_exp.add_collector(sc)
+        built_exp.e.add_collector(sc)
+        built_exp.e.collect(built_exp.p, sc)
         loaded = StackingCollector.load(sc.path)
         assert loaded.has_node('dt')
         ds_orig = sc.get_dataset()
@@ -326,15 +357,16 @@ class TestStackingCollector:
 
     def test_index_preserved(self, built_exp):
         sc = StackingCollector('stk', Connector(
-            edges={'y': [(None, 'target')]}
+            edges={'y': [(None, ['target'])]}
         ), output_var=None)
-        built_exp.add_collector(sc)
+        built_exp.e.add_collector(sc)
+        built_exp.e.collect(built_exp.p, sc)
         ds = sc.get_dataset()
         all_valid_idx = np.concatenate([
-            built_exp.outer_folds[i].test_idx
-            for i in range(built_exp.get_n_splits())
+            built_exp.e.outer_folds[i].test_idx
+            for i in range(built_exp.e.get_n_splits())
         ])
-        expected_index = built_exp.data.data.index[all_valid_idx]
+        expected_index = built_exp.e.data.data.index[all_valid_idx]
         pd.testing.assert_index_equal(ds.index, expected_index)
 
 
@@ -344,7 +376,8 @@ class TestModelAttrCollector:
         mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
                                 result_key='feature_importances',
                                 adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        built_exp.e.add_collector(mac)
+        built_exp.e.collect(built_exp.p, mac)
         assert mac.has('dt')
 
     def test_get_attr(self, built_exp):
@@ -352,7 +385,8 @@ class TestModelAttrCollector:
         mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
                                 result_key='feature_importances',
                                 adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        built_exp.e.add_collector(mac)
+        built_exp.e.collect(built_exp.p, mac)
         result = mac.get_attr('dt')
         assert isinstance(result, list)
         assert len(result) == 2
@@ -362,7 +396,8 @@ class TestModelAttrCollector:
         mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
                                 result_key='feature_importances',
                                 adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        built_exp.e.add_collector(mac)
+        built_exp.e.collect(built_exp.p, mac)
         result = mac.get_attr('dt', idx=0)
         assert isinstance(result, list)
 
@@ -371,7 +406,8 @@ class TestModelAttrCollector:
         mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
                                 result_key='feature_importances',
                                 adapter=DecisionTreeAdapter())
-        multi_head_exp.add_collector(mac)
+        multi_head_exp.e.add_collector(mac)
+        multi_head_exp.e.collect(multi_head_exp.p, mac)
         result = mac.get_attrs()
         assert 'dt1' in result
         assert 'dt2' in result
@@ -381,7 +417,8 @@ class TestModelAttrCollector:
         mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
                                 result_key='feature_importances',
                                 adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        built_exp.e.add_collector(mac)
+        built_exp.e.collect(built_exp.p, mac)
         result = mac.get_attrs_agg('dt')
         assert isinstance(result, pd.Series)
 
@@ -390,7 +427,8 @@ class TestModelAttrCollector:
         mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
                                 result_key='feature_importances',
                                 adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        built_exp.e.add_collector(mac)
+        built_exp.e.collect(built_exp.p, mac)
         result = mac.get_attrs_agg('dt', agg_inner=True, agg_outer=False)
         assert isinstance(result, pd.DataFrame)
 
@@ -399,7 +437,8 @@ class TestModelAttrCollector:
         mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
                                 result_key='feature_importances',
                                 adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        built_exp.e.add_collector(mac)
+        built_exp.e.collect(built_exp.p, mac)
         with pytest.raises(ValueError):
             mac.get_attrs_agg('dt', agg_inner=False, agg_outer=True)
 
@@ -408,7 +447,8 @@ class TestModelAttrCollector:
         mac = ModelAttrCollector('tree', Connector(processor=DecisionTreeClassifier),
                                 result_key='tree',
                                 adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        built_exp.e.add_collector(mac)
+        built_exp.e.collect(built_exp.p, mac)
         with pytest.raises(ValueError, match='not mergeable'):
             mac.get_attrs_agg('dt')
 
@@ -417,7 +457,8 @@ class TestModelAttrCollector:
         mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
                                 result_key='feature_importances',
                                 adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        built_exp.e.add_collector(mac)
+        built_exp.e.collect(built_exp.p, mac)
         mac.reset_nodes(['dt'])
         assert not mac.has('dt')
 
@@ -426,7 +467,8 @@ class TestModelAttrCollector:
         mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
                                 result_key='feature_importances',
                                 adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        built_exp.e.add_collector(mac)
+        built_exp.e.collect(built_exp.p, mac)
         loaded = ModelAttrCollector.load(mac.path)
         assert loaded.has('dt')
 
@@ -444,12 +486,14 @@ class TestModelAttrCollector:
 class TestOutputCollector:
     def test_collect_basic(self, built_exp):
         oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        built_exp.e.add_collector(oc)
+        built_exp.e.collect(built_exp.p, oc)
         assert oc.has_node('dt')
 
     def test_get_output(self, built_exp):
         oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        built_exp.e.add_collector(oc)
+        built_exp.e.collect(built_exp.p, oc)
         result = oc.get_output('dt', 0, 0)
         print(result)
         assert 'output_test' in result
@@ -458,7 +502,8 @@ class TestOutputCollector:
 
     def test_get_output_structure(self, built_exp):
         oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        built_exp.e.add_collector(oc)
+        built_exp.e.collect(built_exp.p, oc)
         result = oc.get_output('dt', 0, 0)
         assert isinstance(result['output_test'], np.ndarray)
         assert result['output_train'] is None or isinstance(result['output_train'], np.ndarray)
@@ -466,41 +511,47 @@ class TestOutputCollector:
 
     def test_get_outputs(self, built_exp):
         oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        built_exp.e.add_collector(oc)
+        built_exp.e.collect(built_exp.p, oc)
         results = oc.get_outputs('dt')
         assert isinstance(results, dict)
-        assert len(results) == built_exp.get_n_splits() * built_exp.get_n_splits_inner()
+        assert len(results) == built_exp.e.get_n_splits() * built_exp.e.get_n_splits_inner()
         for key in results:
             assert isinstance(key, tuple)
             assert len(key) == 2
 
     def test_get_outputs_inner_split(self, built_exp_inner):
         oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp_inner.add_collector(oc)
+        built_exp_inner.e.add_collector(oc)
+        built_exp_inner.e.collect(built_exp_inner.p, oc)
         results = oc.get_outputs('dt')
-        n_expected = built_exp_inner.get_n_splits() * built_exp_inner.get_n_splits_inner()
+        n_expected = built_exp_inner.e.get_n_splits() * built_exp_inner.e.get_n_splits_inner()
         assert len(results) == n_expected
 
     def test_get_output_not_found(self, built_exp):
         oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        built_exp.e.add_collector(oc)
+        built_exp.e.collect(built_exp.p, oc)
         assert oc.get_output('dt', 99, 99) is None
 
     def test_get_outputs_node_not_found(self, built_exp):
         oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        built_exp.e.add_collector(oc)
+        built_exp.e.collect(built_exp.p, oc)
         assert oc.get_outputs('nonexistent') == {}
 
     def test_reset_nodes(self, built_exp):
         oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        built_exp.e.add_collector(oc)
+        built_exp.e.collect(built_exp.p, oc)
         assert oc.has_node('dt')
         oc.reset_nodes(['dt'])
         assert not oc.has_node('dt')
 
     def test_save_load(self, built_exp):
         oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        built_exp.e.add_collector(oc)
+        built_exp.e.collect(built_exp.p, oc)
         loaded = OutputCollector.load(oc.path)
         assert loaded.has_node('dt')
         result_orig = oc.get_output('dt', 0, 0)
@@ -510,7 +561,8 @@ class TestOutputCollector:
 
     def test_saved_nodes(self, multi_head_exp):
         oc = OutputCollector('out', Connector(), output_var=None)
-        multi_head_exp.add_collector(oc)
+        multi_head_exp.e.add_collector(oc)
+        multi_head_exp.e.collect(multi_head_exp.p, oc)
         saved = oc._get_saved_nodes()
         assert 'dt1' in saved
         assert 'dt2' in saved
@@ -520,17 +572,19 @@ class TestCollectorWithExperimenter:
     def test_collect_skip_existing(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
         metric_before = mc.get_metric('dt').copy()
-        built_exp.collect(mc, exist='skip')
+        built_exp.e.collect(built_exp.p, mc, exist='skip')
         metric_after = mc.get_metric('dt')
         pd.testing.assert_series_equal(metric_before, metric_after)
 
     def test_experimenter_save_load_with_collectors(self, built_exp, sample_data):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
-        path = built_exp.path
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
+        path = built_exp.e.path
 
         loaded = Experimenter.load(path, sample_data)
         assert loaded.get_collector('acc') is not None
@@ -543,9 +597,10 @@ class TestCollectorWithExperimenter:
     def test_reset_nodes_clears_collectors(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None,
                              metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
         assert mc.has('dt')
-        built_exp.reset_nodes(['dt'])
+        built_exp.e.reset_nodes(['dt'])
         assert not mc.has('dt')
 
     def test_multiple_collectors(self, built_exp):
@@ -556,9 +611,12 @@ class TestCollectorWithExperimenter:
         mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
                                 result_key='feature_importances',
                                 adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mc)
-        built_exp.add_collector(oc)
-        built_exp.add_collector(mac)
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
+        built_exp.e.add_collector(oc)
+        built_exp.e.collect(built_exp.p, oc)
+        built_exp.e.add_collector(mac)
+        built_exp.e.collect(built_exp.p, mac)
         assert mc.has('dt')
         assert oc.has_node('dt')
         assert mac.has('dt')
@@ -572,7 +630,8 @@ class TestSHAPCollector:
     def _make_sc(self, exp):
         from mllabs import SHAPCollector
         sc = SHAPCollector('shap', Connector(processor=DecisionTreeClassifier))
-        exp.add_collector(sc)
+        exp.e.add_collector(sc)
+        exp.e.collect(exp.p, sc)
         return sc
 
     def test_collect_basic(self, built_exp):
@@ -671,15 +730,17 @@ class TestCollectorErrorHandling:
     @pytest.fixture
     def pre_exp(self, tmp_path, sample_data):
         p = Pipeline(path=tmp_path / 'pipeline_pre')
+        p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
         p.set_grp('model', role='head', processor=DecisionTreeClassifier,
                   method='predict',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
+                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, ['target'])]},
                   params={'max_depth': 3, 'random_state': 42})
         p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        return e
+        exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_pre',
+                               sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
+        e = exp_obj
+        e.build(p)
+        return Built(e=e, p=p)
 
     def _make_broken_collector(self):
         from mllabs.collector._base import Collector
@@ -692,8 +753,8 @@ class TestCollectorErrorHandling:
 
     def test_exp_warning_contains_traceback(self, pre_exp):
         bc = self._make_broken_collector()
-        pre_exp.add_collector(bc)
-        pre_exp.exp()
+        pre_exp.e.add_collector(bc)
+        pre_exp.e.exp(pre_exp.p)
         w = bc.warnings[0]
         assert 'traceback' in w
         assert 'RuntimeError' in w['traceback']
@@ -702,9 +763,9 @@ class TestCollectorErrorHandling:
     def test_exp_continues_other_collectors_after_error(self, pre_exp):
         bc = self._make_broken_collector()
         mc = MetricCollector('acc', Connector(), output_var=None, metric_func=accuracy_metric)
-        pre_exp.add_collector(bc)
-        pre_exp.add_collector(mc)
-        pre_exp.exp()
+        pre_exp.e.add_collector(bc)
+        pre_exp.e.add_collector(mc)
+        pre_exp.e.exp(pre_exp.p)
         assert mc.has('dt')
         assert len(bc.warnings) > 0
 
@@ -715,25 +776,29 @@ class TestProcessCollector:
 
     def test_collect_basic(self, built_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        built_exp.e.add_collector(pc)
+        built_exp.e.collect(built_exp.p, pc)
         assert pc.has_node('dt')
 
     def test_get_output_shape(self, built_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        built_exp.e.add_collector(pc)
+        built_exp.e.collect(built_exp.p, pc)
         result = pc.get_output()
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_get_output_nodes_none(self, built_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        built_exp.e.add_collector(pc)
+        built_exp.e.collect(built_exp.p, pc)
         result = pc.get_output(nodes=None)
         assert isinstance(result, pd.DataFrame)
 
     def test_get_output_nodes_list(self, multi_head_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        multi_head_exp.add_collector(pc)
+        multi_head_exp.e.add_collector(pc)
+        multi_head_exp.e.collect(multi_head_exp.p, pc)
         result_dt1 = pc.get_output(nodes=['dt1'])
         result_all = pc.get_output(nodes=None)
         assert isinstance(result_dt1, pd.DataFrame)
@@ -741,7 +806,8 @@ class TestProcessCollector:
 
     def test_get_output_nodes_regex(self, multi_head_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        multi_head_exp.add_collector(pc)
+        multi_head_exp.e.add_collector(pc)
+        multi_head_exp.e.collect(multi_head_exp.p, pc)
         result = pc.get_output(nodes='dt1')
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
@@ -749,41 +815,47 @@ class TestProcessCollector:
     def test_with_upstream_stage(self, built_exp, ext_data):
         # built_exp: scaler(stage) -> dt(head), ext_data goes through scaler first
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        built_exp.e.add_collector(pc)
+        built_exp.e.collect(built_exp.p, pc)
         result = pc.get_output()
         assert len(result) == 20
 
     def test_agg_mean(self, built_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data, method='mean')
-        built_exp.add_collector(pc)
+        built_exp.e.add_collector(pc)
+        built_exp.e.collect(built_exp.p, pc)
         result = pc.get_output(agg='mean')
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_agg_mode(self, built_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        built_exp.e.add_collector(pc)
+        built_exp.e.collect(built_exp.p, pc)
         result = pc.get_output(agg='mode')
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_agg_simple(self, built_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data, method='simple')
-        built_exp.add_collector(pc)
+        built_exp.e.add_collector(pc)
+        built_exp.e.collect(built_exp.p, pc)
         result = pc.get_output(agg='simple')
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_with_inner_splits(self, built_exp_inner, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp_inner.add_collector(pc)
+        built_exp_inner.e.add_collector(pc)
+        built_exp_inner.e.collect(built_exp_inner.p, pc)
         result = pc.get_output()
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_multi_head_columns_concat(self, multi_head_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        multi_head_exp.add_collector(pc)
+        multi_head_exp.e.add_collector(pc)
+        multi_head_exp.e.collect(multi_head_exp.p, pc)
         result_all = pc.get_output(nodes=None)
         result_dt1 = pc.get_output(nodes=['dt1'])
         result_dt2 = pc.get_output(nodes=['dt2'])
@@ -791,27 +863,31 @@ class TestProcessCollector:
 
     def test_connector_filter(self, multi_head_exp, ext_data):
         pc = ProcessCollector('proc', Connector(node_query=['dt1']), ext_data=ext_data)
-        multi_head_exp.add_collector(pc)
+        multi_head_exp.e.add_collector(pc)
+        multi_head_exp.e.collect(multi_head_exp.p, pc)
         assert pc.has_node('dt1')
         assert not pc.has_node('dt2')
 
     def test_reset_nodes(self, built_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        built_exp.e.add_collector(pc)
+        built_exp.e.collect(built_exp.p, pc)
         assert pc.has_node('dt')
         pc.reset_nodes(['dt'])
         assert not pc.has_node('dt')
 
     def test_get_saved_nodes(self, multi_head_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        multi_head_exp.add_collector(pc)
+        multi_head_exp.e.add_collector(pc)
+        multi_head_exp.e.collect(multi_head_exp.p, pc)
         saved = pc._get_saved_nodes()
         assert 'dt1' in saved
         assert 'dt2' in saved
 
     def test_save_load(self, built_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        built_exp.e.add_collector(pc)
+        built_exp.e.collect(built_exp.p, pc)
         loaded = ProcessCollector.load(pc.path)
         assert loaded.has_node('dt')
         result_orig = pc.get_output()
@@ -820,40 +896,46 @@ class TestProcessCollector:
 
     def test_invalid_agg(self, built_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        built_exp.e.add_collector(pc)
+        built_exp.e.collect(built_exp.p, pc)
         with pytest.raises(ValueError):
             pc.get_output(agg='invalid')
 
     @pytest.fixture
     def proba_exp(self, tmp_path, sample_data):
         p = Pipeline(path=tmp_path / 'pipeline_proba')
+        p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
         p.set_grp('model', role='head', processor=DecisionTreeClassifier,
                   method='predict_proba',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
+                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, ['target'])]},
                   params={'max_depth': 3, 'random_state': 42})
         p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        e.exp()
-        return e
+        exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_proba',
+                               sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
+        e = exp_obj
+        e.build(p)
+        e.exp(p)
+        return Built(e=e, p=p)
 
     def test_output_var_none_returns_all_columns(self, proba_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data, output_var=None)
-        proba_exp.add_collector(pc)
+        proba_exp.e.add_collector(pc)
+        proba_exp.e.collect(proba_exp.p, pc)
         result = pc.get_output()
         assert result.shape == (20, 2)
 
     def test_output_var_list_selects_column(self, proba_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data, output_var=['dt__target_0'])
-        proba_exp.add_collector(pc)
+        proba_exp.e.add_collector(pc)
+        proba_exp.e.collect(proba_exp.p, pc)
         result = pc.get_output()
         assert list(result.columns) == ['dt__target_0']
         assert result.shape == (20, 1)
 
     def test_output_var_regex_selects_column(self, proba_exp, ext_data):
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data, output_var='dt__target_1')
-        proba_exp.add_collector(pc)
+        proba_exp.e.add_collector(pc)
+        proba_exp.e.collect(proba_exp.p, pc)
         result = pc.get_output()
         assert list(result.columns) == ['dt__target_1']
         assert result.shape == (20, 1)
@@ -865,26 +947,30 @@ class TestFinalizedBeforeCollect:
     @pytest.fixture
     def finalized_exp(self, tmp_path, sample_data):
         p = Pipeline(path=tmp_path / 'pipeline_fin')
+        p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
         p.set_grp('model', role='head', processor=DecisionTreeClassifier,
                   method='predict',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
+                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, ['target'])]},
                   params={'max_depth': 3, 'random_state': 42})
         p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        e.exp()
-        e.finalize('dt')
-        return e
+        exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_fin',
+                               sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
+        e = exp_obj
+        e.build(p)
+        e.exp(p)
+        e.finalize(['dt'])
+        return Built(e=e, p=p)
 
     def test_metric_get_metric_returns_none(self, finalized_exp):
         mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        finalized_exp.add_collector(mc)
+        finalized_exp.e.add_collector(mc)
+        finalized_exp.e.collect(finalized_exp.p, mc)
         assert mc.get_metric('dt') is None
 
     def test_metric_get_metrics_returns_none(self, finalized_exp):
         mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        finalized_exp.add_collector(mc)
+        finalized_exp.e.add_collector(mc)
+        finalized_exp.e.collect(finalized_exp.p, mc)
         assert mc.get_metrics() is None
 
     def test_model_attr_get_attr_returns_none(self, finalized_exp):
@@ -892,7 +978,8 @@ class TestFinalizedBeforeCollect:
         mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
                                  result_key='feature_importances',
                                  adapter=DecisionTreeAdapter())
-        finalized_exp.add_collector(mac)
+        finalized_exp.e.add_collector(mac)
+        finalized_exp.e.collect(finalized_exp.p, mac)
         assert mac.get_attr('dt') is None
 
     def test_model_attr_get_attrs_agg_returns_none(self, finalized_exp):
@@ -900,30 +987,35 @@ class TestFinalizedBeforeCollect:
         mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
                                  result_key='feature_importances',
                                  adapter=DecisionTreeAdapter())
-        finalized_exp.add_collector(mac)
+        finalized_exp.e.add_collector(mac)
+        finalized_exp.e.collect(finalized_exp.p, mac)
         assert mac.get_attrs_agg('dt') is None
 
     def test_output_get_output_returns_none(self, finalized_exp):
         oc = OutputCollector('out', Connector(), output_var=None)
-        finalized_exp.add_collector(oc)
+        finalized_exp.e.add_collector(oc)
+        finalized_exp.e.collect(finalized_exp.p, oc)
         assert oc.get_output('dt', 0, 0) is None
 
     def test_output_get_outputs_returns_empty(self, finalized_exp):
         oc = OutputCollector('out', Connector(), output_var=None)
-        finalized_exp.add_collector(oc)
+        finalized_exp.e.add_collector(oc)
+        finalized_exp.e.collect(finalized_exp.p, oc)
         assert oc.get_outputs('dt') == {}
 
     def test_process_get_output_returns_none(self, finalized_exp, sample_data):
         ext_data = sample_data.iloc[:20].reset_index(drop=True)
         pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        finalized_exp.add_collector(pc)
+        finalized_exp.e.add_collector(pc)
+        finalized_exp.e.collect(finalized_exp.p, pc)
         assert pc.get_output() is None
 
     def test_shap_get_feature_importance_agg_returns_none(self, finalized_exp):
         pytest.importorskip('shap')
         from mllabs import SHAPCollector
         sc = SHAPCollector('shap', Connector(processor=DecisionTreeClassifier))
-        finalized_exp.add_collector(sc)
+        finalized_exp.e.add_collector(sc)
+        finalized_exp.e.collect(finalized_exp.p, sc)
         assert sc.get_feature_importance_agg('dt') is None
 
 
@@ -933,100 +1025,116 @@ class TestGetCollectStatus:
     def not_exp_exp(self, tmp_path, sample_data):
         """Stage built but head exp() not called."""
         p = Pipeline(path=tmp_path / 'pipeline_notexp')
+        p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
         p.set_grp('model', role='head', processor=DecisionTreeClassifier,
                   method='predict',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
+                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, ['target'])]},
                   params={'max_depth': 3, 'random_state': 42})
         p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        return e
+        exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_notexp',
+                               sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
+        e = exp_obj
+        e.build(p)
+        return Built(e=e, p=p)
 
     @pytest.fixture
     def finalized_exp(self, tmp_path, sample_data):
         p = Pipeline(path=tmp_path / 'pipeline_fin2')
+        p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
         p.set_grp('model', role='head', processor=DecisionTreeClassifier,
                   method='predict',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
+                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, ['target'])]},
                   params={'max_depth': 3, 'random_state': 42})
         p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        e.exp()
-        e.finalize('dt')
-        return e
+        exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_fin2',
+                               sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
+        e = exp_obj
+        e.build(p)
+        e.exp(p)
+        e.finalize(['dt'])
+        return Built(e=e, p=p)
 
     @pytest.fixture
     def error_exp(self, tmp_path, sample_data):
         p = Pipeline(path=tmp_path / 'pipeline_err')
+        p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
         p.set_grp('model', role='head', processor=FailPredictor,
                   method='predict',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]})
+                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, ['target'])]})
         p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        e.exp()
-        return e
+        exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_err',
+                               sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
+        e = exp_obj
+        e.build(p)
+        e.exp(p)
+        return Built(e=e, p=p)
 
     def test_status_collected(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        built_exp.add_collector(mc)
-        assert built_exp.get_collect_status(mc)['dt'] == 'collected'
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
+        assert built_exp.e.get_collect_status(built_exp.p, mc)['dt'] == 'collected'
 
     def test_status_not_collected(self, not_exp_exp):
         mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        not_exp_exp.add_collector(mc)
-        assert not_exp_exp.get_collect_status(mc)['dt'] == 'not_collected'
+        not_exp_exp.e.add_collector(mc)
+        not_exp_exp.e.collect(not_exp_exp.p, mc)
+        assert not_exp_exp.e.get_collect_status(not_exp_exp.p, mc)['dt'] == 'not_collected'
 
     def test_status_finalized(self, finalized_exp):
         mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        finalized_exp.add_collector(mc)
-        assert finalized_exp.get_collect_status(mc)['dt'] == 'finalized'
+        finalized_exp.e.add_collector(mc)
+        finalized_exp.e.collect(finalized_exp.p, mc)
+        assert finalized_exp.e.get_collect_status(finalized_exp.p, mc)['dt'] == 'finalized'
 
     def test_status_error(self, error_exp):
         mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        error_exp.add_collector(mc)
-        assert error_exp.get_collect_status(mc)['dt'] == 'error'
+        error_exp.e.add_collector(mc)
+        error_exp.e.collect(error_exp.p, mc)
+        assert error_exp.e.get_collect_status(error_exp.p, mc)['dt'] == 'error'
 
     def test_by_collector_name(self, built_exp):
         mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        built_exp.add_collector(mc)
-        assert built_exp.get_collect_status('acc')['dt'] == 'collected'
+        built_exp.e.add_collector(mc)
+        built_exp.e.collect(built_exp.p, mc)
+        assert built_exp.e.get_collect_status(built_exp.p, 'acc')['dt'] == 'collected'
 
     def test_nodes_filter(self, multi_head_exp):
         mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        multi_head_exp.add_collector(mc)
-        status = multi_head_exp.get_collect_status(mc, nodes=['dt1'])
+        multi_head_exp.e.add_collector(mc)
+        multi_head_exp.e.collect(multi_head_exp.p, mc)
+        status = multi_head_exp.e.get_collect_status(multi_head_exp.p, mc, nodes=['dt1'])
         assert 'dt1' in status
         assert 'dt2' not in status
 
     def test_connector_filter(self, multi_head_exp):
         mc = MetricCollector('acc', Connector(node_query=['dt1']),
                              output_var=None, metric_func=dummy_metric)
-        multi_head_exp.add_collector(mc)
-        status = multi_head_exp.get_collect_status(mc)
+        multi_head_exp.e.add_collector(mc)
+        multi_head_exp.e.collect(multi_head_exp.p, mc)
+        status = multi_head_exp.e.get_collect_status(multi_head_exp.p, mc)
         assert 'dt1' in status
         assert 'dt2' not in status
 
     def test_mixed_status(self, tmp_path, sample_data):
         p = Pipeline(path=tmp_path / 'pipeline_mixed')
+        p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
         p.set_grp('model', role='head', processor=DecisionTreeClassifier,
                   method='predict',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
+                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, ['target'])]},
                   params={'max_depth': 3, 'random_state': 42})
         p.set_node('dt1', grp='model')
         p.set_node('dt2', grp='model', params={'max_depth': 5})
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        e.exp('dt1')
-        e.exp('dt2')
-        e.finalize('dt2')
+        exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_mixed',
+                               sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
+        e = exp_obj
+        e.build(p)
+        e.exp(p, 'dt1')
+        e.exp(p, 'dt2')
+        e.finalize(['dt2'])
         mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
         e.add_collector(mc)
-        status = e.get_collect_status(mc)
+        e.collect(p, mc)
+        status = e.get_collect_status(p, mc)
         assert status['dt1'] == 'collected'
         assert status['dt2'] == 'finalized'

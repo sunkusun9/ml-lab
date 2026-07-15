@@ -4,7 +4,7 @@ from ._logger import BaseLogger, DefaultLogger, ProgressSessionLogger, BaseProgr
 from ._experimenter import Experimenter
 from ._inferencer import Inferencer
 from ._connector import Connector
-from ._pipeline import ColSelector
+from ._pipeline import ColSelector, Pipeline
 from .collector import Collector, MetricCollector, ProbToLabel, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector, ProcessCollector
 from .filter import DataFilter, RandomFilter, IndexFilter
 
