@@ -705,6 +705,32 @@ class Pipeline:
             return True, cycle_edges
         return False, []
 
+    def _check_grp_update_cycles(self, name, old_grp, new_edges, affected_nodes):
+        """Raise ValueError if a group edge update would create a cycle in any
+        affected node's merged edges, rolling ``self.grps[name]`` back to
+        *old_grp* first."""
+        for node_name in affected_nodes:
+            if node_name not in self.nodes:
+                continue
+
+            node = self.nodes[node_name]
+            node.update_attrs()
+            node_attrs = node.get_attrs(self.grps)
+            node_own_edges = node_attrs.get('edges', {})
+
+            final_edges = {k: list(v) for k, v in new_edges.items()}
+            for k, v in node_own_edges.items():
+                if k in final_edges:
+                    final_edges[k].extend(v)
+                else:
+                    final_edges[k] = list(v)
+
+            has_cycle, cycle_edges = self._check_cycle(node_name, final_edges)
+            if has_cycle:
+                cycle_info = ", ".join([f"'{e}'" for e in cycle_edges])
+                self.grps[name] = old_grp
+                raise ValueError(f"Cannot update group '{name}': node '{node_name}' would create cycle through edge(s) {cycle_info}")
+
     def _check_edges(self, edges):
         if edges is None or len(edges) == 0:
             return False
@@ -883,27 +909,7 @@ class Pipeline:
         self.grps[name] = grp
         self._cascade_clear_attrs(name)
         if len(new_edges) > 0 or len(affected_nodes) > 0:
-            for node_name in affected_nodes:
-                if node_name not in self.nodes:
-                    continue
-
-                node = self.nodes[node_name]
-                node.update_attrs()
-                node_attrs = node.get_attrs(self.grps)
-                node_own_edges = node_attrs.get('edges', {})
-
-                final_edges = {k: list(v) for k, v in new_edges.items()}
-                for k, v in node_own_edges.items():
-                    if k in final_edges:
-                        final_edges[k].extend(v)
-                    else:
-                        final_edges[k] = list(v)
-
-                has_cycle, cycle_edges = self._check_cycle(node_name, final_edges)
-                if has_cycle:
-                    cycle_info = ", ".join([f"'{e}'" for e in cycle_edges])
-                    self.grps[name] = old_grp
-                    raise ValueError(f"Cannot update group '{name}': node '{node_name}' would create cycle through edge(s) {cycle_info}")
+            self._check_grp_update_cycles(name, old_grp, new_edges, affected_nodes)
 
             # Clear node attrs cache after cycle check to prevent stale data
             # from being used when nodes are next built.
