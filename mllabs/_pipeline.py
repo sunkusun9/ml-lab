@@ -1,9 +1,8 @@
 import re
 import uuid
 import json
-import pandas as pd
 from pathlib import Path
-from ._describer import desc_pipeline, desc_node
+from ._describer import desc_pipeline, desc_node, compare_nodes
 from .adapter  import get_adapter
 from ._serialize import _ref_to_obj
 from ._pipeline_store import PipelineStore
@@ -1229,9 +1228,6 @@ class Pipeline:
     def compare_nodes(self, nodes):
         """Compare params and X-edges across nodes that share the same processor.
 
-        Nodes are grouped by processor class. Within each group, only columns
-        that differ between nodes are included.
-
         Args:
             nodes (list[str]): Node names to compare.
 
@@ -1240,78 +1236,7 @@ class Pipeline:
             DataFrame index is node names and columns are a MultiIndex of
             ``('params', param_key)`` and ``('X', stage_label)``.
         """
-        attrs_map = {n: self.get_node_attrs(n) for n in nodes}
-
-        groups = {}
-        for name in nodes:
-            proc = attrs_map[name]['processor']
-            proc_name = proc.__name__ if proc is not None else 'None'
-            groups.setdefault(proc_name, []).append(name)
-
-        result = {}
-        for proc_name, group_nodes in groups.items():
-            rows = {name: {} for name in group_nodes}
-
-            # params
-            all_param_keys = sorted({k for n in group_nodes for k in attrs_map[n]['params']})
-            for name in group_nodes:
-                params = attrs_map[name]['params']
-                for k in all_param_keys:
-                    rows[name][('params', k)] = params.get(k, None)
-
-            # edges (X only) - stage node별 변수 비교
-            stage_vars = {}
-            for name in group_nodes:
-                x_entries = attrs_map[name]['edges'].get('X', [])
-                for sn, var_spec in x_entries:
-                    if sn not in stage_vars:
-                        stage_vars[sn] = {}
-                    if name not in stage_vars[sn]:
-                        stage_vars[sn][name] = []
-                    if var_spec is None:
-                        stage_vars[sn][name].append(None)
-                    elif isinstance(var_spec, (list, tuple)):
-                        stage_vars[sn][name].extend(var_spec)
-                    else:
-                        stage_vars[sn][name].append(var_spec)
-
-            for sn, node_vars in stage_vars.items():
-                sn_str = str(sn) if sn is not None else 'DataSource'
-                for name in group_nodes:
-                    if name not in node_vars:
-                        node_vars[name] = []
-
-                repr_map = {}
-                var_sets = {}
-                for name in group_nodes:
-                    s = set()
-                    for v in node_vars[name]:
-                        r = repr(v)
-                        s.add(r)
-                        repr_map[r] = v
-                    var_sets[name] = s
-
-                if len({frozenset(s) for s in var_sets.values()}) <= 1:
-                    continue
-
-                non_empty = [s for s in var_sets.values() if s]
-                common_reprs = set.intersection(*non_empty) if non_empty else set()
-                common_vars = sorted([repr_map[r] for r in common_reprs], key=repr)
-                col_2 = f"{sn_str} [{', '.join(str(v) for v in common_vars)}]" if common_vars else sn_str
-
-                for name in group_nodes:
-                    diff_reprs = var_sets[name] - common_reprs
-                    diff_vars = sorted([repr_map[r] for r in diff_reprs], key=repr)
-                    rows[name][('X', col_2)] = diff_vars if diff_vars else []
-
-            df = pd.DataFrame.from_dict(rows, orient='index')
-            if len(df.columns) > 0:
-                df.columns = pd.MultiIndex.from_tuples(df.columns)
-                diff_cols = [c for c in df.columns if len({repr(v) for v in df[c]}) > 1]
-                df = df[diff_cols]
-            result[proc_name] = df
-
-        return result
+        return compare_nodes(self, nodes)
 
     def desc_node(self, node_name, direction='TD', show_params=False):
         """특정 노드까지의 연결 구조를 Mermaid Markdown으로 반환
