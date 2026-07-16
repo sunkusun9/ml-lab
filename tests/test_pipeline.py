@@ -1352,7 +1352,7 @@ class TestPipelineSQLite:
 
     def test_path_none_no_db(self):
         p = Pipeline()
-        assert p._db_path is None
+        assert p._store is None
 
     def test_copy_no_db(self, tmp_path):
         from sklearn.preprocessing import StandardScaler
@@ -1360,7 +1360,7 @@ class TestPipelineSQLite:
         p.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
                   edges={'X': [(None, ['x1'])]})
         cp = p.copy()
-        assert cp._db_path is None
+        assert cp._store is None
 
     def test_set_grp_persists(self, tmp_path):
         from sklearn.preprocessing import StandardScaler

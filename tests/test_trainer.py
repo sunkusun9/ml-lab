@@ -56,7 +56,7 @@ def sp_v():
 
 def _make_trainer(pipeline, sample_data, splitter, name='t1', path=None):
     if path is None:
-        path = pipeline._db_path.parent / '__trainers' / name
+        path = pipeline._store.db_path.parent / '__trainers' / name
     return Trainer(name=name, data=wrap(sample_data), path=path,
                    splitter=splitter, splitter_params={}, cache=DataCache())
 

@@ -1,12 +1,12 @@
 import re
 import uuid
-import sqlite3
 import json
 import pandas as pd
 from pathlib import Path
 from ._describer import desc_pipeline, desc_node
 from .adapter  import get_adapter
 from ._serialize import _ref_to_obj
+from ._pipeline_store import PipelineStore
 
 
 VAR_TYPES = frozenset({'numerical', 'ordinal', 'nominal', 'text', 'binary', 'datetime'})
@@ -300,112 +300,48 @@ class Pipeline:
     def __init__(self, path=None, name='pipeline'):
         self.grps = {'__datasource__': PipelineGroup('__datasource__', role='datasource')}
         self.nodes = {None: DataSourceNode()}
-        self._db_path = None
+        self._store = None
         self.pipeline_id = str(uuid.uuid4())
 
         if path is not None:
-            db_path = Path(path) / f'{name}.db'
-            self._db_path = db_path
-            if db_path.exists():
+            self._store = PipelineStore(path, name)
+            if self._store.exists():
                 self._load_db()
             else:
-                Path(path).mkdir(parents=True, exist_ok=True)
-                with sqlite3.connect(str(db_path)) as conn:
-                    self._init_db(conn)
-
-    def _init_db(self, conn):
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-            CREATE TABLE IF NOT EXISTS grps (
-                name TEXT PRIMARY KEY,
-                role TEXT NOT NULL,
-                processor TEXT,
-                edges TEXT,
-                method TEXT,
-                parent TEXT,
-                adapter TEXT,
-                params TEXT,
-                desc TEXT
-            );
-            CREATE TABLE IF NOT EXISTS nodes (
-                name TEXT PRIMARY KEY,
-                grp TEXT NOT NULL,
-                processor TEXT,
-                edges TEXT,
-                method TEXT,
-                adapter TEXT,
-                params TEXT,
-                desc TEXT,
-                serial TEXT NOT NULL,
-                tag TEXT DEFAULT '[]' NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS datasource (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                schema TEXT NOT NULL,
-                targets TEXT NOT NULL,
-                serial TEXT NOT NULL
-            );
-        """)
-        ds = self.nodes[None]
-        conn.execute(
-            "INSERT INTO datasource (id, schema, targets, serial) VALUES (1, ?, ?, ?)",
-            (json.dumps(ds.schema), json.dumps(ds.targets), ds.serial)
-        )
-        conn.execute("INSERT INTO meta (key, value) VALUES ('version', '1')")
-        conn.execute("INSERT INTO meta (key, value) VALUES ('pipeline_id', ?)", (self.pipeline_id,))
+                self._store.initialize(self.nodes[None], self.pipeline_id)
 
     def _load_db(self):
-        from ._serialize import deserialize_from_json
-        with sqlite3.connect(str(self._db_path)) as conn:
-            conn.row_factory = sqlite3.Row
+        data = self._store.fetch_all()
 
-            row = conn.execute("SELECT value FROM meta WHERE key = 'pipeline_id'").fetchone()
-            if row:
-                self.pipeline_id = row['value']
+        if data['pipeline_id']:
+            self.pipeline_id = data['pipeline_id']
 
-            row = conn.execute("SELECT * FROM datasource WHERE id = 1").fetchone()
-            if row:
-                ds = DataSourceNode()
-                ds.schema = json.loads(row['schema'])
-                ds.targets = json.loads(row['targets'])
-                ds.serial = row['serial']
-                self.nodes[None] = ds
+        if data['datasource']:
+            ds = DataSourceNode()
+            ds.schema = data['datasource']['schema']
+            ds.targets = data['datasource']['targets']
+            ds.serial = data['datasource']['serial']
+            self.nodes[None] = ds
 
-            self.grps = {'__datasource__': PipelineGroup('__datasource__', role='datasource')}
-            for row in conn.execute("SELECT * FROM grps ORDER BY rowid").fetchall():
-                grp = PipelineGroup(
-                    name=row['name'],
-                    role=row['role'],
-                    processor=deserialize_from_json(row['processor']),
-                    edges=deserialize_from_json(row['edges']) or {},
-                    method=row['method'],
-                    parent=row['parent'],
-                    adapter=deserialize_from_json(row['adapter']),
-                    params=deserialize_from_json(row['params']) or {},
-                    desc=row['desc'],
-                )
-                self.grps[row['name']] = grp
+        self.grps = {'__datasource__': PipelineGroup('__datasource__', role='datasource')}
+        for name, d in data['grps'].items():
+            self.grps[name] = PipelineGroup(
+                name=name, role=d['role'], processor=d['processor'],
+                edges=d['edges'], method=d['method'], parent=d['parent'],
+                adapter=d['adapter'], params=d['params'], desc=d['desc'],
+            )
 
-            self.nodes = {None: self.nodes[None]}
-            for row in conn.execute("SELECT * FROM nodes ORDER BY rowid").fetchall():
-                node = PipelineNode(
-                    name=row['name'],
-                    grp=row['grp'],
-                    processor=deserialize_from_json(row['processor']),
-                    edges=deserialize_from_json(row['edges']) or {},
-                    method=row['method'],
-                    adapter=deserialize_from_json(row['adapter']),
-                    params=deserialize_from_json(row['params']) or {},
-                    desc=row['desc'],
-                    tag=json.loads(row['tag']) if row['tag'] else [],
-                )
-                node.serial = row['serial']
-                self.nodes[row['name']] = node
+        self.nodes = {None: self.nodes[None]}
+        for name, d in data['nodes'].items():
+            node = PipelineNode(
+                name=name, grp=d['grp'], processor=d['processor'],
+                edges=d['edges'], method=d['method'], adapter=d['adapter'],
+                params=d['params'], desc=d['desc'], tag=d['tag'],
+            )
+            node.serial = d['serial']
+            self.nodes[name] = node
 
-            self._rebuild_derived_state()
+        self._rebuild_derived_state()
 
     def _rebuild_derived_state(self):
         """Rebuild grp.children, grp.nodes, and node.output_edges from self.grps/self.nodes.
@@ -444,49 +380,8 @@ class Pipeline:
                             src_node.output_edges.append(name)
 
     def _db_write(self, fn):
-        if self._db_path is None:
-            return
-        with sqlite3.connect(str(self._db_path)) as conn:
-            fn(conn)
-
-    def _write_grp(self, conn, grp):
-        from ._serialize import serialize_to_json
-        conn.execute(
-            "INSERT OR REPLACE INTO grps "
-            "(name, role, processor, edges, method, parent, adapter, params, desc) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (grp.name, grp.role,
-             serialize_to_json(grp.processor) if grp.processor is not None else None,
-             serialize_to_json(grp.edges),
-             grp.method, grp.parent,
-             serialize_to_json(grp.adapter) if grp.adapter is not None else None,
-             serialize_to_json(grp.params),
-             grp.desc)
-        )
-
-    def _write_node(self, conn, node):
-        from ._serialize import serialize_to_json
-        conn.execute(
-            "INSERT OR REPLACE INTO nodes "
-            "(name, grp, processor, edges, method, adapter, params, desc, serial, tag) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (node.name, node.grp,
-             serialize_to_json(node.processor) if node.processor is not None else None,
-             serialize_to_json(node.edges),
-             node.method,
-             serialize_to_json(node.adapter) if node.adapter is not None else None,
-             serialize_to_json(node.params),
-             node.desc,
-             node.serial,
-             json.dumps(node.tag))
-        )
-
-    def _write_datasource(self, conn):
-        ds = self.nodes[None]
-        conn.execute(
-            "INSERT OR REPLACE INTO datasource (id, schema, targets, serial) VALUES (1, ?, ?, ?)",
-            (json.dumps(ds.schema), json.dumps(ds.targets), ds.serial)
-        )
+        if self._store is not None:
+            self._store.execute(fn)
 
     def sync(self):
         """Update in-memory Pipeline state to match the SQLite DB.
@@ -505,10 +400,8 @@ class Pipeline:
         Raises:
             ValueError: If Pipeline has no DB path.
         """
-        if self._db_path is None:
+        if self._store is None:
             raise ValueError("Pipeline has no DB path; cannot sync")
-
-        from ._serialize import deserialize_from_json
 
         changes = {
             'datasource': 'skip',
@@ -516,114 +409,88 @@ class Pipeline:
             'nodes': {'added': [], 'removed': [], 'updated': []},
         }
 
-        with sqlite3.connect(str(self._db_path)) as conn:
-            conn.row_factory = sqlite3.Row
+        data = self._store.fetch_all()
 
-            # datasource
-            row = conn.execute("SELECT * FROM datasource WHERE id = 1").fetchone()
-            if row and row['serial'] != self.nodes[None].serial:
-                ds = self.nodes[None]
-                ds.schema = json.loads(row['schema'])
-                ds.targets = json.loads(row['targets'])
-                ds.serial = row['serial']
-                ds.update_attrs()
-                changes['datasource'] = 'updated'
+        # datasource
+        db_ds = data['datasource']
+        if db_ds and db_ds['serial'] != self.nodes[None].serial:
+            ds = self.nodes[None]
+            ds.schema = db_ds['schema']
+            ds.targets = db_ds['targets']
+            ds.serial = db_ds['serial']
+            ds.update_attrs()
+            changes['datasource'] = 'updated'
 
-            # grps
-            db_grps = {}
-            for row in conn.execute("SELECT * FROM grps ORDER BY rowid").fetchall():
-                db_grps[row['name']] = {
-                    'role': row['role'],
-                    'processor': deserialize_from_json(row['processor']),
-                    'edges': deserialize_from_json(row['edges']) or {},
-                    'method': row['method'],
-                    'parent': row['parent'],
-                    'adapter': deserialize_from_json(row['adapter']),
-                    'params': deserialize_from_json(row['params']) or {},
-                    'desc': row['desc'],
-                }
+        # grps
+        db_grps = data['grps']
+        mem_grp_names = set(self.grps.keys()) - {'__datasource__'}
+        db_grp_names = set(db_grps.keys())
 
-            mem_grp_names = set(self.grps.keys()) - {'__datasource__'}
-            db_grp_names = set(db_grps.keys())
+        for name in mem_grp_names - db_grp_names:
+            del self.grps[name]
+            changes['grps']['removed'].append(name)
 
-            for name in mem_grp_names - db_grp_names:
-                del self.grps[name]
-                changes['grps']['removed'].append(name)
+        for name in db_grp_names - mem_grp_names:
+            d = db_grps[name]
+            self.grps[name] = PipelineGroup(
+                name=name, role=d['role'], processor=d['processor'],
+                edges=d['edges'], method=d['method'], parent=d['parent'],
+                adapter=d['adapter'], params=d['params'], desc=d['desc'],
+            )
+            changes['grps']['added'].append(name)
 
-            for name in db_grp_names - mem_grp_names:
-                d = db_grps[name]
-                self.grps[name] = PipelineGroup(
-                    name=name, role=d['role'], processor=d['processor'],
-                    edges=d['edges'], method=d['method'], parent=d['parent'],
-                    adapter=d['adapter'], params=d['params'], desc=d['desc'],
-                )
-                changes['grps']['added'].append(name)
+        for name in mem_grp_names & db_grp_names:
+            d = db_grps[name]
+            grp = self.grps[name]
+            changed = grp.diff(d['processor'], d['edges'], d['method'],
+                               d['parent'], d['adapter'], d['params'])
+            if changed or grp.role != d['role'] or grp.desc != d['desc']:
+                grp.role = d['role']
+                grp.processor = d['processor']
+                grp.edges = d['edges']
+                grp.method = d['method']
+                grp.parent = d['parent']
+                grp.adapter = d['adapter']
+                grp.params = d['params']
+                grp.desc = d['desc']
+                grp.update_attrs()
+                changes['grps']['updated'].append(name)
 
-            for name in mem_grp_names & db_grp_names:
-                d = db_grps[name]
-                grp = self.grps[name]
-                changed = grp.diff(d['processor'], d['edges'], d['method'],
-                                   d['parent'], d['adapter'], d['params'])
-                if changed or grp.role != d['role'] or grp.desc != d['desc']:
-                    grp.role = d['role']
-                    grp.processor = d['processor']
-                    grp.edges = d['edges']
-                    grp.method = d['method']
-                    grp.parent = d['parent']
-                    grp.adapter = d['adapter']
-                    grp.params = d['params']
-                    grp.desc = d['desc']
-                    grp.update_attrs()
-                    changes['grps']['updated'].append(name)
+        # nodes
+        db_nodes = data['nodes']
+        mem_node_names = set(self.nodes.keys()) - {None}
+        db_node_names = set(db_nodes.keys())
 
-            # nodes
-            db_nodes = {}
-            for row in conn.execute("SELECT * FROM nodes ORDER BY rowid").fetchall():
-                db_nodes[row['name']] = {
-                    'grp': row['grp'],
-                    'processor': deserialize_from_json(row['processor']),
-                    'edges': deserialize_from_json(row['edges']) or {},
-                    'method': row['method'],
-                    'adapter': deserialize_from_json(row['adapter']),
-                    'params': deserialize_from_json(row['params']) or {},
-                    'desc': row['desc'],
-                    'serial': row['serial'],
-                    'tag': json.loads(row['tag']) if row['tag'] else [],
-                }
+        for name in mem_node_names - db_node_names:
+            del self.nodes[name]
+            changes['nodes']['removed'].append(name)
 
-            mem_node_names = set(self.nodes.keys()) - {None}
-            db_node_names = set(db_nodes.keys())
+        for name in db_node_names - mem_node_names:
+            d = db_nodes[name]
+            node = PipelineNode(
+                name=name, grp=d['grp'], processor=d['processor'],
+                edges=d['edges'], method=d['method'], adapter=d['adapter'],
+                params=d['params'], desc=d['desc'], tag=d['tag'],
+            )
+            node.serial = d['serial']
+            self.nodes[name] = node
+            changes['nodes']['added'].append(name)
 
-            for name in mem_node_names - db_node_names:
-                del self.nodes[name]
-                changes['nodes']['removed'].append(name)
-
-            for name in db_node_names - mem_node_names:
-                d = db_nodes[name]
-                node = PipelineNode(
-                    name=name, grp=d['grp'], processor=d['processor'],
-                    edges=d['edges'], method=d['method'], adapter=d['adapter'],
-                    params=d['params'], desc=d['desc'], tag=d['tag'],
-                )
+        for name in mem_node_names & db_node_names:
+            d = db_nodes[name]
+            node = self.nodes[name]
+            if node.serial != d['serial']:
+                node.grp = d['grp']
+                node.processor = d['processor']
+                node.edges = d['edges']
+                node.method = d['method']
+                node.adapter = d['adapter']
+                node.params = d['params']
+                node.desc = d['desc']
+                node.tag = d['tag']
                 node.serial = d['serial']
-                self.nodes[name] = node
-                changes['nodes']['added'].append(name)
-
-            for name in mem_node_names & db_node_names:
-                d = db_nodes[name]
-                node = self.nodes[name]
-                if node.serial != d['serial']:
-                    node.grp = d['grp']
-                    node.processor = d['processor']
-                    node.edges = d['edges']
-                    node.method = d['method']
-                    node.adapter = d['adapter']
-                    node.params = d['params']
-                    node.desc = d['desc']
-                    node.tag = d['tag']
-                    node.serial = d['serial']
-                    node.update_attrs()
-                    changes['nodes']['updated'].append(name)
+                node.update_attrs()
+                changes['nodes']['updated'].append(name)
 
         self._rebuild_derived_state()
 
@@ -670,7 +537,7 @@ class Pipeline:
         ds.update_attrs()
 
         self._bump_serials(self._get_affected_nodes([None]))
-        self._db_write(lambda conn: self._write_datasource(conn))
+        self._db_write(lambda conn: self._store.write_datasource(conn, self.nodes[None]))
         return 'update'
 
     def check_data_compatibility(self, data):
@@ -968,7 +835,7 @@ class Pipeline:
                 self.grps[parent].children.append(name)
 
             self.grps[name] = grp
-            self._db_write(lambda conn: self._write_grp(conn, grp))
+            self._db_write(lambda conn: self._store.write_grp(conn, grp))
             return {
                 "result": "new", "grp": grp, "affected_nodes": list()
             }
@@ -1046,7 +913,7 @@ class Pipeline:
                     self.nodes[node_name].update_attrs()
 
         self._bump_serials(self._get_affected_nodes(affected_nodes))
-        self._db_write(lambda conn: self._write_grp(conn, grp))
+        self._db_write(lambda conn: self._store.write_grp(conn, grp))
 
         return {
             "result": "update", "affected_nodes": affected_nodes, "old_grp": old_grp, "grp": grp
@@ -1083,7 +950,7 @@ class Pipeline:
 
         def _do_rename(conn):
             conn.execute("DELETE FROM grps WHERE name = ?", (name_from,))
-            self._write_grp(conn, grp)
+            self._store.write_grp(conn, grp)
             conn.execute("UPDATE nodes SET grp = ? WHERE grp = ?", (name_to, name_from))
             conn.execute("UPDATE grps SET parent = ? WHERE parent = ?", (name_to, name_from))
         self._db_write(_do_rename)
@@ -1295,7 +1162,7 @@ class Pipeline:
         if is_update:
             self._bump_serials(affected_nodes)
 
-        self._db_write(lambda conn: self._write_node(conn, node))
+        self._db_write(lambda conn: self._store.write_node(conn, node))
 
         return {
             'result': 'update' if is_update else 'new',
