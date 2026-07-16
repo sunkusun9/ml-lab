@@ -389,14 +389,6 @@ class Pipeline:
                 )
                 self.grps[row['name']] = grp
 
-            for name, grp in self.grps.items():
-                if name == '__datasource__':
-                    continue
-                if grp.parent is not None and grp.parent in self.grps:
-                    parent_grp = self.grps[grp.parent]
-                    if name not in parent_grp.children:
-                        parent_grp.children.append(name)
-
             self.nodes = {None: self.nodes[None]}
             for row in conn.execute("SELECT * FROM nodes ORDER BY rowid").fetchall():
                 node = PipelineNode(
@@ -412,19 +404,44 @@ class Pipeline:
                 )
                 node.serial = row['serial']
                 self.nodes[row['name']] = node
-                if row['grp'] in self.grps and row['name'] not in self.grps[row['grp']].nodes:
-                    self.grps[row['grp']].nodes.append(row['name'])
 
-            for name, node in list(self.nodes.items()):
-                if name is None or node.grp not in self.grps:
-                    continue
-                attrs = node.get_attrs(self.grps)
-                for key, edge_list in attrs.get('edges', {}).items():
-                    for src_name, _ in edge_list:
-                        if src_name in self.nodes:
-                            src_node = self.nodes[src_name]
-                            if name not in src_node.output_edges:
-                                src_node.output_edges.append(name)
+            self._rebuild_derived_state()
+
+    def _rebuild_derived_state(self):
+        """Rebuild grp.children, grp.nodes, and node.output_edges from self.grps/self.nodes.
+
+        Called after self.grps/self.nodes have been (re)populated from the DB,
+        whether by a full load or a partial sync.
+        """
+        for name, grp in self.grps.items():
+            if name != '__datasource__':
+                grp.children = []
+                grp.nodes = []
+
+        for name, grp in self.grps.items():
+            if name == '__datasource__':
+                continue
+            if grp.parent and grp.parent in self.grps:
+                if name not in self.grps[grp.parent].children:
+                    self.grps[grp.parent].children.append(name)
+
+        for name, node in self.nodes.items():
+            if name is None:
+                continue
+            node.output_edges = []
+            if node.grp in self.grps and name not in self.grps[node.grp].nodes:
+                self.grps[node.grp].nodes.append(name)
+
+        for name, node in list(self.nodes.items()):
+            if name is None or node.grp not in self.grps:
+                continue
+            attrs = node.get_attrs(self.grps)
+            for key, edge_list in attrs.get('edges', {}).items():
+                for src_name, _ in edge_list:
+                    if src_name in self.nodes:
+                        src_node = self.nodes[src_name]
+                        if name not in src_node.output_edges:
+                            src_node.output_edges.append(name)
 
     def _db_write(self, fn):
         if self._db_path is None:
@@ -608,36 +625,7 @@ class Pipeline:
                     node.update_attrs()
                     changes['nodes']['updated'].append(name)
 
-        # Rebuild derived state
-        for name, grp in self.grps.items():
-            if name != '__datasource__':
-                grp.children = []
-                grp.nodes = []
-
-        for name, grp in self.grps.items():
-            if name == '__datasource__':
-                continue
-            if grp.parent and grp.parent in self.grps:
-                if name not in self.grps[grp.parent].children:
-                    self.grps[grp.parent].children.append(name)
-
-        for name, node in self.nodes.items():
-            if name is None:
-                continue
-            node.output_edges = []
-            if node.grp in self.grps and name not in self.grps[node.grp].nodes:
-                self.grps[node.grp].nodes.append(name)
-
-        for name, node in list(self.nodes.items()):
-            if name is None or node.grp not in self.grps:
-                continue
-            attrs = node.get_attrs(self.grps)
-            for key, edge_list in attrs.get('edges', {}).items():
-                for src_name, _ in edge_list:
-                    if src_name in self.nodes:
-                        src_node = self.nodes[src_name]
-                        if name not in src_node.output_edges:
-                            src_node.output_edges.append(name)
+        self._rebuild_derived_state()
 
         return changes
 
