@@ -20,6 +20,7 @@ from ._cache import DataCache
 from ._pipeline import Pipeline
 from ._node_processor import resolve_columns
 from ._connector import Connector
+from ._run_common import resolve_common_status, find_stale_nodes, filter_node_names_by_tags
 from .collector import Collector, MetricCollector, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector, ProcessCollector
 
 
@@ -285,14 +286,11 @@ class Experimenter():
             ``'built'``, ``'finalized'``, ``'error'``, ``None`` (init),
             or ``'inconsistent'``.
         """
-        statuses = {
+        return resolve_common_status(
             status
             for store in self._all_stores()
             if (status := store.status(node_name)) is not None
-        }
-        if not statuses:
-            return None
-        return statuses.pop() if len(statuses) == 1 else 'inconsistent'
+        )
 
     def finalize(self, nodes):
         """Release memory for built Head nodes (``built`` → ``finalized``).
@@ -392,22 +390,15 @@ class Experimenter():
             v.reset_nodes(nodes)
 
     def _reset_serial_stale_nodes(self, pipeline, node_names):
-        stale = []
-        for name in node_names:
-            current_serial = pipeline.nodes[name].serial
-            node = pipeline.get_node(name)
-            grp = pipeline.get_grp(node.grp)
-            stores = []
+        def stores_for_name(name):
+            grp = pipeline.get_grp(pipeline.get_node(name).grp)
             for outer_fold in self.outer_folds:
-                if grp.role == 'stage':
-                    stores.extend(outer_fold.train_data_flows)
-                else:
-                    stores.extend(outer_fold.artifact_stores)
-            for store in stores:
-                info = store.get_info(name)
-                if info is not None and info.get('node_serial') != current_serial:
-                    stale.append(name)
-                    break
+                yield from (
+                    outer_fold.train_data_flows if grp.role == 'stage'
+                    else outer_fold.artifact_stores
+                )
+
+        stale = find_stale_nodes(pipeline, node_names, stores_for_name)
         if stale:
             self.reset_nodes(stale)
 
@@ -527,10 +518,7 @@ class Experimenter():
         self._check_open()
         pipeline.check_data_compatibility(self.data)
         if nodes is None and self.tags:
-            node_names = {
-                n for n in pipeline.get_node_names(None)
-                if n is not None and set(pipeline.nodes[n].tag) & set(self.tags)
-            }
+            node_names = filter_node_names_by_tags(pipeline, self.tags)
         else:
             node_names = set(pipeline.get_node_names(nodes))
         candidate_nodes = [

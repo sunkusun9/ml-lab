@@ -8,6 +8,7 @@ from ._flow import TrainDataFlow
 from ._store import NodeStore
 from ._node_processor import resolve_columns
 from ._logger import resolve_logger
+from ._run_common import resolve_common_status, find_stale_nodes, filter_node_names_by_tags
 
 
 class TrainFold:
@@ -124,10 +125,7 @@ class Trainer:
         """
         pipeline.check_data_compatibility(self.data)
         if nodes is None and self.tags:
-            node_names = [
-                n for n in pipeline.get_node_names(None)
-                if n is not None and set(pipeline.nodes[n].tag) & set(self.tags)
-            ]
+            node_names = filter_node_names_by_tags(pipeline, self.tags)
         else:
             node_names = [n for n in pipeline.get_node_names(nodes) if n is not None]
 
@@ -166,11 +164,10 @@ class Trainer:
         Returns ``'built'``, ``'finalized'``, ``'error'``, ``None`` (init),
         or ``'inconsistent'`` if folds differ.
         """
-        statuses = {
+        return resolve_common_status(
             fold.artifact_stores[0].status(node_name)
             for fold in self.train_folds
-        }
-        return statuses.pop() if len(statuses) == 1 else 'inconsistent'
+        )
 
     def get_node_error(self, node_name):
         """Return error dict for a node in error state, or None."""
@@ -208,14 +205,10 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def _reset_serial_stale_nodes(self, pipeline, node_names, logger):
-        stale = []
-        for name in node_names:
-            current_serial = pipeline.nodes[name].serial
-            for fold in self.train_folds:
-                info = fold.artifact_stores[0].get_info(name)
-                if info is not None and info.get('node_serial') != current_serial:
-                    stale.append(name)
-                    break
+        stale = find_stale_nodes(
+            pipeline, node_names,
+            lambda name: (fold.artifact_stores[0] for fold in self.train_folds)
+        )
         if stale:
             self.reset_nodes(pipeline, stale)
             logger.info(f"Serial mismatch: reset {len(stale)} node(s): {sorted(stale)}")
