@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 import shutil
 
-from ._node_processor import resolve_columns
+from ._edge_dsl import iter_segments, eval_expr
 from ._store import NodeStore
 
 
@@ -50,22 +50,21 @@ class DataFlow(NodeStore):
 
         Args:
             source_data: DataWrapper — raw input at DataSource level
-            edges: {key: [(node_name, var), ...]}
+            edges: {key: dsl_string}
 
         Returns:
             {key: data} flat dict
         """
         result = {}
-        for key, edge_list in edges.items():
+        for key, dsl_string in edges.items():
             parts = []
-            for node_name, var in edge_list:
+            for node_name, expr in iter_segments(dsl_string):
                 data = self._resolve(source_data, node_name)
                 if data is None:
                     continue
-                if var is not None:
-                    obj = self.node_objs[node_name][0] if node_name in self.node_objs else None
-                    cols = resolve_columns(data, var, processor=obj)
-                    data = data.select_columns(cols)
+                obj = self.node_objs[node_name][0] if node_name in self.node_objs else None
+                cols = eval_expr(expr, data, processor=obj)
+                data = data.select_columns(cols)
                 parts.append(data)
             if parts:
                 result[key] = type(parts[0]).concat(parts, axis=1) if len(parts) > 1 else parts[0]
@@ -134,16 +133,15 @@ class TrainDataFlow(DataFlow):
     
     def _get_data_typ(self, edges, typ):
         result = {}
-        for key, edge_list in edges.items():
+        for key, dsl_string in edges.items():
             parts = []
-            for node_name, var in edge_list:
+            for node_name, expr in iter_segments(dsl_string):
                 data = self._resolve_typ(node_name, typ)
                 if data is None:
                     continue
-                if var is not None:
-                    obj = self.node_objs[node_name][0] if node_name in self.node_objs else None
-                    cols = resolve_columns(data, var, processor=obj)
-                    data = data.select_columns(cols)
+                obj = self.node_objs[node_name][0] if node_name in self.node_objs else None
+                cols = eval_expr(expr, data, processor=obj)
+                data = data.select_columns(cols)
                 parts.append(data)
             if parts:
                 result[key] = type(parts[0]).concat(parts, axis=1) if len(parts) > 1 else parts[0]
@@ -197,22 +195,21 @@ class InferenceDataFlow:
 
         Args:
             source_data: DataWrapper — raw input at DataSource level.
-            edges: {key: [(node_name, var), ...]} — X-only subset.
+            edges: {key: dsl_string} — X-only subset.
 
         Returns:
             {key: data} flat dict.
         """
         result = {}
-        for key, edge_list in edges.items():
+        for key, dsl_string in edges.items():
             parts = []
-            for node_name, var in edge_list:
+            for node_name, expr in iter_segments(dsl_string):
                 data = self._resolve(source_data, node_name)
                 if data is None:
                     continue
-                if var is not None:
-                    obj = self.node_objs.get(node_name)
-                    cols = resolve_columns(data, var, processor=obj)
-                    data = data.select_columns(cols)
+                obj = self.node_objs.get(node_name)
+                cols = eval_expr(expr, data, processor=obj)
+                data = data.select_columns(cols)
                 parts.append(data)
             if parts:
                 result[key] = type(parts[0]).concat(parts, axis=1) if len(parts) > 1 else parts[0]

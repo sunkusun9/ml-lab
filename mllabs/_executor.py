@@ -12,6 +12,28 @@ from ._node_processor import ProgressMonitor
 from ._store import NodeStore
 
 
+def _write_prep_error(node_path, node_attrs, edges, exc):
+    """Data-prep (get_train/get_valid/get_test_data) failed before dispatch to a worker.
+    Persist an 'error' info like a fit-time failure so the node's state stays consistent
+    and the run can move on to the remaining nodes/folds instead of crashing."""
+    error = {
+        'type': type(exc).__name__,
+        'message': str(exc),
+        'traceback': traceback.format_exc(),
+    }
+    info = {
+        'build_id': str(uuid.uuid4()),
+        'node_serial': node_attrs.get('serial'),
+        'fit_time': 0.0,
+        'train_shape': None,
+        'edges': edges,
+        'status': 'error',
+        'error': error,
+    }
+    NodeStore.write_info(node_path, info)
+    return error
+
+
 def _process(node_attrs, train_data, valid_data, fit_process, monitor, gpu_id_list=None, single_worker = True):
     from ._node_processor import TransformProcessor, PredictProcessor
     method = node_attrs['method']
@@ -199,8 +221,9 @@ class ProcessWorker(_mp_ctx.Process):
 # ---------------------------------------------------------------------------
 
 def _is_stage_ready(flow, pipeline, node_name):
-    for edge_list in pipeline.get_node_attrs(node_name)['edges'].values():
-        for src_name, _ in edge_list:
+    from ._edge_dsl import referenced_nodes
+    for dsl_string in pipeline.get_node_attrs(node_name)['edges'].values():
+        for src_name in referenced_nodes(dsl_string):
             if src_name is None:
                 continue
             if pipeline.grps[pipeline.nodes[src_name].grp].role == 'stage':
@@ -250,13 +273,20 @@ def _build_flow_single(outer_folds, pipeline, nodes, gpu_id_list=None, collector
 
         for outer_idx, inner_idx, flow, node_name in ready:
             node_attrs = pipeline.get_node_attrs(node_name)
-            train_data = flow.get_train(node_attrs['edges'])
-            valid_data = flow.get_valid(node_attrs['edges'])
-            test_data = outer_folds[outer_idx].get_test_data(node_attrs['edges'])
-            ext_data = {}
-            for i in [c for c in collectors if c.connector.match(node_attrs)]:
-                if i.get_properties().get('need_process_data', False):
-                    ext_data[i.name] = flow.get_data(i.get_ext_data(), node_attrs['edges'])
+            try:
+                train_data = flow.get_train(node_attrs['edges'])
+                valid_data = flow.get_valid(node_attrs['edges'])
+                test_data = outer_folds[outer_idx].get_test_data(node_attrs['edges'])
+                ext_data = {}
+                for i in [c for c in collectors if c.connector.match(node_attrs)]:
+                    if i.get_properties().get('need_process_data', False):
+                        ext_data[i.name] = flow.get_data(i.get_ext_data(), node_attrs['edges'])
+            except Exception as e:
+                error = _write_prep_error(flow._node_path(node_name), node_attrs, node_attrs['edges'], e)
+                errors[(outer_idx, inner_idx, node_name)] = error
+                if tracker:
+                    tracker.error(0, node_name, outer_idx, inner_idx, error)
+                continue
             fit_process = node_attrs['method'] in ['fit_transform', 'fit_predict']
 
             if tracker:
@@ -346,14 +376,22 @@ def _build_flow_multi(outer_folds, pipeline, nodes, n_jobs, gpu_id_list=None, co
     def _dispatch(outer_idx, inner_idx, node_name, worker_idx):
         flow = flow_map[(outer_idx, inner_idx)]
         node_attrs = pipeline.get_node_attrs(node_name)
-        train_data = flow.get_train(node_attrs['edges'])
-        valid_data = flow.get_valid(node_attrs['edges'])
-        test_data = outer_folds[outer_idx].get_test_data(node_attrs['edges'], inner_idx)
+        try:
+            train_data = flow.get_train(node_attrs['edges'])
+            valid_data = flow.get_valid(node_attrs['edges'])
+            test_data = outer_folds[outer_idx].get_test_data(node_attrs['edges'], inner_idx)
+            ext_data = {}
+            for i in [c for c in collectors if c.connector.match(node_attrs)]:
+                if i.get_properties().get('need_process_data', False):
+                    ext_data[i.name] = flow.get_data(i.get_ext_data(), node_attrs['edges'])
+        except Exception as e:
+            error = _write_prep_error(flow._node_path(node_name), node_attrs, node_attrs['edges'], e)
+            errors[(outer_idx, inner_idx, node_name)] = error
+            if tracker:
+                tracker.error(worker_idx, node_name, outer_idx, inner_idx, error)
+            return
+
         _, conn = workers[worker_idx]
-        ext_data = {}
-        for i in [c for c in collectors if c.connector.match(node_attrs)]:
-            if i.get_properties().get('need_process_data', False):
-                ext_data[i.name] = flow.get_data(i.get_ext_data(), node_attrs['edges'])
         conn.send((flow._node_path(node_name), node_attrs, outer_idx, inner_idx, train_data, valid_data, test_data, ext_data))
         busy[conn] = (outer_idx, inner_idx, node_name)
         (free_gpu if worker_idx < n_gpu else free_cpu).remove(worker_idx)
@@ -455,9 +493,18 @@ def _experiment_single(outer_folds, pipeline, nodes,
                     if tracker:
                         tracker.done(0, node_name, outer_idx, inner_idx, None)
                     continue
-                train_data = train_flow.get_train(edges)
-                valid_data = train_flow.get_valid(edges)
-                test_data = outer_fold.get_test_data(edges)
+                try:
+                    train_data = train_flow.get_train(edges)
+                    valid_data = train_flow.get_valid(edges)
+                    test_data = outer_fold.get_test_data(edges)
+                except Exception as e:
+                    error = _write_prep_error(artifact_store._node_path(node_name), node_attrs, edges, e)
+                    errors[(outer_idx, node_name)] = {**error, 'fold': (outer_idx, inner_idx)}
+                    if tracker:
+                        tracker.error(0, node_name, outer_idx, inner_idx, error)
+                    for c in matched:
+                        c.abort_node(node_name)
+                    continue
 
                 if status == 'built':
                     obj, result, info = artifact_store.get_objs(node_name)
@@ -561,13 +608,26 @@ def _experiment_multi(outer_folds, pipeline, nodes, n_jobs,
         outer_idx, inner_idx, node_name, outer_fold, train_flow, artifact_store = job
         node_attrs = pipeline.get_node_attrs(node_name)
         edges = node_attrs['edges']
-        train_data = train_flow.get_train(edges)
-        valid_data = train_flow.get_valid(edges)
-        test_data = outer_fold.get_test_data(edges)
-        ext_data = {}
-        for i in [c for c in collectors if c.connector.match(node_attrs)]:
-            if i.get_properties().get('need_process_data', False):
-                ext_data[i.name] = train_flow.get_data(i.get_ext_data(), node_attrs['edges'])
+        try:
+            train_data = train_flow.get_train(edges)
+            valid_data = train_flow.get_valid(edges)
+            test_data = outer_fold.get_test_data(edges)
+            ext_data = {}
+            for i in [c for c in collectors if c.connector.match(node_attrs)]:
+                if i.get_properties().get('need_process_data', False):
+                    ext_data[i.name] = train_flow.get_data(i.get_ext_data(), node_attrs['edges'])
+        except Exception as e:
+            error = _write_prep_error(artifact_store._node_path(node_name), node_attrs, edges, e)
+            errors[(outer_idx, node_name)] = error
+            if tracker:
+                tracker.error(worker_idx, node_name, outer_idx, inner_idx, error)
+            for c in collectors:
+                if c.connector.match(node_attrs):
+                    c.abort_node(node_name)
+            gpu_jobs[:] = [j for j in gpu_jobs if not (j[0] == outer_idx and j[2] == node_name)]
+            cpu_jobs[:] = [j for j in cpu_jobs if not (j[0] == outer_idx and j[2] == node_name)]
+            return False
+
         node_path = artifact_store._node_path(node_name)
         _, conn = workers[worker_idx]
         conn.send((node_path, node_attrs, outer_idx, inner_idx, train_data, valid_data, test_data, ext_data))
@@ -575,22 +635,31 @@ def _experiment_multi(outer_folds, pipeline, nodes, n_jobs,
         (free_gpu if worker_idx < n_gpu else free_cpu).remove(worker_idx)
         if tracker:
             tracker.start(worker_idx, node_name, outer_idx, inner_idx)
+        return True
 
     def _try_dispatch():
         for job in list(gpu_jobs):
+            if job not in gpu_jobs:
+                continue
             if free_gpu:
-                _dispatch(job, free_gpu[0]); gpu_jobs.remove(job)
+                _dispatch(job, free_gpu[0])
             elif free_cpu and len(cpu_jobs) == 0 and gpu_fallback_cpu:
-                _dispatch(job, free_cpu[0]); gpu_jobs.remove(job)
+                _dispatch(job, free_cpu[0])
             else:
                 break
+            if job in gpu_jobs:
+                gpu_jobs.remove(job)
         for job in list(cpu_jobs):
+            if job not in cpu_jobs:
+                continue
             if free_cpu:
-                _dispatch(job, free_cpu[0]); cpu_jobs.remove(job)
+                _dispatch(job, free_cpu[0])
             elif free_gpu and len(gpu_jobs) == 0 and cpu_fallback_gpu:
-                _dispatch(job, free_gpu[0]); cpu_jobs.remove(job)
+                _dispatch(job, free_gpu[0])
             else:
                 break
+            if job in cpu_jobs:
+                cpu_jobs.remove(job)
 
     _try_dispatch()
 

@@ -58,15 +58,16 @@ def exp(tmp_path, sample_data, pipeline):
         data=sample_data,
         path=tmp_path / 'exp',
         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
+        pipeline=pipeline,
     )
 
 
 def _setup_full(pipeline):
     pipeline.set_grp('scale', role='stage', processor=StandardScaler,
-                      method='transform', edges={'X': [(None, ['f1', 'f2', 'f3'])]})
+                      method='transform', edges={'X': '{f1, f2, f3}'})
     pipeline.set_node('scaler', grp='scale')
     pipeline.set_grp('model', role='head', processor=DecisionTreeClassifier,
-                      method='predict', edges={'X': [('scaler', None)], 'y': [(None, ['target'])]},
+                      method='predict', edges={'X': 'scaler:(*)', 'y': '{target}'},
                       params={'max_depth': 3, 'random_state': 42})
     pipeline.set_node('dt', grp='model')
 
@@ -76,13 +77,13 @@ class TestBuildFlowMulti:
 
     def test_builds_across_folds_and_reports_errors(self, exp, pipeline):
         pipeline.set_grp('good', role='stage', processor=StandardScaler,
-                          method='transform', edges={'X': [(None, ['f1'])]})
+                          method='transform', edges={'X': '{f1}'})
         pipeline.set_node('good_node', grp='good')
         pipeline.set_grp('bad', role='stage', processor=BadProcessor,
-                          method='transform', edges={'X': [(None, ['f2'])]})
+                          method='transform', edges={'X': '{f2}'})
         pipeline.set_node('bad_node', grp='bad')
 
-        exp.build(pipeline, n_jobs=2)
+        exp.build(n_jobs=2)
 
         assert exp.get_status('good_node') == 'built'
         assert exp.get_status('bad_node') == 'error'
@@ -92,12 +93,86 @@ class TestBuildFlowMulti:
 
     def test_skips_already_built_nodes(self, exp, pipeline):
         _setup_full(pipeline)
-        exp.build(pipeline, n_jobs=2)
+        exp.build(n_jobs=2)
         build_id = exp.outer_folds[0].train_data_flows[0].get_info('scaler')['build_id']
 
-        exp.build(pipeline, n_jobs=2)
+        exp.build(n_jobs=2)
 
         assert exp.outer_folds[0].train_data_flows[0].get_info('scaler')['build_id'] == build_id
+
+
+class TestDataPrepErrors:
+    """get_train/get_valid/get_test_data can themselves raise (e.g. a malformed
+    regex pattern, or edges pick overlapping/duplicate columns) *before* a node
+    ever reaches a worker. This must be reported like a fit-time error (tracker +
+    node status='error') instead of crashing the whole build()/exp() run."""
+
+    # 'src_node:([)' is an intentionally malformed regex ('[' unterminated) —
+    # re.match raises at column-resolution time, before the node ever fits.
+    _BAD_X = "src_node:([)"
+
+    def test_build_single_reports_error_and_continues(self, exp, pipeline):
+        pipeline.set_grp('good', role='stage', processor=StandardScaler,
+                          method='transform', edges={'X': '{f1}'})
+        pipeline.set_node('good_node', grp='good')
+        pipeline.set_grp('src', role='stage', processor=StandardScaler,
+                          method='transform', edges={'X': '{f2}'})
+        pipeline.set_node('src_node', grp='src')
+        pipeline.set_grp('bad', role='stage', processor=StandardScaler,
+                          method='transform', edges={'X': self._BAD_X})
+        pipeline.set_node('bad_node', grp='bad')
+
+        exp.build(n_jobs=1)
+
+        assert exp.get_status('good_node') == 'built'
+        assert exp.get_status('src_node') == 'built'
+        assert exp.get_status('bad_node') == 'error'
+
+    def test_build_multi_reports_error_and_continues(self, exp, pipeline):
+        pipeline.set_grp('good', role='stage', processor=StandardScaler,
+                          method='transform', edges={'X': '{f1}'})
+        pipeline.set_node('good_node', grp='good')
+        pipeline.set_grp('src', role='stage', processor=StandardScaler,
+                          method='transform', edges={'X': '{f2}'})
+        pipeline.set_node('src_node', grp='src')
+        pipeline.set_grp('bad', role='stage', processor=StandardScaler,
+                          method='transform', edges={'X': self._BAD_X})
+        pipeline.set_node('bad_node', grp='bad')
+
+        exp.build(n_jobs=2)
+
+        assert exp.get_status('good_node') == 'built'
+        assert exp.get_status('src_node') == 'built'
+        assert exp.get_status('bad_node') == 'error'
+
+    def test_exp_single_reports_error_and_continues(self, exp, pipeline):
+        _setup_full(pipeline)
+        pipeline.set_grp('bad_model', role='head', processor=DecisionTreeClassifier,
+                          method='predict', edges={'X': "scaler:([)", 'y': '{target}'},
+                          params={'max_depth': 3, 'random_state': 42})
+        pipeline.set_node('bad_dt', grp='bad_model')
+
+        exp.build(n_jobs=1)
+        exp.exp(n_jobs=1)
+
+        assert exp.get_status('dt') == 'built'
+        assert exp.get_status('bad_dt') == 'error'
+
+    def test_exp_multi_reports_error_and_continues(self, exp, pipeline):
+        _setup_full(pipeline)
+        pipeline.set_grp('bad_model', role='head', processor=DecisionTreeClassifier,
+                          method='predict', edges={'X': "scaler:([)", 'y': '{target}'},
+                          params={'max_depth': 3, 'random_state': 42})
+        pipeline.set_node('bad_dt', grp='bad_model')
+
+        exp.build(n_jobs=2)
+        exp.exp(n_jobs=2)
+
+        assert exp.get_status('dt') == 'built'
+        assert exp.get_status('bad_dt') == 'error'
+        for outer_fold in exp.outer_folds:
+            for store in outer_fold.artifact_stores:
+                assert store.status('dt') == 'built'
 
 
 class TestExperimentMulti:
@@ -106,11 +181,11 @@ class TestExperimentMulti:
     def test_runs_head_across_folds_and_reports_errors(self, exp, pipeline):
         _setup_full(pipeline)
         pipeline.set_grp('bad_model', role='head', processor=BadPredictor,
-                          method='predict', edges={'X': [(None, ['f1'])], 'y': [(None, ['target'])]})
+                          method='predict', edges={'X': '{f1}', 'y': '{target}'})
         pipeline.set_node('bad_dt', grp='bad_model')
 
-        exp.build(pipeline, n_jobs=2)
-        exp.exp(pipeline, n_jobs=2)
+        exp.build(n_jobs=2)
+        exp.exp(n_jobs=2)
 
         assert exp.get_status('dt') == 'built'
         assert exp.get_status('bad_dt') == 'error'
@@ -131,9 +206,9 @@ class TestTrainerMulti:
             splitter=KFold(n_splits=2, shuffle=True, random_state=42),
             splitter_params={}, cache=DataCache(),
         )
-        t.select_head(pipeline)
+        t.set_pipeline(pipeline)
 
-        t.train(pipeline, n_jobs=2)
+        t.train(n_jobs=2)
 
         assert t.get_status('scaler') == 'built'
         assert t.get_status('dt') == 'built'

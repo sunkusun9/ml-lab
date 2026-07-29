@@ -3,7 +3,7 @@ import re
 import shutil
 
 from ._base import Collector
-from .._node_processor import resolve_columns
+from .._edge_dsl import parse, eval_expr
 
 
 class OutputCollector(Collector):
@@ -16,7 +16,10 @@ class OutputCollector(Collector):
         self.include_train = include_train
 
     def collect(self, context):
-        cols = resolve_columns(context['output_test'], self.output_var)
+        if self.output_var is None:
+            cols = context['output_test'].get_columns()
+        else:
+            cols = eval_expr(parse(self.output_var), context['output_test'], processor=context['processor'])
         if len(cols) == 0:
             return None
 
@@ -55,6 +58,7 @@ class OutputCollector(Collector):
         return self.has_node(node)
 
     def reset_nodes(self, nodes):
+        super().reset_nodes(nodes)
         for node in nodes:
             p = self.path / node
             if p.exists():

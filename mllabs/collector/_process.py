@@ -5,7 +5,7 @@ import shutil
 import numpy as np
 
 from ._base import Collector
-from .._node_processor import resolve_columns
+from .._edge_dsl import parse, eval_expr
 from .._data_wrapper import wrap
 
 class ProcessCollector(Collector):
@@ -35,7 +35,10 @@ class ProcessCollector(Collector):
         output = context['output_ext']
         if output is None:
             return None
-        cols = resolve_columns(output, self.output_var)
+        if self.output_var is None:
+            cols = output.get_columns()
+        else:
+            cols = eval_expr(parse(self.output_var), output, processor=context['processor'])
         if not cols:
             return None
         return output.select_columns(cols)
@@ -70,8 +73,8 @@ class ProcessCollector(Collector):
         return self.has_node(node)
 
     def reset_nodes(self, nodes):
+        super().reset_nodes(nodes)
         node_set = set(nodes)
-        self._buf = {k: v for k, v in self._buf.items() if k not in node_set}
         self._input_cache = {k: v for k, v in self._input_cache.items() if k[0] not in node_set}
         for node in nodes:
             p = self.path / node

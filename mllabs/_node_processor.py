@@ -1,4 +1,3 @@
-import re
 from .adapter._default import DefaultAdapter
 from collections.abc import Iterable
 
@@ -15,82 +14,12 @@ def _resolve_col_selectors(params, data):
     if not params or data is None:
         return params
     from ._pipeline import ColSelector
+    from ._edge_dsl import parse, eval_expr
     resolved = {}
     for k, v in params.items():
-        resolved[k] = data.get_column_list(v) if isinstance(v, ColSelector) else v
+        resolved[k] = eval_expr(parse(v.dsl_string), data) if isinstance(v, ColSelector) else v
     return resolved
 
-
-def resolve_columns(data, X, y=None, processor=None):
-    """X와 y를 실제 컬럼 리스트로 변환"""
-    columns = data.get_columns()
-
-    # y 처리 (y가 있으면 X에서 제외할 컬럼)
-    y_cols = []
-    if y is not None:
-        if isinstance(y, slice):
-            y_cols = columns[y]
-        elif isinstance(y, list):
-            y_cols = y
-        else:
-            y_cols = [y]
-
-    # X 처리
-    if X is None:
-        # y가 있으면 y를 제외한 모든 컬럼
-        if y is not None:
-            return [col for col in columns if col not in y_cols]
-        else:
-            return columns
-    elif isinstance(X, str):
-        # 정규 표현식 패턴이면 매칭되는 컬럼만 선택
-        return [col for col in columns if re.match(X, col)]
-    elif callable(X):
-        mask = X(columns, processor=processor)
-        return [col for col, keep in zip(columns, mask) if keep]
-    elif isinstance(X, slice):
-        # slice 객체면 컬럼을 슬라이싱
-        return columns[X]
-    elif isinstance(X, tuple):
-        if len(X) == 0:
-            return []
-        head = X[0]
-        if callable(head):
-            mask = head(columns, *X[1:], processor=processor)
-            return [col for col, keep in zip(columns, mask) if keep]
-        elif head == 'cup':
-            seen = set()
-            ret = list()
-            for x in X[1:]:
-                for col in resolve_columns(data, x, processor=processor):
-                    if col not in seen:
-                        seen.add(col)
-                        ret.append(col)
-            return ret
-        elif head == 'cap':
-            sets = [set(resolve_columns(data, x, processor=processor)) for x in X[1:]]
-            if not sets:
-                return []
-            common = sets[0]
-            for s in sets[1:]:
-                common &= s
-            first = resolve_columns(data, X[1], processor=processor)
-            return [col for col in first if col in common]
-        else:
-            raise ValueError(f"tuple의 첫번째 요소가 callable이 아닌 경우 'cup' 또는 'cap'이어야 함: {head}")
-    elif isinstance(X, list):
-        for x in X:
-            if x is None or isinstance(x, list):
-                raise ValueError(f"list 요소에 list나 None은 허용되지 않음: {x}")
-        return X
-    else:
-        # 단일 값이면 리스트로 변환
-        ret = list()
-        for col in columns:
-            if re.match(X, col):
-                ret.append(col)
-                break
-        return ret
 
 class TransformProcessor():
     def __init__(self, name, transformer, adapter = None, params = {}):

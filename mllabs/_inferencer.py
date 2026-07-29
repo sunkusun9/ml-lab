@@ -2,7 +2,7 @@ import pickle as pkl
 from pathlib import Path
 
 from ._data_wrapper import wrap, unwrap
-from ._node_processor import resolve_columns
+from ._edge_dsl import parse, eval_expr
 from ._flow import InferenceDataFlow
 
 
@@ -74,7 +74,7 @@ class Inferencer:
                     continue
                 if self.v is not None:
                     obj = self.node_objs[name][split_idx]
-                    cols = resolve_columns(output, self.v, processor=obj)
+                    cols = eval_expr(parse(self.v), output, processor=obj)
                     output = output.select_columns(cols)
                 head_outputs.append(output)
             if head_outputs:

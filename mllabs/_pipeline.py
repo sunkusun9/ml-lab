@@ -4,24 +4,52 @@ import json
 from pathlib import Path
 from ._describer import desc_pipeline, desc_node, compare_nodes
 from .adapter  import get_adapter
-from ._serialize import _ref_to_obj
+from ._serialize import resolve_processor as _resolve_processor
 from ._pipeline_store import PipelineStore
+from ._edge_dsl import referenced_nodes, validate_edges
 
 
 VAR_TYPES = frozenset({'numerical', 'ordinal', 'nominal', 'text', 'binary', 'datetime'})
 
 
 class ColSelector:
-    def __init__(self, col_type=None, pattern=None):
-        self.col_type = col_type
-        self.pattern = pattern
+    """Deferred column selector for processor params (e.g. ``cat_features``).
+
+    Holds a DSL string only (see ``_edge_dsl``) — resolved against real data
+    at fit time by ``_node_processor._resolve_col_selectors`` via
+    ``eval_expr(parse(dsl_string), data)``, the same lazy-resolution
+    principle as ``edges[key]``.
+    """
+    def __init__(self, dsl_string='*'):
+        self.dsl_string = dsl_string
 
 
-def _resolve_processor(processor):
-    """Resolve a ``"module.ClassName"`` string reference to the actual class."""
-    if isinstance(processor, str):
-        return _ref_to_obj(processor)
-    return processor
+def _combine_edges_value(own, parent_val, key):
+    """Combine a grp/node's own DSL string for *key* with the (already
+    resolved) parent's value for that key.
+
+    A leading ``'+'``/``'-'`` means "continue from the parent"; anything else
+    fully replaces the parent (no inheritance).
+    """
+    if own is None:
+        return parent_val
+    stripped = own.strip()
+    if stripped[:1] in ('+', '-'):
+        if parent_val is None:
+            raise ValueError(
+                f"Edge (key='{key}') uses '+'/'-' continuation but there is no parent value to continue from"
+            )
+        return f"{parent_val} {stripped}"
+    return own
+
+
+def _combine_edges(own_edges, parent_edges):
+    """Combine a full ``{key: str}`` edges dict with its resolved parent's."""
+    parent_edges = parent_edges or {}
+    return {
+        k: _combine_edges_value(own_edges.get(k), parent_edges.get(k), k)
+        for k in set(own_edges) | set(parent_edges)
+    }
 
 
 def _params_equal(a, b):
@@ -92,10 +120,7 @@ class PipelineGroup:
             }
         else:
             parent_attrs = grps[self.parent].get_attrs(grps)
-        edges = self.edges.copy()
-        if parent_attrs['edges'] is not None:
-            for k, v in parent_attrs['edges'].items():
-                edges[k] = edges.get(k, []) + v
+        edges = _combine_edges(self.edges, parent_attrs['edges'])
         params = self.params.copy()
         if parent_attrs['params'] is not None:
             for k, v in parent_attrs['params'].items():
@@ -197,10 +222,7 @@ class PipelineNode:
         if self.attrs is not None:
             return self.attrs
         grp_attrs = grps[self.grp].get_attrs(grps)
-        edges = self.edges.copy()
-        if grp_attrs['edges'] is not None:
-            for k, v in grp_attrs['edges'].items():
-                edges[k] = edges.get(k, []) + v
+        edges = _combine_edges(self.edges, grp_attrs['edges'])
         params = self.params.copy()
         if grp_attrs['params'] is not None:
             for k, v in grp_attrs['params'].items():
@@ -371,8 +393,8 @@ class Pipeline:
             if name is None or node.grp not in self.grps:
                 continue
             attrs = node.get_attrs(self.grps)
-            for key, edge_list in attrs.get('edges', {}).items():
-                for src_name, _ in edge_list:
+            for dsl_string in attrs.get('edges', {}).values():
+                for src_name in referenced_nodes(dsl_string):
                     if src_name in self.nodes:
                         src_node = self.nodes[src_name]
                         if name not in src_node.output_edges:
@@ -624,8 +646,8 @@ class Pipeline:
                 continue
             needed_nodes.add(name)
             attrs = self.nodes[name].get_attrs(self.grps)
-            for edge_list in attrs.get('edges', {}).values():
-                for edge_name, _ in edge_list:
+            for dsl_string in attrs.get('edges', {}).values():
+                for edge_name in referenced_nodes(dsl_string):
                     if edge_name is not None and edge_name not in needed_nodes:
                         queue.append(edge_name)
 
@@ -690,14 +712,10 @@ class Pipeline:
         descendants = self._find_descendants(node_name)
 
         cycle_edges = []
-        for key, edge_list in new_edges.items():
-            for edge_name, _ in edge_list:
-                if edge_name is None:
+        for dsl_string in new_edges.values():
+            for edge_name in referenced_nodes(dsl_string):
+                if edge_name is None or edge_name not in self.nodes:
                     continue
-
-                if edge_name not in self.nodes:
-                    continue
-
                 if edge_name in descendants:
                     cycle_edges.append(edge_name)
 
@@ -705,7 +723,7 @@ class Pipeline:
             return True, cycle_edges
         return False, []
 
-    def _check_grp_update_cycles(self, name, old_grp, new_edges, affected_nodes):
+    def _check_grp_update_cycles(self, name, old_grp, affected_nodes):
         """Raise ValueError if a group edge update would create a cycle in any
         affected node's merged edges, rolling ``self.grps[name]`` back to
         *old_grp* first."""
@@ -713,17 +731,13 @@ class Pipeline:
             if node_name not in self.nodes:
                 continue
 
+            # self.grps[name] already holds the proposed new grp (assigned by the
+            # caller before this check runs), so get_attrs() here already reflects
+            # new_edges merged with the node's own edges — no further combination needed.
             node = self.nodes[node_name]
             node.update_attrs()
             node_attrs = node.get_attrs(self.grps)
-            node_own_edges = node_attrs.get('edges', {})
-
-            final_edges = {k: list(v) for k, v in new_edges.items()}
-            for k, v in node_own_edges.items():
-                if k in final_edges:
-                    final_edges[k].extend(v)
-                else:
-                    final_edges[k] = list(v)
+            final_edges = node_attrs.get('edges', {})
 
             has_cycle, cycle_edges = self._check_cycle(node_name, final_edges)
             if has_cycle:
@@ -731,31 +745,25 @@ class Pipeline:
                 self.grps[name] = old_grp
                 raise ValueError(f"Cannot update group '{name}': node '{node_name}' would create cycle through edge(s) {cycle_info}")
 
-    def _check_edges(self, edges):
+    def _check_edges(self, edges, parent_edges=None):
+        """Validate a raw (not-yet-merged) edges dict.
+
+        Each value must be a DSL string. A leading ``'+'``/``'-'`` continuation
+        is combined with *parent_edges* (the grp's own parent, or the node's
+        grp) before structural validation via ``_edge_dsl.validate_edges`` —
+        syntax and namespace references only, never columns/variables (those
+        are resolved lazily, at process time, against real data).
+        """
         if edges is None or len(edges) == 0:
             return False
-        schema_cols = set(self.datasource.schema.keys())
-        for key, edge_list in edges.items():
-            for name, var_spec in edge_list:
-                if name is None:
-                    if not isinstance(var_spec, list) or not all(isinstance(v, str) for v in var_spec):
-                        raise ValueError(
-                            f"DataSource edge (key='{key}') must specify var_spec as an explicit "
-                            f"list of column names, got {var_spec!r}"
-                        )
-                    if schema_cols:
-                        missing = [v for v in var_spec if v not in schema_cols]
-                        if missing:
-                            raise ValueError(
-                                f"DataSource edge (key='{key}') references column(s) not in "
-                                f"datasource schema: {missing}"
-                            )
-                    continue
-                if name not in self.nodes:
-                    raise ValueError(f"Edge node '{name}' not found")
-                node_grp = self.nodes[name].grp
-                if self.grps[node_grp].role != 'stage':
-                    raise ValueError(f"Edge node '{name}' must be a stage node, got '{self.grps[node_grp].role}'")
+        for key, dsl_string in edges.items():
+            if not isinstance(dsl_string, str):
+                raise ValueError(f"Edge (key='{key}') must be a DSL string, got {type(dsl_string).__name__}")
+            combined = _combine_edges_value(dsl_string, (parent_edges or {}).get(key), key)
+            try:
+                validate_edges(combined, self)
+            except ValueError as e:
+                raise ValueError(f"Edge (key='{key}') is invalid: {e}") from e
         return True
 
     def _get_all_nodes_in_grp(self, grp):
@@ -816,7 +824,7 @@ class Pipeline:
             name (str): Group name. Cannot contain ``__`` or path-invalid chars.
             role (str): ``'stage'`` or ``'head'``. Inherited from parent if omitted.
             processor: Processor class, or ``"module.ClassName"`` string reference.
-            edges (dict): Edge definitions ``{key: [(node_name, var_spec), ...]}``.
+            edges (dict): Edge definitions ``{key: dsl_string}`` (see ``_edge_dsl``).
             method (str): Processor method name (e.g. ``'fit_transform'``).
             parent (str): Parent group name, or ``None``.
             adapter: ModelAdapter instance.
@@ -850,8 +858,10 @@ class Pipeline:
         if role not in ['stage', 'head']:
             raise ValueError(f"Role must be 'stage' or 'head', got '{role}'")
 
+        parent_edges = self.grps[parent].get_attrs(self.grps)['edges'] if parent is not None else None
+
         if name not in self.grps:
-            self._check_edges(edges)
+            self._check_edges(edges, parent_edges)
             grp = PipelineGroup(
                 name, role, processor=processor, edges=edges, method=method, parent=parent, adapter=adapter, params=params, desc=desc
             )
@@ -878,7 +888,7 @@ class Pipeline:
                 ))
                 return {"result": "skip", "grp": old_grp, "affected_nodes": list()}
 
-        self._check_edges(edges)
+        self._check_edges(edges, parent_edges)
         old_grp = self.grps[name]
         if old_grp.role != role:
             raise ValueError(f"Cannot change role of group '{name}': existing '{old_grp.role}', requested '{role}'")
@@ -909,7 +919,7 @@ class Pipeline:
         self.grps[name] = grp
         self._cascade_clear_attrs(name)
         if len(new_edges) > 0 or len(affected_nodes) > 0:
-            self._check_grp_update_cycles(name, old_grp, new_edges, affected_nodes)
+            self._check_grp_update_cycles(name, old_grp, affected_nodes)
 
             # Clear node attrs cache after cycle check to prevent stale data
             # from being used when nodes are next built.
@@ -1044,16 +1054,16 @@ class Pipeline:
 
     def _update_output_edges(self, node_name, old_edges, new_edges):
         if old_edges is not None:
-            for key, edge_list in old_edges.items():
-                for edge_name, _ in edge_list:
+            for dsl_string in old_edges.values():
+                for edge_name in referenced_nodes(dsl_string):
                     if edge_name in self.nodes:
                         parent_node = self.nodes[edge_name]
                         if node_name in parent_node.output_edges:
                             parent_node.output_edges.remove(node_name)
 
         if new_edges is not None:
-            for key, edge_list in new_edges.items():
-                for edge_name, _ in edge_list:
+            for dsl_string in new_edges.values():
+                for edge_name in referenced_nodes(dsl_string):
                     if edge_name in self.nodes:
                         parent_node = self.nodes[edge_name]
                         if node_name not in parent_node.output_edges:
@@ -1068,7 +1078,8 @@ class Pipeline:
             name (str): Node name.
             grp (str): Group the node belongs to.
             processor: Processor class override, or ``"module.ClassName"`` string reference.
-            edges (dict): Additional edge definitions merged on top of the group.
+            edges (dict): Edge definitions ``{key: dsl_string}`` (see ``_edge_dsl``),
+                merged on top of the group.
             method (str): Method name override.
             adapter: ModelAdapter instance override.
             params (dict): Constructor parameter overrides.
@@ -1096,7 +1107,8 @@ class Pipeline:
         if params is None:
             params = {}
 
-        self._check_edges(edges)
+        grp_edges = self.grps[grp].get_attrs(self.grps)['edges']
+        self._check_edges(edges, grp_edges)
 
         is_update = name in self.nodes
         if is_update:

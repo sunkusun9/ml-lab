@@ -64,8 +64,7 @@ class ModelAttrCollector(Collector):
         return self.has_node(node)
 
     def reset_nodes(self, nodes):
-        node_set = set(nodes)
-        self._buf = {k: v for k, v in self._buf.items() if k not in node_set}
+        super().reset_nodes(nodes)
         for node in nodes:
             self._cache.pop(node, None)
             if self.path is not None:

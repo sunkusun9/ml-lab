@@ -5,7 +5,7 @@ import shutil
 import numpy as np
 
 from ._base import Collector
-from .._node_processor import resolve_columns
+from .._edge_dsl import parse, eval_expr
 from .._data_wrapper import DataWrapper
 
 
@@ -49,10 +49,14 @@ class StackingCollector(Collector):
         return np.concatenate(target_list, axis=0), target_columns
 
     def collect(self, context):
-        cols = resolve_columns(context['output_test'], self.output_var)
+        output_test = context['output_test']
+        if self.output_var is None:
+            cols = output_test.get_columns()
+        else:
+            cols = eval_expr(parse(self.output_var), output_test, processor=context['processor'])
         if len(cols) == 0:
             return None
-        return context['output_test'].select_columns(cols)
+        return output_test.select_columns(cols)
 
     def _aggregate(self, iterator):
         if self.method == 'simple':
@@ -97,8 +101,8 @@ class StackingCollector(Collector):
         return self.has_node(node)
 
     def reset_nodes(self, nodes):
+        super().reset_nodes(nodes)
         node_set = set(nodes)
-        self._buf = {k: v for k, v in self._buf.items() if k not in node_set}
         self._outer_buf = {k: v for k, v in self._outer_buf.items() if k not in node_set}
         for node in nodes:
             p = self.path / f'{node}.pkl'

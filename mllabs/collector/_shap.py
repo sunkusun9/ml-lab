@@ -58,6 +58,7 @@ class SHAPCollector(Collector):
         return self.has_node(node)
 
     def reset_nodes(self, nodes):
+        super().reset_nodes(nodes)
         for node in nodes:
             self._cache.pop(node, None)
             if self.path is not None:

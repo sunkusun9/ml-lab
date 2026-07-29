@@ -18,7 +18,6 @@ from ._logger import resolve_logger
 from ._cache import DataCache
 
 from ._pipeline import Pipeline
-from ._node_processor import resolve_columns
 from ._connector import Connector
 from ._run_common import resolve_common_status, find_stale_nodes, filter_node_names_by_tags
 from .collector import Collector, MetricCollector, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector, ProcessCollector
@@ -88,25 +87,28 @@ class Experimenter():
         data_key (str, optional): Identifier verified on :meth:`load` to prevent
             data mismatch.
         cache_maxsize (int): Stage output cache size in bytes. Default 4 GB.
-        tags (list[str], optional): When set, ``exp(pipeline)`` without an
+        tags (list[str], optional): When set, ``exp()`` without an
             explicit ``nodes`` targets only Head nodes whose ``tag`` intersects it.
+        pipeline (Pipeline, optional): Pipeline this experimenter targets.
+            Equivalent to calling :meth:`set_pipeline` after construction.
 
     Attributes:
         cache (DataCache): Shared LRU cache.
         collectors (dict): Registered :class:`~mllabs.collector.Collector` instances.
         status (str): ``'open'`` or ``'closed'``.
+        pipeline (Pipeline): Pipeline set via the constructor or
+            :meth:`set_pipeline`, persisted to ``{path}/pipeline.pkl``.
 
     Note:
-        No Pipeline reference is held between calls. Pass ``pipeline``
-        explicitly to :meth:`build`, :meth:`exp`, and other node-graph-aware
-        methods each time; artifacts are reconciled against it via node
-        ``serial`` comparison on every call.
+        ``build``, ``exp``, ``collect``, and other node-graph-aware methods
+        use ``self.pipeline`` — call :meth:`set_pipeline` first (or pass
+        ``pipeline`` to the constructor).
     """
 
     def __init__(
             self, data, path, data_names = None, sp = ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
             splitter_params=None, title=None, data_key=None, cache_maxsize=4 * 1024 ** 3,
-            aug_data=None, tags=None, _save=True
+            aug_data=None, tags=None, pipeline=None, _save=True
         ):
         self.cache_maxsize = cache_maxsize
         self.tags = list(tags) if tags is not None else []
@@ -161,6 +163,9 @@ class Experimenter():
         ]
         self.collectors = {}
         self.status = "open"
+        self.pipeline = None
+        if pipeline is not None:
+            self.set_pipeline(pipeline)
         if _save:
             self._save()
 
@@ -190,6 +195,31 @@ class Experimenter():
             title=title, data_key=data_key, cache_maxsize=cache_maxsize,aug_data=aug_data
         )
 
+    def set_pipeline(self, pipeline):
+        """Set (or replace) the Pipeline this experimenter targets.
+
+        If a Pipeline was already set, resets any node whose ``serial`` no
+        longer matches the artifacts already on disk before adopting the
+        new pipeline.
+
+        Args:
+            pipeline (Pipeline): Pipeline defining the node graph.
+        """
+        if self.pipeline is not None:
+            all_node_names = [n for n in pipeline.nodes if n is not None]
+            self._reset_serial_stale_nodes(pipeline, all_node_names)
+        self.pipeline = pipeline
+        self._save_pipeline()
+
+    def _require_pipeline(self):
+        if self.pipeline is None:
+            raise RuntimeError("No pipeline set. Call set_pipeline(pipeline) first.")
+        return self.pipeline
+
+    def _save_pipeline(self):
+        with open(self.path / 'pipeline.pkl', 'wb') as f:
+            pkl.dump(self.pipeline, f)
+
     def get_n_splits(self):
         return len(self.outer_folds)
 
@@ -211,7 +241,7 @@ class Experimenter():
         """Register a Collector.
 
         Does not collect from already-built Head nodes — call
-        :meth:`collect` explicitly (with a ``pipeline``) afterward if needed.
+        :meth:`collect` explicitly afterward if needed.
 
         Args:
             collector (Collector): Collector instance to register.
@@ -241,7 +271,8 @@ class Experimenter():
         self._save()
         return collector
 
-    def get_collect_status(self, pipeline, collector, nodes=None):
+    def get_collect_status(self, collector, nodes=None):
+        pipeline = self._require_pipeline()
         if isinstance(collector, str):
             collector = self.collectors[collector]
         all_node_names = pipeline.get_node_names(nodes)
@@ -350,16 +381,13 @@ class Experimenter():
         self._save()
         return finalized_list
 
-    def reopen_exp(self, pipeline):
+    def reopen_exp(self):
         """Reopen a closed experiment and rebuild Stage nodes.
 
         Clears all Stage node objects, sets status back to ``'open'``, then
         calls :meth:`build`.
-
-        Args:
-            pipeline (Pipeline): Pipeline defining the node graph, forwarded
-                to :meth:`build` to rebuild the reset Stage nodes.
         """
+        self._require_pipeline()
         if self.status != "closed":
             raise RuntimeError("")
         for outer_fold in self.outer_folds:
@@ -368,7 +396,7 @@ class Experimenter():
                     if store.status(name) == 'finalized':
                         store.reset_node(name)
         self.status = "open"
-        self.build(pipeline)
+        self.build()
         self._save()
 
     def reset_nodes(self, nodes):
@@ -437,13 +465,14 @@ class Experimenter():
                 errors.append(f"[{n}] {err['type']}: {err['message']}")
         return errors if errors else None
 
-    def build(self, pipeline, nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None):
+    def build(self, nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None):
         """Build Stage nodes.
 
+        Uses ``self.pipeline`` — compared against the artifacts already on
+        disk, nodes whose ``serial`` no longer matches are reset and
+        rebuilt automatically.
+
         Args:
-            pipeline (Pipeline): Pipeline defining the node graph. Compared
-                against the artifacts already on disk — nodes whose ``serial``
-                no longer matches are reset and rebuilt automatically.
             nodes: Node query — ``None`` (all stages), ``list``, or regex ``str``.
             rebuild (bool): If ``True``, rebuild already-built nodes.
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
@@ -454,6 +483,8 @@ class Experimenter():
         from ._tracker import LoggerExecuteTracker
         logger = resolve_logger(logger)
         self._check_open()
+        pipeline = self._require_pipeline()
+        self._save_pipeline()
         pipeline.check_data_compatibility(self.data)
         node_names = set(pipeline.get_node_names(nodes))
         target_nodes = [
@@ -498,13 +529,14 @@ class Experimenter():
         else:
             logger.info(f"Build complete: {len(target_nodes)} node(s)")
 
-    def exp(self, pipeline, nodes=None, finalize=False, n_jobs=1, gpu_id_list=None, logger=None):
+    def exp(self, nodes=None, finalize=False, n_jobs=1, gpu_id_list=None, logger=None):
         """Run Head nodes and invoke all matching Collectors.
 
+        Uses ``self.pipeline`` — compared against the artifacts already on
+        disk, nodes whose ``serial`` no longer matches are reset and rerun
+        automatically.
+
         Args:
-            pipeline (Pipeline): Pipeline defining the node graph. Compared
-                against the artifacts already on disk — nodes whose ``serial``
-                no longer matches are reset and rerun automatically.
             nodes: Node query — ``None`` (all heads matching ``self.tags`` if
                 set, else all heads), ``list``, or regex ``str``.
             finalize (bool): If ``True``, finalize after all folds complete.
@@ -516,6 +548,8 @@ class Experimenter():
         from ._tracker import LoggerExecuteTracker
         logger = resolve_logger(logger)
         self._check_open()
+        pipeline = self._require_pipeline()
+        self._save_pipeline()
         pipeline.check_data_compatibility(self.data)
         if nodes is None and self.tags:
             node_names = filter_node_names_by_tags(pipeline, self.tags)
@@ -560,11 +594,10 @@ class Experimenter():
         else:
             logger.info(f"Exp complete: {len(target_nodes)} node(s)")
 
-    def collect(self, pipeline, collector, nodes=None, exist='skip', logger=None):
+    def collect(self, collector, nodes=None, exist='skip', logger=None):
         """Run a Collector ad-hoc over already-built Head nodes.
 
         Args:
-            pipeline (Pipeline): Pipeline defining the node graph.
             collector (Collector): Collector instance to run.
             nodes: Node query — ``None`` (all heads), ``list``, or regex ``str``.
             exist (str): ``'skip'`` (default) skips nodes already collected.
@@ -576,6 +609,7 @@ class Experimenter():
         from ._executor import _run_collectors
         from ._node_processor import ProgressMonitor
         logger = resolve_logger(logger)
+        pipeline = self._require_pipeline()
 
         node_names = set(pipeline.get_node_names(nodes))
         target_nodes = [
@@ -630,6 +664,31 @@ class Experimenter():
             logger.remove_session(0)
         return collector
 
+    def collect_missing(self, collector=None, nodes=None, logger=None):
+        """Run collect() only for Head nodes still at get_collect_status()=='not_collected'.
+
+        Args:
+            collector: Collector instance, its registered name, or ``None`` (every
+                registered collector).
+            nodes: Node query passed through to ``get_collect_status``/``collect``.
+            logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
+
+        Returns:
+            dict: ``{collector_name: [node_names targeted]}``
+        """
+        collectors = (
+            list(self.collectors.values()) if collector is None
+            else [self.collectors[collector] if isinstance(collector, str) else collector]
+        )
+        result = {}
+        for c in collectors:
+            status = self.get_collect_status(c, nodes)
+            missing = [n for n, s in status.items() if s == 'not_collected']
+            if missing:
+                self.collect(c, nodes=missing, exist='skip', logger=logger)
+            result[c.name] = missing
+        return result
+
     def get_train_data(self, edges, o_idx=0, i_idx=0):
         return self.outer_folds[o_idx].train_data_flows[i_idx].get_train(edges)
 
@@ -639,7 +698,8 @@ class Experimenter():
     def get_test_data(self, edges, o_idx=0, i_idx=0):
         return self.outer_folds[o_idx].get_test_data(edges, i_idx)
 
-    def get_node_info(self, pipeline):
+    def get_node_info(self):
+        pipeline = self._require_pipeline()
         lines = [f"# Experiment Pipeline Summary\n"]
         lines.append(f"- **DataSource**\n")
 
@@ -649,11 +709,9 @@ class Experimenter():
             node = pipeline.get_node(name)
             node_attrs = node.get_attrs(pipeline.grps)
             processor_name = node_attrs['processor'].__name__ if node_attrs['processor'] else 'None'
-            edges_info_parts = []
-            for key, edge_list in node_attrs['edges'].items():
-                edge_strs = [f"{n or 'DataSource'}{f'[{v}]' if v else ''}" for n, v in edge_list]
-                edges_info_parts.append(f"{key}: [{', '.join(edge_strs)}]")
-            edges_info = ", ".join(edges_info_parts)
+            edges_info = ", ".join(
+                f"{key}: {dsl_string}" for key, dsl_string in node_attrs['edges'].items()
+            )
             lines.append(f"## {name}")
             lines.append(f"- **Processor**: {processor_name}")
             lines.append(f"- **Method**: {node_attrs['method']}")
@@ -745,6 +803,11 @@ class Experimenter():
         exp.exp_id = save_data['exp_id']
         exp.tags = save_data.get('tags', [])
         exp.status = save_data['status']
+
+        pipeline_path = filepath / 'pipeline.pkl'
+        if pipeline_path.exists():
+            with open(pipeline_path, 'rb') as f:
+                exp.pipeline = pkl.load(f)
 
         # Collector 복원
         collector_keys = save_data.get('collector_keys', {})

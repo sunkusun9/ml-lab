@@ -28,10 +28,10 @@ def p():
 def sp():
     p = Pipeline()
     p.set_grp('stage1', role='stage', processor=DummyStage, method='transform',
-              edges={'X': [(None, ['x1'])]})
+              edges={'X': '{x1}'})
     p.set_node('s1', grp='stage1')
     p.set_grp('head1', role='head', processor=DummyHead, method='predict',
-              edges={'X': [(None, ['x1'])], 'y': [(None, ['target'])]})
+              edges={'X': '{x1}', 'y': '{target}'})
     p.set_node('h1', grp='head1')
     return p
 
@@ -121,7 +121,7 @@ class TestSetGrp:
     def test_replace_affected_nodes_with_group_edges(self, p):
         # Control: group has edges → affected_nodes should include group nodes (works before fix)
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         r = p.set_grp('g1', role='stage', processor=AnotherProcessor, exist='replace')
         assert 'n1' in r['affected_nodes']
@@ -129,7 +129,7 @@ class TestSetGrp:
     def test_replace_affected_nodes_without_group_edges(self, p):
         # Bug: group has no edges, node has own edges → affected_nodes incorrectly empty
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform')
-        p.set_node('n1', grp='g1', edges={'X': [(None, ['x1'])]})
+        p.set_node('n1', grp='g1', edges={'X': '{x1}'})
         r = p.set_grp('g1', role='stage', processor=AnotherProcessor, exist='replace')
         assert 'n1' in r['affected_nodes']
 
@@ -137,18 +137,18 @@ class TestSetGrp:
         # Bug: parent group has no edges, child group has nodes → parent update misses child nodes
         p.set_grp('parent', role='stage')
         p.set_grp('child', role='stage', parent='parent', processor=DummyStage,
-                  method='transform', edges={'X': [(None, ['x1'])]})
+                  method='transform', edges={'X': '{x1}'})
         p.set_node('n1', grp='child')
         r = p.set_grp('parent', role='stage', params={'a': 1}, exist='replace')
         assert 'n1' in r['affected_nodes']
 
     def test_with_all_attrs(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage,
-                  edges={'X': [(None, ['x1'])]}, method='transform',
+                  edges={'X': '{x1}'}, method='transform',
                   params={'n': 10})
         g = p.grps['g1']
         assert g.processor == DummyStage
-        assert g.edges == {'X': [(None, ['x1'])]}
+        assert g.edges == {'X': '{x1}'}
         assert g.method == 'transform'
         assert g.params == {'n': 10}
 
@@ -156,7 +156,7 @@ class TestSetGrp:
 class TestSetNode:
     def test_new_node(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         r = p.set_node('n1', grp='g1')
         assert r['result'] == 'new'
         assert 'n1' in p.nodes
@@ -172,12 +172,12 @@ class TestSetNode:
             p.set_node('g1', grp='g1')
 
     def test_processor_required(self, p):
-        p.set_grp('g1', role='stage', method='transform', edges={'X': [(None, ['x1'])]})
+        p.set_grp('g1', role='stage', method='transform', edges={'X': '{x1}'})
         with pytest.raises(ValueError, match='processor'):
             p.set_node('n1', grp='g1')
 
     def test_method_required(self, p):
-        p.set_grp('g1', role='stage', processor=DummyStage, edges={'X': [(None, ['x1'])]})
+        p.set_grp('g1', role='stage', processor=DummyStage, edges={'X': '{x1}'})
         with pytest.raises(ValueError, match='method'):
             p.set_node('n1', grp='g1')
 
@@ -188,7 +188,7 @@ class TestSetNode:
 
     def test_output_edges_updated(self, sp):
         sp.set_grp('stage2', role='stage', processor=DummyStage, method='transform',
-                   edges={'X': [('s1', None)]})
+                   edges={'X': 's1:(*)'})
         sp.set_node('s2', grp='stage2')
         assert 's2' in sp.nodes['s1'].output_edges
 
@@ -206,9 +206,9 @@ class TestSetNode:
 
     def test_replace_changes_group(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         p.set_node('n1', grp='g2', exist='replace')
         assert 'n1' not in p.grps['g1'].nodes
@@ -217,39 +217,39 @@ class TestSetNode:
 
     def test_replace_returns_affected_nodes(self, sp):
         sp.set_grp('stage2', role='stage', processor=DummyStage, method='transform',
-                   edges={'X': [('s1', None)]})
+                   edges={'X': 's1:(*)'})
         sp.set_node('s2', grp='stage2')
         r = sp.set_node('s1', grp='stage1', exist='replace')
         assert 's2' in r['affected_nodes']
 
     def test_replace_preserves_output_edges(self, sp):
         sp.set_grp('stage2', role='stage', processor=DummyStage, method='transform',
-                   edges={'X': [('s1', None)]})
+                   edges={'X': 's1:(*)'})
         sp.set_node('s2', grp='stage2')
         sp.set_node('s1', grp='stage1', exist='replace')
         assert 's2' in sp.nodes['s1'].output_edges
 
     def test_with_node_level_params(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]}, params={'a': 1})
+                  edges={'X': '{x1}'}, params={'a': 1})
         p.set_node('n1', grp='g1', params={'b': 2})
         assert p.nodes['n1'].params == {'b': 2}
 
     def test_tag_default_empty(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         assert p.nodes['n1'].tag == []
 
     def test_tag_set_on_creation(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1', tag=['cv', 'holdout'])
         assert p.nodes['n1'].tag == ['cv', 'holdout']
 
     def test_tag_change_alone_no_serial_bump(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         serial_before = p.nodes['n1'].serial
         r = p.set_node('n1', grp='g1', tag=['new_tag'])
@@ -258,7 +258,7 @@ class TestSetNode:
 
     def test_tag_updated_in_diff_skip_path(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1', tag=['old'])
         p.set_node('n1', grp='g1', tag=['new'])
         assert p.nodes['n1'].tag == ['new']
@@ -267,26 +267,26 @@ class TestSetNode:
 class TestProcessorStringRef:
     def test_set_grp_resolves_string(self, p):
         p.set_grp('g1', role='stage', processor='sklearn.preprocessing.StandardScaler',
-                  method='transform', edges={'X': [(None, ['x1'])]})
+                  method='transform', edges={'X': '{x1}'})
         assert p.grps['g1'].processor is StandardScaler
 
     def test_set_node_resolves_string(self, p):
         p.set_grp('g1', role='stage', processor=StandardScaler,
-                  method='transform', edges={'X': [(None, ['x1'])]})
+                  method='transform', edges={'X': '{x1}'})
         p.set_node('n1', grp='g1', processor='sklearn.tree.DecisionTreeClassifier')
         assert p.nodes['n1'].processor is DecisionTreeClassifier
 
     def test_string_and_class_equivalent_for_diff(self, p):
         p.set_grp('g1', role='stage', processor=StandardScaler,
-                  method='transform', edges={'X': [(None, ['x1'])]})
+                  method='transform', edges={'X': '{x1}'})
         r = p.set_grp('g1', role='stage', processor='sklearn.preprocessing.StandardScaler',
-                       method='transform', edges={'X': [(None, ['x1'])]})
+                       method='transform', edges={'X': '{x1}'})
         assert r['result'] == 'skip'
 
     def test_invalid_string_raises(self, p):
         with pytest.raises(Exception):
             p.set_grp('g1', role='stage', processor='not.a.real.module.Thing',
-                       method='transform', edges={'X': [(None, ['x1'])]})
+                       method='transform', edges={'X': '{x1}'})
 
 
 class TestAddRemoveTag:
@@ -346,7 +346,7 @@ class TestAddRemoveTag:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         p.add_tag('n1', 'cv', 'holdout')
         p.remove_tag('n1', 'holdout')
@@ -355,11 +355,29 @@ class TestAddRemoveTag:
 
 
 class TestGroupHierarchy:
-    def test_edges_extend(self, p):
-        p.set_grp('parent', role='stage', edges={'X': [(None, ['a'])]})
-        p.set_grp('child', role='stage', parent='parent', edges={'X': [(None, ['b'])]})
+    def test_edges_full_override_by_default(self, p):
+        p.set_grp('parent', role='stage', edges={'X': '{a}'})
+        p.set_grp('child', role='stage', parent='parent', edges={'X': '{b}'})
         attrs = p.grps['child'].get_attrs(p.grps)
-        assert attrs['edges']['X'] == [(None, ['b']), (None, ['a'])]
+        assert attrs['edges']['X'] == '{b}'
+
+    def test_edges_plus_continues_from_parent(self, p):
+        p.set_grp('parent', role='stage', edges={'X': '{a}'})
+        p.set_grp('child', role='stage', parent='parent', edges={'X': '+ {b}'})
+        attrs = p.grps['child'].get_attrs(p.grps)
+        assert attrs['edges']['X'] == '{a} + {b}'
+
+    def test_edges_minus_continues_from_parent(self, p):
+        p.set_datasource({'a': 'numerical', 'b': 'numerical'})
+        p.set_grp('parent', role='stage', edges={'X': '{a, b}'})
+        p.set_grp('child', role='stage', parent='parent', edges={'X': '- {b}'})
+        attrs = p.grps['child'].get_attrs(p.grps)
+        assert attrs['edges']['X'] == '{a, b} - {b}'
+
+    def test_edges_plus_without_parent_value_raises(self, p):
+        p.set_grp('parent', role='stage')
+        with pytest.raises(ValueError, match='no parent value'):
+            p.set_grp('child', role='stage', parent='parent', edges={'X': '+ {b}'})
 
     def test_params_no_override(self, p):
         p.set_grp('parent', role='stage', params={'a': 1, 'b': 2})
@@ -386,16 +404,16 @@ class TestGroupHierarchy:
         assert attrs['method'] == 'transform'
 
     def test_three_level_hierarchy(self, p):
-        p.set_grp('gp', role='stage', processor=DummyStage, edges={'X': [(None, ['a'])]},
+        p.set_grp('gp', role='stage', processor=DummyStage, edges={'X': '{a}'},
                   params={'x': 1})
         p.set_grp('par', role='stage', parent='gp', method='transform',
-                  edges={'X': [(None, ['b'])]}, params={'y': 2})
+                  edges={'X': '+ {b}'}, params={'y': 2})
         p.set_grp('child', role='stage', parent='par',
-                  edges={'X': [(None, ['c'])]}, params={'z': 3})
+                  edges={'X': '+ {c}'}, params={'z': 3})
         attrs = p.grps['child'].get_attrs(p.grps)
         assert attrs['processor'] == DummyStage
         assert attrs['method'] == 'transform'
-        assert attrs['edges']['X'] == [(None, ['c']), (None, ['b']), (None, ['a'])]
+        assert attrs['edges']['X'] == '{a} + {b} + {c}'
         assert attrs['params'] == {'x': 1, 'y': 2, 'z': 3}
 
     def test_attrs_caching(self, p):
@@ -415,7 +433,7 @@ class TestGroupHierarchy:
 class TestNodeAttrs:
     def test_merges_from_group(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]}, params={'a': 1})
+                  edges={'X': '{x1}'}, params={'a': 1})
         p.set_node('n1', grp='g1')
         attrs = p.get_node_attrs('n1')
         assert attrs['processor'] == DummyStage
@@ -424,35 +442,55 @@ class TestNodeAttrs:
 
     def test_node_overrides_processor(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1', processor=AnotherProcessor)
         attrs = p.get_node_attrs('n1')
         assert attrs['processor'] == AnotherProcessor
 
-    def test_node_edges_extend_group(self, p):
+    def test_node_edges_full_override_by_default(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['a'])]})
-        p.set_node('n1', grp='g1', edges={'X': [(None, ['b'])]})
+                  edges={'X': '{a}'})
+        p.set_node('n1', grp='g1', edges={'X': '{b}'})
         attrs = p.get_node_attrs('n1')
-        assert attrs['edges']['X'] == [(None, ['b']), (None, ['a'])]
+        assert attrs['edges']['X'] == '{b}'
+
+    def test_node_edges_plus_continues_from_group(self, p):
+        p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
+                  edges={'X': '{a}'})
+        p.set_node('n1', grp='g1', edges={'X': '+ {b}'})
+        attrs = p.get_node_attrs('n1')
+        assert attrs['edges']['X'] == '{a} + {b}'
+
+    def test_node_edges_minus_continues_from_group(self, p):
+        p.set_datasource({'a': 'numerical', 'b': 'numerical'})
+        p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
+                  edges={'X': '{a, b}'})
+        p.set_node('n1', grp='g1', edges={'X': '- {b}'})
+        attrs = p.get_node_attrs('n1')
+        assert attrs['edges']['X'] == '{a, b} - {b}'
+
+    def test_node_edges_plus_without_group_value_raises(self, p):
+        p.set_grp('g1', role='stage', processor=DummyStage, method='transform')
+        with pytest.raises(ValueError, match='no parent value'):
+            p.set_node('n1', grp='g1', edges={'X': '+ {b}'})
 
     def test_node_params_no_override(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]}, params={'a': 1, 'b': 2})
+                  edges={'X': '{x1}'}, params={'a': 1, 'b': 2})
         p.set_node('n1', grp='g1', params={'b': 3, 'c': 4})
         attrs = p.get_node_attrs('n1')
         assert attrs['params'] == {'a': 1, 'b': 3, 'c': 4}
 
     def test_adapter_auto_detect(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         attrs = p.get_node_attrs('n1')
         assert attrs['adapter'] is not None
 
     def test_node_attrs_caching(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         a1 = p.nodes['n1'].get_attrs(p.grps)
         a2 = p.nodes['n1'].get_attrs(p.grps)
@@ -460,7 +498,7 @@ class TestNodeAttrs:
 
     def test_attrs_includes_serial(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         attrs = p.get_node_attrs('n1')
         assert 'serial' in attrs
@@ -468,7 +506,7 @@ class TestNodeAttrs:
 
     def test_attrs_serial_updated_after_bump(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         old_serial = p.get_node_attrs('n1')['serial']
         p._bump_serials(['n1'])
@@ -477,14 +515,14 @@ class TestNodeAttrs:
 
     def test_attrs_includes_tag(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1', tag=['cv'])
         attrs = p.get_node_attrs('n1')
         assert attrs['tag'] == ['cv']
 
     def test_attrs_tag_is_copy(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1', tag=['cv'])
         attrs = p.get_node_attrs('n1')
         attrs['tag'].append('mutated')
@@ -509,131 +547,104 @@ class TestNameValidation:
 class TestEdgeValidation:
     def test_edge_node_not_found(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform')
-        with pytest.raises(ValueError, match='not found'):
-            p.set_node('n1', grp='g1', edges={'X': [('no_exist', None)]})
+        with pytest.raises(ValueError, match='does not reference an existing node'):
+            p.set_node('n1', grp='g1', edges={'X': 'no_exist:(*)'})
 
     def test_edge_must_be_stage(self, sp):
         with pytest.raises(ValueError, match='stage'):
-            sp.set_grp('g2', role='head', edges={'X': [('h1', None)]})
+            sp.set_grp('g2', role='head', edges={'X': 'h1:(*)'})
 
 
 class TestDataSourceEdgeRequiresList:
-    def test_set_grp_none_var_spec_rejected(self, p):
-        with pytest.raises(ValueError, match='explicit'):
-            p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                      edges={'X': [(None, None)]})
-
-    def test_set_grp_str_var_spec_rejected(self, p):
-        with pytest.raises(ValueError, match='explicit'):
-            p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                      edges={'X': [(None, 'f1')]})
-
-    def test_set_grp_callable_var_spec_rejected(self, p):
-        with pytest.raises(ValueError, match='explicit'):
-            p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                      edges={'X': [(None, lambda cols, processor=None: [True] * len(cols))]})
-
-    def test_set_grp_tuple_var_spec_rejected(self, p):
-        with pytest.raises(ValueError, match='explicit'):
-            p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                      edges={'X': [(None, ('cup', 'f1', 'f2'))]})
-
     def test_set_grp_list_var_spec_accepted(self, p):
         r = p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                       edges={'X': [(None, ['f1', 'f2'])]})
+                       edges={'X': '{f1, f2}'})
         assert r['result'] == 'new'
-
-    def test_set_node_str_var_spec_rejected(self, p):
-        p.set_grp('g1', role='stage', processor=DummyStage, method='transform')
-        with pytest.raises(ValueError, match='explicit'):
-            p.set_node('n1', grp='g1', edges={'X': [(None, 'f1')]})
-
-    def test_set_grp_replace_rejects_non_list(self, p):
-        p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['f1'])]})
-        with pytest.raises(ValueError, match='explicit'):
-            p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                      edges={'X': [(None, None)]}, exist='replace')
 
     def test_stage_to_stage_edge_still_allows_non_list(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['f1'])]})
+                  edges={'X': '{f1}'})
         p.set_node('a', grp='g1')
         r = p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                       edges={'X': [('a', 'some_pattern')]})
+                       edges={'X': 'a:(some_pattern)'})
         assert r['result'] == 'new'
 
 
 class TestDataSourceEdgeSchemaMembership:
+    """set_grp/set_node only validate DSL *structure* — column/schema
+    membership is resolved lazily, at process time, against real data (see
+    _edge_dsl.validate_edges). So an edges string referencing a column that
+    doesn't exist in the schema is accepted here regardless."""
+
     def test_no_schema_no_check(self, p):
         r = p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                       edges={'X': [(None, ['f1', 'f2'])]})
+                       edges={'X': '{f1, f2}'})
         assert r['result'] == 'new'
-
-    def test_column_not_in_schema_rejected(self, p):
-        p.set_datasource(SCHEMA_SIMPLE)
-        with pytest.raises(ValueError, match='not in.*datasource schema'):
-            p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                      edges={'X': [(None, ['f1', 'unknown_col'])]})
 
     def test_columns_in_schema_accepted(self, p):
         p.set_datasource(SCHEMA_SIMPLE)
         r = p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                       edges={'X': [(None, ['f1', 'f2'])]})
+                       edges={'X': '{f1, f2}'})
         assert r['result'] == 'new'
 
-    def test_set_node_column_not_in_schema_rejected(self, p):
+    def test_unknown_column_not_rejected_at_definition_time(self, p):
+        p.set_datasource(SCHEMA_SIMPLE)
+        r = p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
+                       edges={'X': '{f1, unknown_col}'})
+        assert r['result'] == 'new'
+
+    def test_set_node_unknown_column_not_rejected_at_definition_time(self, p):
         p.set_datasource(SCHEMA_SIMPLE)
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform')
-        with pytest.raises(ValueError, match='not in.*datasource schema'):
-            p.set_node('n1', grp='g1', edges={'X': [(None, ['unknown_col'])]})
+        r = p.set_node('n1', grp='g1', edges={'X': '{unknown_col}'})
+        assert r['result'] == 'new'
 
 
 class TestCycleDetection:
     def test_direct_cycle(self, sp):
         sp.set_grp('stage2', role='stage', processor=DummyStage, method='transform',
-                   edges={'X': [('s1', None)]})
+                   edges={'X': 's1:(*)'})
         sp.set_node('s2', grp='stage2')
         with pytest.raises(ValueError, match='cycle'):
-            sp.set_node('s1', grp='stage1', edges={'X': [('s2', None)]}, exist='replace')
+            sp.set_node('s1', grp='stage1', edges={'X': 's2:(*)'}, exist='replace')
 
     def test_indirect_cycle(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('a', grp='g1')
         p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('a', None)]})
+                  edges={'X': 'a:(*)'})
         p.set_node('b', grp='g2')
         p.set_grp('g3', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('b', None)]})
+                  edges={'X': 'b:(*)'})
         p.set_node('c', grp='g3')
         with pytest.raises(ValueError, match='cycle'):
-            p.set_node('a', grp='g1', edges={'X': [('c', None)]}, exist='replace')
+            p.set_node('a', grp='g1', edges={'X': 'c:(*)'}, exist='replace')
 
     def test_no_cycle_chain(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('a', grp='g1')
         p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('a', None)]})
+                  edges={'X': 'a:(*)'})
         p.set_node('b', grp='g2')
         p.set_grp('g3', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('b', None)]})
+                  edges={'X': 'b:(*)'})
         p.set_node('c', grp='g3')
         assert 'c' in p.nodes
 
     def test_diamond_no_cycle(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('a', grp='g1')
         p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('a', None)]})
+                  edges={'X': 'a:(*)'})
         p.set_node('b', grp='g2')
         p.set_grp('g3', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('a', None)]})
+                  edges={'X': 'a:(*)'})
         p.set_node('c', grp='g3')
         p.set_grp('g4', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('b', None), ('c', None)]})
+                  edges={'X': 'b:(*) + c:(*)'})
         p.set_node('d', grp='g4')
         assert 'd' in p.nodes
 
@@ -714,7 +725,7 @@ class TestRemoveNode:
 
     def test_updates_output_edges(self, sp):
         sp.set_grp('stage2', role='stage', processor=DummyStage, method='transform',
-                   edges={'X': [('s1', None)]})
+                   edges={'X': 's1:(*)'})
         sp.set_node('s2', grp='stage2')
         assert 's2' in sp.nodes['s1'].output_edges
         sp.remove_node('s2')
@@ -730,7 +741,7 @@ class TestRemoveNode:
 
     def test_has_descendants(self, sp):
         sp.set_grp('stage2', role='stage', processor=DummyStage, method='transform',
-                   edges={'X': [('s1', None)]})
+                   edges={'X': 's1:(*)'})
         sp.set_node('s2', grp='stage2')
         with pytest.raises(ValueError, match='dependent'):
             sp.remove_node('s1')
@@ -749,7 +760,7 @@ class TestGetNodeNames:
 
     def test_regex(self, sp):
         sp.set_grp('stage2', role='stage', processor=DummyStage, method='transform',
-                   edges={'X': [(None, ['x1'])]})
+                   edges={'X': '{x1}'})
         sp.set_node('s2', grp='stage2')
         names = sp.get_node_names('s\\d')
         assert 's1' in names
@@ -768,29 +779,29 @@ class TestGetNodeNames:
 class TestGetAffectedNodes:
     def test_chain(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('a', grp='g1')
         p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('a', None)]})
+                  edges={'X': 'a:(*)'})
         p.set_node('b', grp='g2')
         p.set_grp('g3', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('b', None)]})
+                  edges={'X': 'b:(*)'})
         p.set_node('c', grp='g3')
         result = p._get_affected_nodes(['a'])
         assert result.index('a') < result.index('b') < result.index('c')
 
     def test_diamond(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('a', grp='g1')
         p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('a', None)]})
+                  edges={'X': 'a:(*)'})
         p.set_node('b', grp='g2')
         p.set_grp('g3', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('a', None)]})
+                  edges={'X': 'a:(*)'})
         p.set_node('c', grp='g3')
         p.set_grp('g4', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('b', None), ('c', None)]})
+                  edges={'X': 'b:(*) + c:(*)'})
         p.set_node('d', grp='g4')
         result = p._get_affected_nodes(['a'])
         assert result.index('a') < result.index('d')
@@ -816,7 +827,7 @@ class TestCopy:
 
     def test_preserves_output_edges(self, sp):
         sp.set_grp('stage2', role='stage', processor=DummyStage, method='transform',
-                   edges={'X': [('s1', None)]})
+                   edges={'X': 's1:(*)'})
         sp.set_node('s2', grp='stage2')
         cp = sp.copy()
         assert 's2' in cp.nodes['s1'].output_edges
@@ -832,7 +843,7 @@ class TestCopyStage:
 
     def test_adjusts_output_edges(self, sp):
         sp.set_grp('stage2', role='stage', processor=DummyStage, method='transform',
-                   edges={'X': [('s1', None)]})
+                   edges={'X': 's1:(*)'})
         sp.set_node('s2', grp='stage2')
         cp = sp.copy_stage()
         assert 'h1' not in cp.nodes['s1'].output_edges if cp.nodes['s1'].output_edges else True
@@ -845,13 +856,13 @@ class TestCopyStage:
 class TestCopyNodes:
     def test_includes_dependencies(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('a', grp='g1')
         p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('a', None)]})
+                  edges={'X': 'a:(*)'})
         p.set_node('b', grp='g2')
         p.set_grp('g3', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('b', None)]})
+                  edges={'X': 'b:(*)'})
         p.set_node('c', grp='g3')
         cp = p.copy_nodes(['c'])
         assert 'a' in cp.nodes
@@ -860,10 +871,10 @@ class TestCopyNodes:
 
     def test_excludes_unrelated(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('a', grp='g1')
         p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('b', grp='g2')
         cp = p.copy_nodes(['a'])
         assert 'a' in cp.nodes
@@ -872,7 +883,7 @@ class TestCopyNodes:
     def test_includes_required_groups(self, p):
         p.set_grp('parent', role='stage')
         p.set_grp('child', role='stage', parent='parent', processor=DummyStage,
-                  method='transform', edges={'X': [(None, ['x1'])]})
+                  method='transform', edges={'X': '{x1}'})
         p.set_node('n1', grp='child')
         cp = p.copy_nodes(['n1'])
         assert 'child' in cp.grps
@@ -880,20 +891,20 @@ class TestCopyNodes:
 
     def test_adjusts_output_edges(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('a', grp='g1')
         p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('a', None)]})
+                  edges={'X': 'a:(*)'})
         p.set_node('b', grp='g2')
         p.set_grp('g3', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('a', None)]})
+                  edges={'X': 'a:(*)'})
         p.set_node('c', grp='g3')
         cp = p.copy_nodes(['b'])
         assert 'c' not in cp.nodes['a'].output_edges
 
     def test_empty_list(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('a', grp='g1')
         cp = p.copy_nodes([])
         assert len(cp.nodes) == 1
@@ -907,7 +918,7 @@ class TestCopyNodes:
 class TestCompareNodes:
     def test_param_differences(self, p):
         p.set_grp('g1', role='head', processor=DummyHead, method='predict',
-                  edges={'X': [(None, ['x1'])], 'y': [(None, ['target'])]})
+                  edges={'X': '{x1}', 'y': '{target}'})
         p.set_node('n1', grp='g1', params={'a': 1, 'b': 2})
         p.set_node('n2', grp='g1', params={'a': 1, 'b': 3})
         result = p.compare_nodes(['n1', 'n2'])
@@ -917,10 +928,10 @@ class TestCompareNodes:
 
     def test_groups_by_processor(self, p):
         p.set_grp('g1', role='head', processor=DummyHead, method='predict',
-                  edges={'X': [(None, ['x1'])], 'y': [(None, ['target'])]})
+                  edges={'X': '{x1}', 'y': '{target}'})
         p.set_node('n1', grp='g1', params={'a': 1})
         p.set_grp('g2', role='head', processor=AnotherProcessor, method='predict',
-                  edges={'X': [(None, ['x1'])], 'y': [(None, ['target'])]})
+                  edges={'X': '{x1}', 'y': '{target}'})
         p.set_node('n2', grp='g2', params={'a': 2})
         result = p.compare_nodes(['n1', 'n2'])
         assert 'DummyHead' in result
@@ -928,12 +939,12 @@ class TestCompareNodes:
 
     def test_edge_differences(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('s1', grp='g1')
         p.set_grp('g2', role='head', processor=DummyHead, method='predict',
-                  edges={'y': [(None, ['target'])]})
-        p.set_node('n1', grp='g2', edges={'X': [('s1', ['a', 'b'])]})
-        p.set_node('n2', grp='g2', edges={'X': [('s1', ['a', 'c'])]})
+                  edges={'y': '{target}'})
+        p.set_node('n1', grp='g2', edges={'X': 's1:({a, b})'})
+        p.set_node('n2', grp='g2', edges={'X': 's1:({a, c})'})
         result = p.compare_nodes(['n1', 'n2'])
         df = result['DummyHead']
         x_cols = [c for c in df.columns if c[0] == 'X']
@@ -941,7 +952,7 @@ class TestCompareNodes:
 
     def test_identical_nodes_empty_columns(self, p):
         p.set_grp('g1', role='head', processor=DummyHead, method='predict',
-                  edges={'X': [(None, ['x1'])], 'y': [(None, ['target'])]})
+                  edges={'X': '{x1}', 'y': '{target}'})
         p.set_node('n1', grp='g1', params={'a': 1})
         p.set_node('n2', grp='g1', params={'a': 1})
         result = p.compare_nodes(['n1', 'n2'])
@@ -975,7 +986,7 @@ class TestAdapterEq:
 
     def test_set_grp_diff_skips_on_same_adapter_instance(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         from mllabs.adapter._base import ModelAdapter
         class DummyAdapter(ModelAdapter):
             pass
@@ -988,7 +999,7 @@ class TestAdapterEq:
         class DummyAdapter(ModelAdapter):
             pass
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1', adapter=DummyAdapter())
         r = p.set_node('n1', grp='g1', adapter=DummyAdapter(), exist='diff')
         assert r['result'] == 'skip'
@@ -997,16 +1008,16 @@ class TestAdapterEq:
         class NoEqObj:
             pass
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]}, params={'cb': NoEqObj()})
+                  edges={'X': '{x1}'}, params={'cb': NoEqObj()})
         r = p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                      edges={'X': [(None, ['x1'])]}, params={'cb': NoEqObj()}, exist='diff')
+                      edges={'X': '{x1}'}, params={'cb': NoEqObj()}, exist='diff')
         assert r['result'] == 'skip'
 
     def test_set_grp_diff_detects_different_params(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]}, params={'n': 50})
+                  edges={'X': '{x1}'}, params={'n': 50})
         r = p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                      edges={'X': [(None, ['x1'])]}, params={'n': 100}, exist='diff')
+                      edges={'X': '{x1}'}, params={'n': 100}, exist='diff')
         assert r['result'] == 'update'
 
 
@@ -1015,7 +1026,7 @@ class TestGetParents:
         p.set_grp('gp', role='stage')
         p.set_grp('par', role='stage', parent='gp')
         p.set_grp('child', role='stage', parent='par', processor=DummyStage,
-                  method='transform', edges={'X': [(None, ['x1'])]})
+                  method='transform', edges={'X': '{x1}'})
         p.set_node('n1', grp='child')
         result = p.get_parents('n1')
         assert result == ['child', 'par', 'gp']
@@ -1038,22 +1049,22 @@ class TestAdapterAttrsCacheInvalidation:
 
     def test_direct_grp_adapter_change_detected(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]}, adapter=self.DummyAdapter('a'))
+                  edges={'X': '{x1}'}, adapter=self.DummyAdapter('a'))
         r = p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                      edges={'X': [(None, ['x1'])]}, adapter=self.DummyAdapter('b'), exist='diff')
+                      edges={'X': '{x1}'}, adapter=self.DummyAdapter('b'), exist='diff')
         assert r['result'] == 'update'
 
     def test_direct_grp_adapter_change_applied(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]}, adapter=self.DummyAdapter('a'))
+                  edges={'X': '{x1}'}, adapter=self.DummyAdapter('a'))
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]}, adapter=self.DummyAdapter('b'), exist='diff')
+                  edges={'X': '{x1}'}, adapter=self.DummyAdapter('b'), exist='diff')
         assert p.grps['g1'].adapter.mode == 'b'
 
     def test_parent_grp_adapter_change_clears_child_grp_cache(self, p):
         p.set_grp('parent', role='stage', adapter=self.DummyAdapter('a'))
         p.set_grp('child', role='stage', parent='parent', processor=DummyStage,
-                  method='transform', edges={'X': [(None, ['x1'])]})
+                  method='transform', edges={'X': '{x1}'})
         _ = p.grps['child'].get_attrs(p.grps)
         p.set_grp('parent', role='stage', adapter=self.DummyAdapter('b'), exist='replace')
         assert p.grps['child'].attrs is None
@@ -1061,7 +1072,7 @@ class TestAdapterAttrsCacheInvalidation:
     def test_parent_grp_adapter_change_reflected_in_node(self, p):
         p.set_grp('parent', role='stage', adapter=self.DummyAdapter('a'))
         p.set_grp('child', role='stage', parent='parent', processor=DummyStage,
-                  method='transform', edges={'X': [(None, ['x1'])]})
+                  method='transform', edges={'X': '{x1}'})
         p.set_node('n1', grp='child')
         _ = p.nodes['n1'].get_attrs(p.grps)
         p.set_grp('parent', role='stage', adapter=self.DummyAdapter('b'), exist='replace')
@@ -1072,7 +1083,7 @@ class TestAdapterAttrsCacheInvalidation:
         p.set_grp('gp', role='stage', adapter=self.DummyAdapter('a'))
         p.set_grp('par', role='stage', parent='gp')
         p.set_grp('child', role='stage', parent='par', processor=DummyStage,
-                  method='transform', edges={'X': [(None, ['x1'])]})
+                  method='transform', edges={'X': '{x1}'})
         p.set_node('n1', grp='child')
         _ = p.nodes['n1'].get_attrs(p.grps)
         p.set_grp('gp', role='stage', adapter=self.DummyAdapter('b'), exist='replace')
@@ -1091,7 +1102,7 @@ class TestNodeSerial:
 
     def test_node_has_serial_at_creation(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         assert self._is_uuid(p.nodes['n1'].serial)
 
@@ -1100,14 +1111,14 @@ class TestNodeSerial:
 
     def test_different_nodes_have_different_serials(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         p.set_node('n2', grp='g1')
         assert p.nodes['n1'].serial != p.nodes['n2'].serial
 
     def test_copy_preserves_serial(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         serial_before = p.nodes['n1'].serial
         cp = p.copy()
@@ -1115,7 +1126,7 @@ class TestNodeSerial:
 
     def test_set_node_no_change_preserves_serial(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         serial_before = p.nodes['n1'].serial
         p.set_node('n1', grp='g1')  # exist='diff', no change
@@ -1123,7 +1134,7 @@ class TestNodeSerial:
 
     def test_set_node_update_changes_serial(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         serial_before = p.nodes['n1'].serial
         p.set_node('n1', grp='g1', params={'with_std': False})
@@ -1131,13 +1142,13 @@ class TestNodeSerial:
 
     def test_set_node_update_bumps_descendant_serials(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('n1', None)]})
+                  edges={'X': 'n1:(*)'})
         p.set_node('n2', grp='g2')
         p.set_grp('g3', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('n2', None)]})
+                  edges={'X': 'n2:(*)'})
         p.set_node('n3', grp='g3')
         serial_n2 = p.nodes['n2'].serial
         serial_n3 = p.nodes['n3'].serial
@@ -1147,10 +1158,10 @@ class TestNodeSerial:
 
     def test_set_node_skip_preserves_descendant_serials(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('n1', None)]})
+                  edges={'X': 'n1:(*)'})
         p.set_node('n2', grp='g2')
         serial_n1 = p.nodes['n1'].serial
         serial_n2 = p.nodes['n2'].serial
@@ -1160,32 +1171,32 @@ class TestNodeSerial:
 
     def test_set_grp_no_change_preserves_node_serials(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         serial_before = p.nodes['n1'].serial
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})  # exist='diff', no change
+                  edges={'X': '{x1}'})  # exist='diff', no change
         assert p.nodes['n1'].serial == serial_before
 
     def test_set_grp_update_bumps_node_serials(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         serial_before = p.nodes['n1'].serial
         p.set_grp('g1', role='stage', processor=AnotherProcessor, method='transform',
-                  edges={'X': [(None, ['x1'])]}, exist='replace')
+                  edges={'X': '{x1}'}, exist='replace')
         assert p.nodes['n1'].serial != serial_before
 
     def test_set_grp_update_bumps_descendant_serials(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         p.set_grp('g2', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [('n1', None)]})
+                  edges={'X': 'n1:(*)'})
         p.set_node('n2', grp='g2')
         serial_n2 = p.nodes['n2'].serial
         p.set_grp('g1', role='stage', processor=AnotherProcessor, method='transform',
-                  edges={'X': [(None, ['x1'])]}, exist='replace')
+                  edges={'X': '{x1}'}, exist='replace')
         assert p.nodes['n2'].serial != serial_n2
 
 
@@ -1232,7 +1243,7 @@ class TestDataSourceNode:
 
     def test_set_datasource_bumps_downstream_node_serials(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         serial_before = p.nodes['n1'].serial
         p.set_datasource(SCHEMA_SIMPLE)
@@ -1313,22 +1324,22 @@ class TestCheckDataCompatibility:
         pl = Pipeline(path=tmp_path / 'pipeline')
         pl.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'missing_col': 'numerical'})
         pl.set_grp('scale', role='stage', processor=StandardScaler,
-                   method='transform', edges={'X': [(None, ['f1', 'f2'])]})
+                   method='transform', edges={'X': '{f1, f2}'})
         pl.set_node('scaler', grp='scale')
-        e = Experimenter(data=sample_data, path=tmp_path / 'exp')
+        e = Experimenter(data=sample_data, path=tmp_path / 'exp', pipeline=pl)
         with pytest.raises(ValueError, match='missing_col'):
-            e.build(pl)
+            e.build()
 
     def test_experimenter_exp_raises_on_missing_column(self, tmp_path, sample_data):
         from mllabs._experimenter import Experimenter
         pl = Pipeline(path=tmp_path / 'pipeline')
         pl.set_datasource({'f1': 'numerical', 'target': 'binary', 'missing_col': 'numerical'})
         pl.set_grp('model', role='head', processor=DecisionTreeClassifier,
-                   method='predict', edges={'X': [(None, ['f1'])], 'y': [(None, ['target'])]})
+                   method='predict', edges={'X': '{f1}', 'y': '{target}'})
         pl.set_node('dt', grp='model')
-        e = Experimenter(data=sample_data, path=tmp_path / 'exp')
+        e = Experimenter(data=sample_data, path=tmp_path / 'exp', pipeline=pl)
         with pytest.raises(ValueError, match='missing_col'):
-            e.exp(pl)
+            e.exp()
 
     def test_trainer_select_head_raises_on_missing_column(self, tmp_path, sample_data):
         from mllabs._trainer import Trainer
@@ -1337,12 +1348,12 @@ class TestCheckDataCompatibility:
         pl = Pipeline(path=tmp_path / 'pipeline')
         pl.set_datasource({'f1': 'numerical', 'target': 'binary', 'missing_col': 'numerical'})
         pl.set_grp('model', role='head', processor=DecisionTreeClassifier,
-                   method='predict', edges={'X': [(None, ['f1'])], 'y': [(None, ['target'])]})
+                   method='predict', edges={'X': '{f1}', 'y': '{target}'})
         pl.set_node('dt', grp='model')
         t = Trainer(name='t1', data=wrap(sample_data), path=tmp_path / 'trainer',
                     splitter=None, splitter_params={}, cache=DataCache())
         with pytest.raises(ValueError, match='missing_col'):
-            t.select_head(pl)
+            t.set_pipeline(pl)
 
 
 class TestPipelineSQLite:
@@ -1358,7 +1369,7 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         cp = p.copy()
         assert cp._store is None
 
@@ -1366,7 +1377,7 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('scale', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p2 = Pipeline(path=tmp_path, name='test')
         assert 'scale' in p2.grps
         assert p2.grps['scale'].role == 'stage'
@@ -1377,7 +1388,7 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('scale', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('scaler', grp='scale')
         p2 = Pipeline(path=tmp_path, name='test')
         assert 'scaler' in p2.nodes
@@ -1388,7 +1399,7 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('scale', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('scaler', grp='scale')
         serial = p.nodes['scaler'].serial
         p2 = Pipeline(path=tmp_path, name='test')
@@ -1413,7 +1424,7 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('scale', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.remove_grp('scale')
         p2 = Pipeline(path=tmp_path, name='test')
         assert 'scale' not in p2.grps
@@ -1422,7 +1433,7 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('scale', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('scaler', grp='scale')
         p.remove_node('scaler')
         p2 = Pipeline(path=tmp_path, name='test')
@@ -1433,7 +1444,7 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('scale', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('scaler', grp='scale')
         p.rename_grp('scale', 'scaler_grp')
         p2 = Pipeline(path=tmp_path, name='test')
@@ -1446,10 +1457,10 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('s1', grp='g1')
         p.set_grp('g2', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [('s1', None)]})
+                  edges={'X': 's1:(*)'})
         p.set_node('s2', grp='g2')
         p2 = Pipeline(path=tmp_path, name='test')
         assert 's2' in p2.nodes['s1'].output_edges
@@ -1459,7 +1470,7 @@ class TestPipelineSQLite:
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('parent', role='stage')
         p.set_grp('child', role='stage', parent='parent', processor=StandardScaler,
-                  method='transform', edges={'X': [(None, ['x1'])]})
+                  method='transform', edges={'X': '{x1}'})
         p2 = Pipeline(path=tmp_path, name='test')
         assert 'child' in p2.grps['parent'].children
 
@@ -1467,7 +1478,7 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         p._bump_serials(['n1'])
         new_serial = p.nodes['n1'].serial
@@ -1478,15 +1489,15 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['f1', 'f2'])]})
+                  edges={'X': '{f1, f2}'})
         p2 = Pipeline(path=tmp_path, name='test')
-        assert p2.grps['g1'].edges == {'X': [(None, ['f1', 'f2'])]}
+        assert p2.grps['g1'].edges == {'X': '{f1, f2}'}
 
     def test_params_persists(self, tmp_path):
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]}, params={'with_std': False})
+                  edges={'X': '{x1}'}, params={'with_std': False})
         p2 = Pipeline(path=tmp_path, name='test')
         assert p2.grps['g1'].params == {'with_std': False}
 
@@ -1494,7 +1505,7 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1', tag=['cv', 'holdout'])
         p2 = Pipeline(path=tmp_path, name='test')
         assert p2.nodes['n1'].tag == ['cv', 'holdout']
@@ -1503,7 +1514,7 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         p2 = Pipeline(path=tmp_path, name='test')
         assert p2.nodes['n1'].tag == []
@@ -1512,10 +1523,10 @@ class TestPipelineSQLite:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         p.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]}, params={'with_std': False}, exist='replace')
+                  edges={'X': '{x1}'}, params={'with_std': False}, exist='replace')
         serial = p.nodes['n1'].serial
         p2 = Pipeline(path=tmp_path, name='test')
         assert p2.nodes['n1'].serial == serial
@@ -1525,7 +1536,7 @@ class TestPipelineSQLite:
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('parent', role='stage')
         p.set_grp('child', role='stage', parent='parent', processor=StandardScaler,
-                  method='transform', edges={'X': [(None, ['x1'])]})
+                  method='transform', edges={'X': '{x1}'})
         p.set_node('n1', grp='child')
         p2 = Pipeline(path=tmp_path, name='test')
         assert p2.grps['child'].parent == 'parent'
@@ -1537,7 +1548,7 @@ class TestPipelineSync:
         from sklearn.preprocessing import StandardScaler
         p = Pipeline(path=tmp_path, name='test')
         p.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                  edges={'X': [(None, ['x1'])]})
+                  edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         return p
 
@@ -1572,7 +1583,7 @@ class TestPipelineSync:
         # B adds a new group
         p2 = Pipeline(path=tmp_path, name='test')
         p2.set_grp('g2', role='stage', processor=StandardScaler, method='transform',
-                   edges={'X': [('n1', None)]})
+                   edges={'X': 'n1:(*)'})
         # A syncs
         result = p.sync()
         assert 'g2' in result['grps']['added']
@@ -1597,7 +1608,7 @@ class TestPipelineSync:
         # B updates params
         p2 = Pipeline(path=tmp_path, name='test')
         p2.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                   edges={'X': [(None, ['x1'])]}, params={'with_std': False}, exist='replace')
+                   edges={'X': '{x1}'}, params={'with_std': False}, exist='replace')
         # A syncs
         result = p.sync()
         assert 'g1' in result['grps']['updated']
@@ -1632,7 +1643,7 @@ class TestPipelineSync:
         # B updates grp (bumps n1 serial)
         p2 = Pipeline(path=tmp_path, name='test')
         p2.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                   edges={'X': [(None, ['x1'])]}, params={'with_std': False}, exist='replace')
+                   edges={'X': '{x1}'}, params={'with_std': False}, exist='replace')
         # A syncs
         result = p.sync()
         assert 'n1' in result['nodes']['updated']
@@ -1645,7 +1656,7 @@ class TestPipelineSync:
         # B adds g2/n2 that references n1
         p2 = Pipeline(path=tmp_path, name='test')
         p2.set_grp('g2', role='stage', processor=StandardScaler, method='transform',
-                   edges={'X': [('n1', None)]})
+                   edges={'X': 'n1:(*)'})
         p2.set_node('n2', grp='g2')
         # A syncs
         p.sync()
@@ -1657,7 +1668,7 @@ class TestPipelineSync:
         # B adds child group
         p2 = Pipeline(path=tmp_path, name='test')
         p2.set_grp('g1child', role='stage', parent='g1', processor=StandardScaler,
-                   method='transform', edges={'X': [(None, ['x1'])]})
+                   method='transform', edges={'X': '{x1}'})
         # A syncs
         p.sync()
         assert 'g1child' in p.grps['g1'].children
@@ -1685,7 +1696,7 @@ class TestPipelineSync:
         p = self._make(tmp_path)
         p2 = Pipeline(path=tmp_path, name='test')
         p2.set_grp('g1', role='stage', processor=StandardScaler, method='transform',
-                   edges={'X': [(None, ['x1'])]}, params={'with_std': False}, exist='replace')
+                   edges={'X': '{x1}'}, params={'with_std': False}, exist='replace')
         p2.nodes['n1'].tag = ['cv']
         p2._db_write(lambda conn: conn.execute(
             "UPDATE nodes SET tag = ? WHERE name = ?", ('["cv"]', 'n1')
@@ -1712,37 +1723,37 @@ class TestExperimenterTags:
         p = Pipeline(path=tmp_path / 'pipeline')
         p.set_grp('model', role='head', processor=DecisionTreeClassifier,
                   method='predict',
-                  edges={'X': [(None, ['f1', 'f2'])], 'y': [(None, ['target'])]},
+                  edges={'X': '{f1, f2}', 'y': '{target}'},
                   params={'max_depth': 3, 'random_state': 0})
         p.set_node('dt', grp='model', tag=['cv', 'final'])
         p.set_node('dt2', grp='model', tag=['final'])
         return p
 
-    def _make_exp(self, sample_data, tmp_path, tags=None):
+    def _make_exp(self, sample_data, tmp_path, pipeline, tags=None):
         from mllabs._experimenter import Experimenter
-        return Experimenter(data=sample_data, path=tmp_path / 'exp1', tags=tags)
+        return Experimenter(data=sample_data, path=tmp_path / 'exp1', tags=tags, pipeline=pipeline)
 
     def test_tags_selects_matching_heads(self, pipeline, sample_data, tmp_path):
-        e = self._make_exp(sample_data, tmp_path, tags=['cv'])
-        e.exp(pipeline)
+        e = self._make_exp(sample_data, tmp_path, pipeline, tags=['cv'])
+        e.exp()
         assert e.get_status('dt') == 'built'
         assert e.get_status('dt2') is None
 
     def test_tags_no_match_nothing_run(self, pipeline, sample_data, tmp_path):
-        e = self._make_exp(sample_data, tmp_path, tags=['nonexistent'])
-        e.exp(pipeline)
+        e = self._make_exp(sample_data, tmp_path, pipeline, tags=['nonexistent'])
+        e.exp()
         assert e.get_status('dt') is None
         assert e.get_status('dt2') is None
 
     def test_no_tags_runs_all_heads(self, pipeline, sample_data, tmp_path):
-        e = self._make_exp(sample_data, tmp_path, tags=None)
-        e.exp(pipeline)
+        e = self._make_exp(sample_data, tmp_path, pipeline, tags=None)
+        e.exp()
         assert e.get_status('dt') == 'built'
         assert e.get_status('dt2') == 'built'
 
     def test_explicit_nodes_overrides_tags(self, pipeline, sample_data, tmp_path):
-        e = self._make_exp(sample_data, tmp_path, tags=['cv'])
-        e.exp(pipeline, nodes=['dt2'])
+        e = self._make_exp(sample_data, tmp_path, pipeline, tags=['cv'])
+        e.exp(nodes=['dt2'])
         assert e.get_status('dt') is None
         assert e.get_status('dt2') == 'built'
 
@@ -1765,11 +1776,11 @@ class TestTrainerTags:
         from sklearn.tree import DecisionTreeClassifier
         p = Pipeline(path=tmp_path / 'pipeline')
         p.set_grp('scale', role='stage', processor=StandardScaler,
-                  method='transform', edges={'X': [(None, ['f1', 'f2'])]})
+                  method='transform', edges={'X': '{f1, f2}'})
         p.set_node('scaler', grp='scale')
         p.set_grp('model', role='head', processor=DecisionTreeClassifier,
                   method='predict',
-                  edges={'X': [('scaler', None)], 'y': [(None, ['target'])]},
+                  edges={'X': 'scaler:(*)', 'y': '{target}'},
                   params={'max_depth': 3, 'random_state': 0})
         p.set_node('dt', grp='model', tag=['cv', 'final'])
         p.set_node('dt2', grp='model', tag=['final'])
@@ -1786,29 +1797,23 @@ class TestTrainerTags:
 
     def test_tags_selects_matching_heads(self, pipeline, sample_data, tmp_path):
         trainer = self._make_trainer(sample_data, tmp_path, tags=['cv'])
-        trainer.select_head(pipeline)
+        trainer.set_pipeline(pipeline)
         assert 'dt' in trainer.selected_heads
         assert 'dt2' not in trainer.selected_heads
 
     def test_tags_no_match_empty_selection(self, pipeline, sample_data, tmp_path):
         trainer = self._make_trainer(sample_data, tmp_path, tags=['nonexistent'])
-        trainer.select_head(pipeline)
+        trainer.set_pipeline(pipeline)
         assert trainer.selected_heads == []
 
     def test_no_tags_selects_all_heads(self, pipeline, sample_data, tmp_path):
         trainer = self._make_trainer(sample_data, tmp_path, tags=None)
-        trainer.select_head(pipeline)
+        trainer.set_pipeline(pipeline)
         assert 'dt' in trainer.selected_heads
         assert 'dt2' in trainer.selected_heads
 
     def test_tags_multiple_match(self, pipeline, sample_data, tmp_path):
         trainer = self._make_trainer(sample_data, tmp_path, tags=['final'])
-        trainer.select_head(pipeline)
+        trainer.set_pipeline(pipeline)
         assert 'dt' in trainer.selected_heads
-        assert 'dt2' in trainer.selected_heads
-
-    def test_explicit_nodes_overrides_tags(self, pipeline, sample_data, tmp_path):
-        trainer = self._make_trainer(sample_data, tmp_path, tags=['cv'])
-        trainer.select_head(pipeline, ['dt2'])
-        assert 'dt' not in trainer.selected_heads
         assert 'dt2' in trainer.selected_heads

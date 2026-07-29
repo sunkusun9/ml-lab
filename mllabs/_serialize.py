@@ -20,6 +20,13 @@ def _ref_to_obj(ref):
     return getattr(mod, attr)
 
 
+def resolve_processor(processor):
+    """Resolve a ``"module.ClassName"`` string reference to the actual class."""
+    if isinstance(processor, str):
+        return _ref_to_obj(processor)
+    return processor
+
+
 def serialize_value(v):
     """Reduce any Python value to a JSON-serializable form.
 

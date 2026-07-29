@@ -51,6 +51,10 @@ class Collector:
     def abort_node(self, node):
         self._buf.pop(node, None)
 
+    def reset_nodes(self, nodes):
+        node_set = set(nodes)
+        self._buf = {k: v for k, v in self._buf.items() if k not in node_set}
+
     def __getstate__(self):
         exclude = set(self._SAVE_EXCLUDE.keys()) | {'_experimenter'}
         return {k: v for k, v in self.__dict__.items() if k not in exclude}

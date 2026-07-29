@@ -681,45 +681,45 @@ class TestColSelector:
     def numpy_object(self):
         return NumpyWrapper(np.array([['a', 'b'], ['c', 'd']], dtype=object))
 
-    # --- ColSelector 기본 ---
+    # --- ColSelector 기본 (dsl_string 기반, eval_expr로 resolve) ---
 
     def test_col_selector_init(self):
-        cs = ColSelector(col_type='category', pattern='cat.*')
-        assert cs.col_type == 'category'
-        assert cs.pattern == 'cat.*'
+        cs = ColSelector('cat.*@categorical')
+        assert cs.dsl_string == 'cat.*@categorical'
 
     def test_col_selector_defaults(self):
         cs = ColSelector()
-        assert cs.col_type is None
-        assert cs.pattern is None
+        assert cs.dsl_string == '*'
 
-    # --- PandasWrapper.get_column_list ---
+    def _resolve(self, wrapper, dsl_string):
+        from mllabs._edge_dsl import parse, eval_expr
+        return eval_expr(parse(dsl_string), wrapper)
+
+    # --- PandasWrapper.select_by_dtype / ColSelector resolution ---
 
     def test_pandas_no_filter(self, pandas_df):
         w = PandasWrapper(pandas_df)
-        cs = ColSelector()
-        assert w.get_column_list(cs) == list(pandas_df.columns)
+        assert self._resolve(w, ColSelector().dsl_string) == list(pandas_df.columns)
 
     def test_pandas_category(self, pandas_df):
         w = PandasWrapper(pandas_df)
-        result = w.get_column_list(ColSelector(col_type='category'))
-        assert set(result) == {'cat_col', 'cat_col2'}
+        assert set(w.select_by_dtype('category')) == {'cat_col', 'cat_col2'}
 
     def test_pandas_int(self, pandas_df):
         w = PandasWrapper(pandas_df)
-        result = w.get_column_list(ColSelector(col_type='int'))
+        result = w.select_by_dtype('int')
         assert 'int_col' in result
         assert 'float_col' not in result
 
     def test_pandas_float(self, pandas_df):
         w = PandasWrapper(pandas_df)
-        result = w.get_column_list(ColSelector(col_type='float'))
+        result = w.select_by_dtype('float')
         assert 'float_col' in result
         assert 'int_col' not in result
 
     def test_pandas_numeric(self, pandas_df):
         w = PandasWrapper(pandas_df)
-        result = w.get_column_list(ColSelector(col_type='numeric'))
+        result = w.select_by_dtype('numeric')
         assert 'int_col' in result
         assert 'float_col' in result
         assert 'str_col' not in result
@@ -727,21 +727,19 @@ class TestColSelector:
 
     def test_pandas_str(self, pandas_df):
         w = PandasWrapper(pandas_df)
-        result = w.get_column_list(ColSelector(col_type='str'))
+        result = w.select_by_dtype('str')
         assert 'str_col' in result
         assert 'int_col' not in result
 
     def test_pandas_pattern(self, pandas_df):
         w = PandasWrapper(pandas_df)
-        result = w.get_column_list(ColSelector(pattern='cat.*'))
-        assert set(result) == {'cat_col', 'cat_col2'}
+        assert set(self._resolve(w, 'cat.*')) == {'cat_col', 'cat_col2'}
 
     def test_pandas_col_type_and_pattern(self, pandas_df):
         w = PandasWrapper(pandas_df)
-        result = w.get_column_list(ColSelector(col_type='category', pattern='.*2$'))
-        assert result == ['cat_col2']
+        assert self._resolve(w, '.*2$@categorical') == ['cat_col2']
 
-    # --- PolarsWrapper.get_column_list ---
+    # --- PolarsWrapper.select_by_dtype ---
 
     @requires_polars
     def test_polars_category(self):
@@ -753,8 +751,7 @@ class TestColSelector:
             'str_col': pl.Series(['x', 'y', 'z'], dtype=pl.Utf8),
         })
         w = PolarsWrapper(df)
-        result = w.get_column_list(ColSelector(col_type='category'))
-        assert result == ['cat_col']
+        assert w.select_by_dtype('category') == ['cat_col']
 
     @requires_polars
     def test_polars_int(self):
@@ -765,8 +762,7 @@ class TestColSelector:
             'str_col': pl.Series(['x', 'y', 'z'], dtype=pl.Utf8),
         })
         w = PolarsWrapper(df)
-        result = w.get_column_list(ColSelector(col_type='int'))
-        assert result == ['int_col']
+        assert w.select_by_dtype('int') == ['int_col']
 
     @requires_polars
     def test_polars_float(self):
@@ -776,8 +772,7 @@ class TestColSelector:
             'float_col': pl.Series([1.0, 2.0, 3.0], dtype=pl.Float64),
         })
         w = PolarsWrapper(df)
-        result = w.get_column_list(ColSelector(col_type='float'))
-        assert result == ['float_col']
+        assert w.select_by_dtype('float') == ['float_col']
 
     @requires_polars
     def test_polars_numeric(self):
@@ -788,8 +783,7 @@ class TestColSelector:
             'str_col': pl.Series(['x', 'y', 'z'], dtype=pl.Utf8),
         })
         w = PolarsWrapper(df)
-        result = w.get_column_list(ColSelector(col_type='numeric'))
-        assert set(result) == {'int_col', 'float_col'}
+        assert set(w.select_by_dtype('numeric')) == {'int_col', 'float_col'}
 
     @requires_polars
     def test_polars_str(self):
@@ -799,11 +793,10 @@ class TestColSelector:
             'str_col': pl.Series(['x', 'y', 'z'], dtype=pl.Utf8),
         })
         w = PolarsWrapper(df)
-        result = w.get_column_list(ColSelector(col_type='str'))
-        assert result == ['str_col']
+        assert w.select_by_dtype('str') == ['str_col']
 
     @requires_polars
-    def test_polars_pattern(self):
+    def test_polars_pattern_and_category(self):
         from mllabs._data_wrapper import PolarsWrapper
         df = pl.DataFrame({
             'cat_a': pl.Series(['a', 'b'], dtype=pl.Categorical),
@@ -811,46 +804,36 @@ class TestColSelector:
             'int_col': pl.Series([1, 2], dtype=pl.Int32),
         })
         w = PolarsWrapper(df)
-        result = w.get_column_list(ColSelector(col_type='category', pattern='cat_a'))
-        assert result == ['cat_a']
+        assert self._resolve(w, 'cat_a@categorical') == ['cat_a']
 
-    # --- NumpyWrapper.get_column_list ---
+    # --- NumpyWrapper.select_by_dtype / ColSelector resolution ---
 
     def test_numpy_int(self, numpy_int):
-        result = numpy_int.get_column_list(ColSelector(col_type='int'))
-        assert result == [0, 1]
+        assert numpy_int.select_by_dtype('int') == [0, 1]
 
     def test_numpy_int_no_match_float(self, numpy_float):
-        result = numpy_float.get_column_list(ColSelector(col_type='int'))
-        assert result == []
+        assert numpy_float.select_by_dtype('int') == []
 
     def test_numpy_float(self, numpy_float):
-        result = numpy_float.get_column_list(ColSelector(col_type='float'))
-        assert result == [0, 1]
+        assert numpy_float.select_by_dtype('float') == [0, 1]
 
     def test_numpy_numeric_int(self, numpy_int):
-        result = numpy_int.get_column_list(ColSelector(col_type='numeric'))
-        assert result == [0, 1]
+        assert numpy_int.select_by_dtype('numeric') == [0, 1]
 
     def test_numpy_numeric_float(self, numpy_float):
-        result = numpy_float.get_column_list(ColSelector(col_type='numeric'))
-        assert result == [0, 1]
+        assert numpy_float.select_by_dtype('numeric') == [0, 1]
 
     def test_numpy_str(self, numpy_object):
-        result = numpy_object.get_column_list(ColSelector(col_type='str'))
-        assert result == [0, 1]
+        assert numpy_object.select_by_dtype('str') == [0, 1]
 
     def test_numpy_category_empty(self, numpy_object):
-        result = numpy_object.get_column_list(ColSelector(col_type='category'))
-        assert result == []
+        assert numpy_object.select_by_dtype('category') == []
 
     def test_numpy_no_filter(self, numpy_int):
-        result = numpy_int.get_column_list(ColSelector())
-        assert result == [0, 1]
+        assert self._resolve(numpy_int, ColSelector().dsl_string) == [0, 1]
 
     def test_numpy_pattern(self, numpy_int):
-        result = numpy_int.get_column_list(ColSelector(pattern='^0$'))
-        assert result == [0]
+        assert self._resolve(numpy_int, '^0$') == [0]
 
 
 class _DummyProc:
@@ -864,7 +847,7 @@ class TestPipelineDesc:
         from mllabs._pipeline import Pipeline
         p = Pipeline()
         p.set_grp('g1', role='stage')
-        p.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform')
+        p.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform')
         return p
 
     # --- 기본값 ---
@@ -884,14 +867,14 @@ class TestPipelineDesc:
         assert p.grps['g1'].desc == 'my group'
 
     def test_set_node_desc(self, pipeline):
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='my node', exist='replace')
+        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='my node', exist='replace')
         assert pipeline.nodes['n1'].desc == 'my node'
 
     # --- get_attrs에 desc 포함 안 됨 (상속 없음) ---
 
     def test_desc_not_in_get_attrs(self, pipeline):
         pipeline.set_grp('g1', role='stage', desc='group desc', exist='replace')
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='node desc', exist='replace')
+        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='node desc', exist='replace')
         attrs = pipeline.get_node_attrs('n1')
         assert 'desc' not in attrs
 
@@ -908,7 +891,7 @@ class TestPipelineDesc:
         assert p.grps['g1'].copy().desc == 'group desc'
 
     def test_node_copy_preserves_desc(self, pipeline):
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='node desc', exist='replace')
+        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='node desc', exist='replace')
         assert pipeline.nodes['n1'].copy().desc == 'node desc'
 
     # --- desc 변경은 affected_nodes에 영향 없음 ---
@@ -925,14 +908,14 @@ class TestPipelineDesc:
         assert pipeline.grps['g1'].desc == 'new'
 
     def test_set_node_desc_only_change_returns_skip(self, pipeline):
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='old', exist='replace')
-        result = pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='new')
+        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='old', exist='replace')
+        result = pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='new')
         assert result['result'] == 'skip'
         assert result['affected_nodes'] == []
 
     def test_set_node_desc_only_change_updates_desc(self, pipeline):
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='old', exist='replace')
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': [(None, ['x1'])]}, method='fit_transform', desc='new')
+        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='old', exist='replace')
+        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='new')
         assert pipeline.nodes['n1'].desc == 'new'
 
     # --- 모델 속성 변경 시 affected_nodes 정상 동작 확인 ---

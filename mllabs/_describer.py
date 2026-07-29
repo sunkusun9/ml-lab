@@ -1,5 +1,7 @@
 import pandas as pd
 
+from ._edge_dsl import referenced_nodes, iter_segments, unparse
+
 def desc_spec(exp):
     """실험 스펙을 Markdown으로 반환"""
     lines = []
@@ -92,8 +94,8 @@ def desc_pipeline(pipeline, max_depth=None, direction='TD'):
         for name in pipeline.nodes.keys():
             if name is not None:
                 node_attrs = pipeline.get_node_attrs(name)
-                for key, edge_list in node_attrs['edges'].items():
-                    for edge_name, _ in edge_list:
+                for dsl_string in node_attrs['edges'].values():
+                    for edge_name in referenced_nodes(dsl_string):
                         if (current_node == 'DataSource' and edge_name is None) or (edge_name == current_node):
                             # child 노드 발견
                             if name not in node_priorities:
@@ -241,8 +243,8 @@ def desc_pipeline(pipeline, max_depth=None, direction='TD'):
         for node_name in nodes:
             if node_name in pipeline.nodes:
                 node_attrs = pipeline.get_node_attrs(node_name)
-                for key, edge_list in node_attrs['edges'].items():
-                    for edge_name, edge_var in edge_list:
+                for dsl_string in node_attrs['edges'].values():
+                    for edge_name in referenced_nodes(dsl_string):
                         if edge_name is None:
                             # DataSource 연결
                             incoming.add(('datasource', 'DataSource'))
@@ -318,10 +320,10 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
                     found = False
                     node_attrs = pipeline.get_node_attrs(name)
                     edges = node_attrs['edges']
-                    for key, edge_list in edges.items():
+                    for dsl_string in edges.values():
                         if found:
                             break
-                        for edge_name, _ in edge_list:
+                        for edge_name in referenced_nodes(dsl_string):
                             if (current == 'DataSource' and edge_name is None) or (edge_name == current):
                                 new_path = path + [name]
                                 new_visited = visited | {name}
@@ -415,8 +417,8 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
         if name in pipeline.nodes:
             node_attrs = pipeline.get_node_attrs(name)
             edges = node_attrs['edges']
-            for key, edge_list in edges.items():
-                for edge_name, _ in edge_list:
+            for key, dsl_string in edges.items():
+                for edge_name in referenced_nodes(dsl_string):
                     if edge_name is None:
                         source = "DataSource"
                     else:
@@ -452,17 +454,9 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
     lines.append("| Key | Node | Var |")
     lines.append("|-----|------|-----|")
     for key in sorted(edges.keys()):
-        edge_list = edges[key]
-        for edge_name, var_spec in edge_list:
-            if edge_name is None:
-                node_display = "Data Source"
-            else:
-                if edge_name:
-                    node_display = get_grp_path(edge_name)
-                else:
-                    node_display = edge_name
-            var_display = "*" if var_spec is None else f"`{var_spec}`"
-            lines.append(f"| {key} | {node_display} | {var_display} |")
+        for edge_name, expr in iter_segments(edges[key]):
+            node_display = "Data Source" if edge_name is None else get_grp_path(edge_name)
+            lines.append(f"| {key} | {node_display} | `{unparse(expr)}` |")
 
     return "\n".join(lines)
 
@@ -503,18 +497,11 @@ def compare_nodes(pipeline, nodes):
         # edges (X only) - stage node별 변수 비교
         stage_vars = {}
         for name in group_nodes:
-            x_entries = attrs_map[name]['edges'].get('X', [])
-            for sn, var_spec in x_entries:
-                if sn not in stage_vars:
-                    stage_vars[sn] = {}
-                if name not in stage_vars[sn]:
-                    stage_vars[sn][name] = []
-                if var_spec is None:
-                    stage_vars[sn][name].append(None)
-                elif isinstance(var_spec, (list, tuple)):
-                    stage_vars[sn][name].extend(var_spec)
-                else:
-                    stage_vars[sn][name].append(var_spec)
+            x_entries = attrs_map[name]['edges'].get('X')
+            if x_entries is None:
+                continue
+            for sn, expr in iter_segments(x_entries):
+                stage_vars.setdefault(sn, {}).setdefault(name, []).append(unparse(expr))
 
         for sn, node_vars in stage_vars.items():
             sn_str = str(sn) if sn is not None else 'DataSource'

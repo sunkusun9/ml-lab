@@ -295,7 +295,7 @@ class TestTrainerAugData:
         p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'target': 'binary'})
         p.set_grp('model', role='head', processor=DecisionTreeClassifier,
                   method='predict',
-                  edges={'X': [(None, ['f1', 'f2'])], 'y': [(None, ['target'])]},
+                  edges={'X': '{f1, f2}', 'y': '{target}'},
                   params={'max_depth': 3, 'random_state': 42})
         p.set_node('dt', grp='model')
         return p

@@ -1,5 +1,7 @@
 import re
 
+from ._serialize import resolve_processor as _resolve_processor
+
 
 class Connector:
     """Selects nodes by matching against name, processor, and/or edges.
@@ -10,16 +12,17 @@ class Connector:
     Args:
         node_query: Node name filter. A ``str`` is treated as a regex pattern;
             a ``list`` requires exact membership.
-        edges: Edge filter. ``{key: [(node_name, var_spec), ...]}`` — the node's
-            edges must contain all listed entries (contain-based matching).
-        processor: Processor class filter. The node's resolved processor must
-            be exactly this class.
+        edges: Edge filter. ``{key: dsl_string}`` — for each key, the node's
+            resolved ``edges[key]`` must equal this DSL string exactly.
+        processor: Processor class filter, or ``"module.ClassName"`` string
+            reference (same convention as ``Pipeline.set_grp``/``set_node``).
+            The node's resolved processor must be exactly this class.
     """
 
     def __init__(self, node_query=None, edges=None, processor=None, role=None):
         self.node_query = node_query
         self.edges = edges
-        self.processor = processor
+        self.processor = _resolve_processor(processor)
         self.role = role
 
     def match(self, node_attrs):
@@ -51,11 +54,8 @@ class Connector:
 
         if self.edges is not None:
             node_edges = node_attrs.get('edges', {})
-            for key, required_edges in self.edges.items():
-                if key not in node_edges:
+            for key, required in self.edges.items():
+                if node_edges.get(key) != required:
                     return False
-                for edge in required_edges:
-                    if edge not in node_edges[key]:
-                        return False
 
         return True
