@@ -11,20 +11,12 @@ from .._edge_dsl import parse, eval_expr
 class ProbToLabel:
     def __init__(self, metric_func, var, thresholds=None):
         self.metric_func = metric_func
-        self.var = var
+        self.var = var  # DSL string, e.g. '{target}' or 'node:(*)'
         self.thresholds = thresholds
         self._classes = None
 
-    def _normalize_var(self):
-        v = self.var
-        if isinstance(v, str):
-            return [(None, v)]
-        if isinstance(v, tuple) and len(v) == 2 and not isinstance(v[0], tuple):
-            return [v]
-        return v  # already list
-
     def on_attach(self, experimenter):
-        edges = {'_y': self._normalize_var()}
+        edges = {'_y': self.var}
         data_dict = experimenter.get_test_data(edges, o_idx=0, i_idx=0)
         y_arr = data_dict['_y'].to_array().ravel()
         # np.unique returns sorted order — matches predict_proba column order

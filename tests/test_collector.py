@@ -10,7 +10,7 @@ from sklearn.model_selection import ShuffleSplit, KFold
 
 from mllabs._pipeline import Pipeline
 from mllabs._experimenter import Experimenter
-from mllabs import Connector, MetricCollector, StackingCollector, ModelAttrCollector, OutputCollector, ProcessCollector
+from mllabs import Connector, MetricCollector, StackingCollector, ModelAttrCollector, OutputCollector, ProcessCollector, ProbToLabel
 
 Built = namedtuple('Built', ['e', 'p'])
 
@@ -293,6 +293,37 @@ class TestMetricCollector:
         assert mc2.has('dt')
         result = mc2.get_metric('dt')
         assert all(v == 0.5 for v in result.values)
+
+
+class TestProbToLabel:
+    """var is a DSL string (e.g. '{target}'), resolved via Experimenter.get_test_data —
+    same lazy-resolution path as MetricCollector.output_var."""
+
+    def test_on_attach_sets_classes(self, built_exp):
+        ptl = ProbToLabel(dummy_metric, '{target}')
+        ptl.on_attach(built_exp.e)
+        assert list(ptl._classes) == [0, 1]
+
+    def test_convert_binary_argmax(self, built_exp):
+        ptl = ProbToLabel(dummy_metric, '{target}')
+        ptl.on_attach(built_exp.e)
+        y_prob = np.array([[0.9, 0.1], [0.2, 0.8]])
+        assert list(ptl._convert(y_prob)) == [0, 1]
+
+    def test_call_uses_metric_func(self, built_exp):
+        calls = {}
+
+        def capture_metric(y_true, y_pred):
+            calls['y_true'] = y_true
+            calls['y_pred'] = y_pred
+            return 0.75
+
+        ptl = ProbToLabel(capture_metric, '{target}')
+        ptl.on_attach(built_exp.e)
+        y_true = np.array([0, 1])
+        y_prob = np.array([[0.9, 0.1], [0.2, 0.8]])
+        assert ptl(y_true, y_prob) == 0.75
+        assert list(calls['y_pred']) == [0, 1]
 
 
 class TestStackingCollector:

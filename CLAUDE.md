@@ -71,9 +71,9 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `_bump_serials(node_names)`: 지정 노드들의 serial을 새 UUID로 교체
   - `copy()`, `copy_stage()`, `copy_nodes(node_names)` — 선택적 복사
   - `compare_nodes(nodes)` → `{processor_name: DataFrame}` (params 차이 + edges['X'] stage별 변수 차이)
-  - `check_data_compatibility(data)`: datasource schema 컬럼이 모두 `data`에 있는지 체크 (schema 미정의 시 no-op). `Experimenter.build/exp`, `Trainer.select_head/train` 시작 시 자동 호출
+  - `check_data_compatibility(data)`: datasource schema 컬럼이 모두 `data`에 있는지 체크 (schema 미정의 시 no-op). `Experimenter.build/exp`, `Trainer.set_pipeline/train` 시작 시 자동 호출
   - `desc_pipeline(max_depth, direction)`, `desc_node(node_name, direction, show_params)`: Mermaid 다이어그램
-  - **Pipeline은 Experimenter/Trainer를 소유하지 않음** — `add_experiment`/`add_trainer`/`get_experiment`/`get_trainer` 등 registry 없음. `Experimenter`/`Trainer`는 사용자가 직접 생성해 변수로 들고 있다가, `build`/`exp`/`train` 등 호출 시마다 `pipeline`을 인자로 넘김 (아래 참조)
+  - **Pipeline은 Experimenter/Trainer를 소유하지 않음** — `add_experiment`/`add_trainer`/`get_experiment`/`get_trainer` 등 registry 없음. 반대로 `Experimenter`/`Trainer`가 `set_pipeline(pipeline)`(또는 constructor `pipeline=`)으로 Pipeline을 직접 참조로 보유함 (아래 참조) — `p.set_grp`/`p.set_node`로 in-place 수정하면 별도 재전달 없이 반영됨
 
 - **DataSourceNode** (`PipelineNode` 서브클래스):
   - `schema`: `{col: var_type}` — var_type은 VAR_TYPES 중 하나
@@ -94,26 +94,33 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `diff(grp, processor, edges, method, adapter, params)`: 달라진 필드명 리스트 반환 (`desc` 제외)
   - `set_grp`/`set_node`: `desc` 파라미터 수락; exist='diff' skip 경로에서도 `desc`는 업데이트됨
 
+- **ColSelector** (`_pipeline.py`): processor params(예: `cat_features`, `cat_cols`)에 쓰는 지연(lazy) 컬럼 선택자
+  - `__init__(dsl_string='*')` — DSL 문자열 하나만 보유(정의 시점엔 데이터 불필요, `edges[key]`와 동일한 원칙)
+  - 실제 resolve는 fit 시점에 `_node_processor._resolve_col_selectors`가 `eval_expr(parse(v.dsl_string), data)`로 수행
+  - 예: `ColSelector('*@categorical')`, `ColSelector('^cat_')`
+
 ### Experimenter (`_experimenter.py`)
-- 생성자: `(data, path, ..., cache_maxsize=4GB, logger, aug_data=None, tags=None)`
-- **Pipeline을 보유하지 않음** — `self.pipeline`/`attach()` 없음. 노드 그래프가 필요한 메소드마다 `pipeline`을 인자로 명시적으로 전달하고, 매 호출마다 노드 `serial` 비교로 디스크 아티팩트를 그 pipeline과 동기화함
-- `tags` (list[str]): `exp(pipeline)`를 `nodes=None`으로 호출하면 tag가 교집합인 head만 대상 (비어있으면 전체 head)
+- 생성자: `(data, path, ..., cache_maxsize=4GB, logger, aug_data=None, tags=None, pipeline=None)`
+- **Pipeline을 직접 보유** — `self.pipeline` (constructor `pipeline=` 또는 `set_pipeline(pipeline)`으로 설정). `build`/`exp`/`collect` 등 노드 그래프가 필요한 메소드는 더 이상 `pipeline` 인자를 받지 않고 `self.pipeline` 사용
+- `set_pipeline(pipeline)`: 기존에 pipeline이 이미 설정돼 있었다면 노드 `serial` mismatch를 먼저 감지해 reset 후 교체, `{path}/pipeline.pkl`에 저장. `self.pipeline`은 호출자의 `p` 객체와 동일 참조이므로 이후 `p.set_grp`/`p.set_node`로 in-place 수정하면 별도 재호출 없이 반영됨(단, `build`/`exp` 호출 시마다 `_save_pipeline()`으로 최신 상태 저장)
+- `tags` (list[str]): `exp()`를 `nodes=None`으로 호출하면 tag가 교집합인 head만 대상 (비어있으면 전체 head)
 - `cache`: DataCache (LRU, 용량 기반) — `_cache.py`에 분리
-- **pipeline 필요**:
-  - `build(pipeline, nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None)` (stage), `exp(pipeline, nodes=None, finalize=False, n_jobs=1, gpu_id_list=None)` (head)
+- **pipeline 필요** (`self.pipeline`, `_require_pipeline()`로 미설정 시 에러):
+  - `build(nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None)` (stage), `exp(nodes=None, finalize=False, n_jobs=1, gpu_id_list=None, logger=None)` (head)
     - 시작 시 `pipeline.check_data_compatibility(self.data)` 호출 후 serial mismatch 노드 자동 감지 → `reset_nodes()` 후 재빌드
-  - `collect(pipeline, collector, nodes=None, exist='skip')`: ad-hoc 수집 (빌드 완료된 head 노드 대상, nodes로 범위 제한 가능, progress 포함)
-  - `get_collect_status(pipeline, collector, nodes=None)`: `{node: status}` 반환 — `'collected'`/`'not_collected'`/`'finalized'`/`'error'`
-  - `reopen_exp(pipeline)`: closed→open, Stage 노드 초기화 후 `build(pipeline)` 재호출
-  - `get_node_info(pipeline)`: 노드 요약 Markdown
+  - `collect(collector, nodes=None, exist='skip', logger=None)`: ad-hoc 수집 (빌드 완료된 head 노드 대상, nodes로 범위 제한 가능, progress 포함)
+  - `collect_missing(collector=None, nodes=None, logger=None)`
+  - `get_collect_status(collector, nodes=None)`: `{node: status}` 반환 — `'collected'`/`'not_collected'`/`'finalized'`/`'error'`
+  - `reopen_exp()`: closed→open, Stage 노드 초기화 후 `build()` 재호출
+  - `get_node_info()`: 노드 요약 Markdown
 - **pipeline 불필요** (디스크 상태만으로 동작): `get_status(node_name)`, `finalize(nodes)`, `reinitialize(nodes)`, `close_exp()`, `reset_nodes(nodes)`, `show_error_nodes(nodes=None, traceback=False)`, `get_objs(node_name, outer_idx=0, inner_idx=0)`
   - **주의**: 같은 fold의 `train_data_flows[j]`와 `artifact_stores[j]`는 디스크상 동일 디렉토리를 가리키지만 서로 독립적인 lazy info 캐시(`NodeStore._info_cache`)를 가짐. 양쪽을 합쳐 하나의 상태로 캐싱한 뒤 한쪽만 mutate(예: finalize)하면 다른 쪽 캐시가 stale해짐 — 그래서 `get_status`는 pipeline으로 role을 판별해 해당 store 하나만 조회함(`_reset_serial_stale_nodes`도 동일 패턴). `finalize`/`reinitialize`/`reset_nodes`/`close_exp`는 store별로 조회 직후 바로 그 store에 실행(check-and-act, 캐싱된 판단을 다른 store에 넘기지 않음)하는 구조라 pipeline 없이도 안전함
-- `add_collector(collector, exist='skip')`: Collector **등록만** (path 설정, save) — pipeline 불필요, **자동 수집 안 함**. 이미 빌드된 head에서 즉시 수집하려면 별도로 `collect(pipeline, collector)` 호출
+- `add_collector(collector, exist='skip')`: Collector **등록만** (path 설정, save) — pipeline 불필요, **자동 수집 안 함**. 이미 빌드된 head에서 즉시 수집하려면 별도로 `collect(collector)` 호출
 - `get_collector(name)`: Collector 반환 (없으면 None)
 - `remove_collector(name)`: Collector 제거 후 `_save()`
 - `get_train_data(edges, o_idx=0, i_idx=0)` / `get_valid_data(...)` / `get_test_data(...)`, `get_node_train_data(pipeline, node, o_idx=0, i_idx=0)` / `get_node_valid_data(...)` / `get_node_test_data(...)`: 노드 출력 추출 헬퍼
 - `aug_data`: 외부 데이터를 DataSource 수준에서 inner train split에 append — 미퍼시스트, create/load 시 전달
-- 저장/로드: `_save()`, `load(filepath, data, data_key)` — pipeline은 저장 대상 아님(직접 보유 안 하므로); 로드 후 매 호출 시 pipeline을 인자로 전달
+- 저장/로드: `_save()`, `load(filepath, data, data_key)` — `pipeline.pkl`이 있으면 `self.pipeline`으로 복원(단순 대입, staleness 체크 없음). 로드 후 로컬에서 새로 구성한 pipeline 객체를 다시 붙이려면 `set_pipeline(p)` 호출(staleness 체크 발생)
   - collector_keys, tags 저장/복원
 
 ### DataCache (`_cache.py`)
@@ -143,18 +150,18 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `get_missing_stages(pipeline)`: 미빌드 stage 목록
 
 ### Trainer (`_trainer.py`)
-- 생성자: `(name, data, path, splitter, splitter_params, cache, logger, tags=None, aug_data=None)` — **Pipeline을 생성자에서 받지 않음** (Experimenter와 동일하게 pipeline 미보유, 호출마다 전달)
-- `tags` (list[str]): `select_head(pipeline)`를 `nodes=None`으로 호출하면 tag가 교집합인 head만 자동 선택 (비어있으면 전체 head)
+- 생성자: `(name, data, path, splitter, splitter_params, cache, logger, tags=None, aug_data=None, pipeline=None)` — Experimenter와 동일하게 `set_pipeline(pipeline)`/constructor `pipeline=`으로 Pipeline을 직접 보유
+- `select_head` 없음 — `set_pipeline(pipeline)`이 tags 교집합 head + upstream stage를 자동 선택(`_select_from_pipeline`), staleness 체크 포함
+- `tags` (list[str]): 비어있으면 전체 head 대상
 - `train_folds`: `[TrainFold]` — split별 `(TrainDataFlow, NodeStore)` 쌍, 둘은 같은 fold 디렉토리를 공유 (Experimenter의 outer_fold와 동일 구조)
-- `selected_stages`, `selected_heads`: `select_head(pipeline, nodes=None)`로 설정
+- `selected_stages`, `selected_heads`: `set_pipeline(pipeline)` 호출 시 자동 설정
 - `cache`: Experimenter에서 전달받은 DataCache 공유
-- `select_head(pipeline, nodes=None)`: `pipeline.check_data_compatibility(self.data)` 호출 후 head 노드 지정 + upstream stage 자동 수집, 위상 순서 정렬
-- `train(pipeline, n_jobs=1, gpu_id_list=None)`: serial mismatch 자동 감지 후 미빌드 노드만 대상으로 학습
+- `train(n_jobs=1, gpu_id_list=None)`: serial mismatch 자동 감지 후 미빌드 노드만 대상으로 학습
 - `get_status(node_name)`: pipeline 불필요 — `artifact_stores`만 조회(`train_data_flows`와 동일 디렉토리를 공유하므로 role 구분 없이도 정확함)
-- `process(data, v=None)`: generator, split마다 head output을 v로 필터 후 concat하여 yield
-- `to_inferencer(pipeline, v=None)`: 학습된 Processor를 추출하여 Inferencer 생성
-- `reset_nodes(pipeline, nodes)`: 하위 종속 노드 포함 초기화
-- 저장/로드: `save()`, `_load(path, data, cache, logger, aug_data=None)` — pipeline 인자 없음
+- `process(data, v=None)`: generator, split마다 head output을 `v`(DSL 문자열)로 필터 후 concat하여 yield
+- `to_inferencer(v=None)`: 학습된 Processor를 추출하여 Inferencer 생성
+- `reset_nodes(nodes)`: 하위 종속 노드 포함 초기화
+- 저장/로드: `save()`, `_load(path, data, cache, logger, aug_data=None)` — `pipeline.pkl` 있으면 복원 후 선택 재계산
 
 ### Inferencer (`_inferencer.py`)
 - 생성자: `(pipeline, selected_stages, selected_heads, n_splits, node_objs, v=None)`
@@ -166,8 +173,10 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 
 ### Connector (`_connector.py`)
 - `__init__(node_query=None, edges=None, processor=None, role=None)` — 4요소 선택적 매칭
-- `match(node_name, node_attrs)`: 설정된 요소만 검사, 모두 충족 시 True
-  - node_query: str(regex) 또는 list(in), edges: contain 기반 매칭, processor: 일치 검사, role: 'stage'/'head' 일치 검사 (None이면 무시)
+- `processor`: 클래스 객체 또는 `"module.ClassName"` 문자열 참조(Pipeline.set_grp/set_node와 동일 convention) — `_serialize.resolve_processor`로 즉시 resolve
+- `match(node_attrs)`: 설정된 요소만 검사, 모두 충족 시 True
+  - node_query: str(regex) 또는 list(in), processor: 일치 검사, role: 'stage'/'head' 일치 검사 (None이면 무시)
+  - edges: `{key: dsl_string}` — 각 key에 대해 노드의 resolved `edges[key]` 문자열과 **정확히 일치**해야 함 (contain 기반 아님)
 
 ### Collector (`collector/` 패키지)
 - **Collector** (`_base.py`): 기본 클래스
@@ -177,20 +186,20 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `on_attach(experimenter)`: `add_collector`/`collect` 호출 시 자동 실행 — experimenter identity 비교로 중복 재계산 방지; `_on_attach(experimenter)` no-op 훅을 subclass에서 override
   - `_experimenter`: pickle 제외 (save/load 시 None으로 초기화)
   - `has(node)`: 수집 결과 보유 여부 (has_node에 위임)
-  - `has_node(node)`, `reset_nodes(nodes)`, `save()`, `load(cls, path)`
+  - `has_node(node)`, `reset_nodes(nodes)`(base: `self._buf`에서 해당 노드 제거 — 서브클래스는 `super().reset_nodes(nodes)` 먼저 호출 후 자신의 disk/cache 정리), `save()`, `load(cls, path)`
   - `_get_nodes(nodes, available)`: None/list/str(regex) 패턴 매칭
   - context: `{node_attrs, processor, spec, input, output_train, output_valid}`
 
 - **MetricCollector** (`_metric.py`): 메트릭 수집
-  - `output_var`, `metric_func`, `include_train`
-  - target: `context['input']['y']`, 예측값: `resolve_columns(output_valid, output_var)`
+  - `output_var`(DSL 문자열 또는 None), `metric_func`, `include_train`
+  - target: `context['input']['y']`, 예측값: `eval_expr(parse(output_var), output_valid, processor=context['processor'])`로 컬럼 선택
   - `_on_attach`: `metric_func`에 `on_attach`가 있으면 자동 전파
   - 저장: `push()` 오버라이드로 inner fold 결과 발생 시 즉시 `metrics.db` INSERT (per-node pkl 없음)
   - 쿼리: `get_metric(node)`, `get_metrics(nodes)`, `get_metrics_agg(nodes, inner_fold, outer_fold, include_std)`
 
 - **ProbToLabel** (`_metric.py`): predict_proba → label 변환 후 metric 적용
   - `__init__(metric_func, var, thresholds=None)` — `metric_func`를 래핑하는 callable class
-  - `var`: edges 표현법 — str(`'target'`), tuple(`(None, 'target')`), list
+  - `var`: DSL 문자열 (예: `'{target}'`) — `on_attach`에서 `experimenter.get_test_data({'_y': var})`로 resolve
   - `thresholds`: None=argmax, float=binary threshold, list=multiclass per-class threshold
   - `on_attach`에서 experimenter로부터 label classes 추출 (정렬 순서 = predict_proba 열 순서)
   - binary: 2D proba `(n, 2)` 자동 처리 (col 1 추출), 1D sigmoid도 지원
@@ -228,14 +237,40 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - 쿼리: `get_output(nodes=None, agg='mean')` — nodes 필터(None/list/regex) + outer fold 집계 후 column-wise concat 반환
   - save/load 시 `ext_data`는 미저장 (런타임 전달)
 
-## edges 구조
-- dict 형태: `{key: [(node_name, var_spec), ...], ...}`
-- key: 변수 집합 이름 (예: 'X', 'y', 'sample_weight')
-- node_name: stage 노드명 (None=DataSource)
-- var_spec: 변수 선택 (stage 노드 대상: None=전체, str, list, callable, tuple)
-- 같은 key의 데이터는 column 방향으로 concat
-- 상위→하위 병합: 같은 key면 extend
-- **DataSource edge (`node_name=None`)**: var_spec은 반드시 컬럼명 explicit list — 아니면 `set_grp`/`set_node`가 ValueError (`_check_edges`). datasource schema가 정의돼 있으면 리스트의 모든 컬럼이 schema에 존재해야 함 — 없으면 ValueError (schema 미정의 시 이 검사는 skip). [[feedback_datasource_edges_explicit_vars]]
+## edges 구조 — DSL 문자열 (`_edge_dsl.py`)
+- dict 형태: `{key: dsl_string}` — key는 변수 집합 이름(예: 'X', 'y', 'sample_weight'), 값은 **항상 순수 문자열**
+- `edges[key]`는 정의/상속/직렬화/비교 어디서나 문자열 그대로 유지되며, **Processor 실행 시점에 실제 데이터를 대상으로만** lazily 컬럼 리스트로 확장됨(`eval_expr`, `_flow.py.get_data`에서 호출). `set_grp`/`set_node`는 DSL *구조*(문법 + namespace 참조)만 검증(`validate_edges`)하고 컬럼/schema는 절대 만들어보지 않음
+- 문법:
+  ```
+  expr        := term (op term)*            -- op는 '+'/'-'/'&', 공백으로 양쪽이 분리된 독립 토큰이어야 함
+  term        := ('*' | set_literal | pattern) ['@' NAME ['(' ')']]
+                  | slice | namespace | '(' expr ')'
+  slice       := [INT] ':' [INT]             -- 파이썬 slice, 예: '-1:' == slice(-1, None)
+  set_literal := '{' [NAME (',' NAME)*] '}'  -- 명시적 컬럼명 목록
+  namespace   := NAME ':' '(' expr ')'       -- NAME은 stage 노드명, 그 노드의 출력을 가리킴
+  pattern     := REGEX                       -- re.match 로 컬럼명 매칭
+  ```
+  - `*`/`set_literal`/`pattern` 뒤에 바로(공백 없이) `@name`/`@name()`을 붙이면 `col.py`에 등록된 column-selector 적용 (예: `*@numeric`, `{a, b}@int`, `A.*@ohe_drop_first`)
+  - 값을 직접 명시하지 않은 top-level(namespace 밖) 항목은 DataSource를 가리킴; `name:(...)` 블록은 그 stage 노드의 출력을 가리킴 (namespace는 top-level에서 `+`로만 결합 가능 — `-`/`&`는 namespace 내부/괄호 안에서만)
+  - **DataSource 참조는 반드시 명시적 컬럼명 리스트(`{a, b}`)** — 패턴/callable 아님. [[feedback_datasource_edges_explicit_vars]]
+- 그룹/노드 상속: 자기 값이 `+`/`-`로 시작하면 부모의 이미 resolve된 문자열에 이어붙임(`f"{parent} {own}"`); 그 외 일반 문자열은 완전히 override(상속 안 함). 자기 값이 없으면(`{}`) 부모 값을 그대로 상속
+- 같은 key의 여러 segment(`+`로 연결)는 column 방향으로 concat됨
+
+## Edge DSL 관련 함수 (`_edge_dsl.py`)
+- `parse(dsl_string)` → AST (`Star`/`SetLiteral`/`Pattern`/`Namespace`/`BinOp`/`slice`)
+- `eval_expr(node, data, processor=None)`: AST를 실제 `data`(`DataWrapper`, `get_columns()`/`select_by_dtype()` 노출)에 대해 평가 → 컬럼명 리스트. `data`에서 `columns = data.get_columns()`를 내부적으로 유도하므로 호출부는 컬럼 리스트를 따로 넘기지 않음
+- `validate_edges(dsl_string, pipeline)`: 구조만 검증(문법 + namespace가 존재하는 stage 노드를 가리키는지) — 컬럼/schema는 절대 건드리지 않음
+- `iter_segments(dsl_string)` → `(node_name, expr)` 이터레이터 (top-level `+` 체인 분해)
+- `referenced_nodes(dsl_string)` → 참조하는 노드명 집합 (`None`=DataSource 포함)
+- `unparse(node)` → AST를 다시 DSL 문자열로 렌더링
+
+## col.py — `@name` column-selector 레지스트리
+- `col_selector(*processor_classes, name=None)` 데코레이터로 등록. 모든 selector는 동일 시그니처 `(data, processor=None) -> mask` — `data`는 이미 패턴 등으로 좁혀진 후보 컬럼만 담은 `DataWrapper`
+- `processor_classes`가 지정되면 해당 processor 타입에서만 유효(`resolve_selector`가 불일치 시 ValueError); 비워두면(`()`) processor 없이도 사용 가능
+- `name=`으로 등록 키를 함수명과 다르게 지정 가능 (파이썬 builtin과 겹치는 `float`/`int`/`string` 등에 사용)
+- **`ohe_drop_first`** (OneHotEncoder 전용), **`subset_poly`** (PolynomialFeatures 전용, degree/interaction/bias 일관된 전체 조합으로 스냅)
+- **dtype 기반 builtin selector** (processor 불필요, `data.select_by_dtype(kind)` 사용): `@numeric`, `@categorical`, `@binary`(bool dtype만), `@float`, `@int`, `@string`
+  - DataSource 최상위(`*@numeric` 등)에 바로 걸면 schema에 없는 raw 컬럼(id/target/sample_weight 등)까지 포함될 수 있어 위험 — 이미 확정된 stage 노드 출력 namespace 안에서 쓰는 게 안전
 
 ## exist 파라미터 (set_grp, set_node, collect)
 - `'diff'` (default, set_grp/set_node): 제공된 파라미터가 기존과 다를 때만 업데이트, 동일하면 skip
@@ -248,13 +283,14 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 `None`/빈 값은 그대로 `None`/`{}`으로 덮어쓰므로, **유지하려는 필드도 반드시 명시**해야 한다.
 ```python
 # 잘못된 예 — processor/edges/method가 None으로 덮어써짐
-exp.pipeline.set_grp('scale', params={'with_std': False})
+p.set_grp('scale', params={'with_std': False})
 
 # 올바른 예
-exp.pipeline.set_grp('scale', role='stage', processor=StandardScaler,
-                     method='transform', edges={'X': [(None, cols)]},
-                     params={'with_std': False})
+p.set_grp('scale', role='stage', processor=StandardScaler,
+          method='transform', edges={'X': '{' + ', '.join(cols) + '}'},
+          params={'with_std': False})
 ```
+[[feedback_pipeline_direct_reference]]: `p`가 스코프에 있으면 `p.set_grp`/`p.set_node`를 직접 호출 (`e.pipeline.set_grp`처럼 우회하지 않음)
 
 ## Serial 무결성 추적
 - 노드 정의(`set_grp`/`set_node`/`set_datasource`) 변경 시 영향받는 노드들의 `serial`이 새 UUID로 자동 교체 (`_bump_serials`)
@@ -295,14 +331,16 @@ exp.pipeline.set_grp('scale', role='stage', processor=StandardScaler,
 ## 보조 모듈
 - **_data_wrapper.py**: DataWrapper (wrap/unwrap/squeeze/mean/mode/simple) — pandas/polars/cudf/numpy 통합
   - `PolarsWrapper.get_columns()`: `pl.DataFrame`이면 `.columns`, `pl.Series`이면 `.name` 반환
+  - `select_by_dtype(kind)`: `'category'|'numeric'|'int'|'float'|'str'|'bool'`에 해당하는 컬럼명(numpy는 정수 offset) 리스트 반환 — `col.py`의 `@numeric` 등 dtype selector가 사용하는 primitive. (예전 `get_column_list(ColSelector(col_type=, pattern=))`는 제거됨 — pattern 부분은 이제 DSL의 `Pattern` 노드가 담당)
+- **_edge_dsl.py**: edges DSL 파서/평가기 — 위 "Edge DSL" 섹션 참조
 - **_describer.py**: desc_spec, desc_status, desc_pipeline, desc_node
 - **_logger.py**: BaseLogger, DefaultLogger (start/update/end_progress, adhoc_progress, rename_progress)
-- **col.py**: 컬럼 선택 유틸리티
+- **col.py**: `@name` column-selector 레지스트리 — 위 "col.py" 섹션 참조
 - **_connector.py**: Connector (노드 매칭)
 - **collector/**: Collector, MetricCollector, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector
 - **filter/**: DataFilter, RandomFilter(n/frac/random_state), IndexFilter(index)
 - **adapter/**: sklearn, xgboost, lightgbm, catboost, keras, `_nn.py` (NNAdapter)
-- **processor/**: CatConverter, CatPairCombiner, CatOOVFilter, FrequencyEncoder, ColSelector, TypeConverter, CrossFitTransformer
+- **processor/**: CatConverter, CatPairCombiner, CatOOVFilter, FrequencyEncoder, TypeConverter, CrossFitTransformer (`ColSelector`는 `_pipeline.py`에 있음 — processor/ 소속 아님)
   - `CatPairCombiner`: pair(2) → N-way 그룹 조합으로 확장. `pairs` 요소를 N개 컬럼 인덱스/이름 그룹으로 지정 가능
   - `TypeConverter`: 모든 컬럼을 지정 타입(`str`/`int`/`float`)으로 변환. pandas: `astype`, polars: cast, numpy: `astype`. `get_feature_names_out` 지원
   - `CrossFitTransformer`: sklearn-compatible stacking meta-feature 생성기
@@ -321,7 +359,8 @@ Pipeline/Experimenter/Trainer는 서로의 경로를 관리하지 않음 — 각
   pipeline.db                       # Pipeline 노드/그룹 정의 (SQLite)
 
 {experimenter.path}/
-  __exp.pkl                         # collector_keys, tags, 메타정보 (pipeline은 미보유 — 매 호출 시 인자로 전달)
+  __exp.pkl                         # collector_keys, tags, 메타정보
+  pipeline.pkl                      # set_pipeline()으로 저장된 Pipeline (있으면 load() 시 self.pipeline으로 복원)
   __collector/{name}/
     __config.pkl                    # Collector 설정
     metrics.db                      # MetricCollector 결과 (node, idx, inner_idx, split, value)
@@ -336,6 +375,7 @@ Pipeline/Experimenter/Trainer는 서로의 경로를 관리하지 않음 — 각
 
 {trainer.path}/
   __trainer.pkl                     # name, splitter, tags, selected_stages/heads, split_indices
+  pipeline.pkl                      # set_pipeline()으로 저장된 Pipeline
   {split_idx}/{node_name}/
     obj.pkl / result.pkl / info.pkl # 마찬가지로 train_data_flows/artifact_stores가 {split_idx} 디렉토리를 공유
 
