@@ -1,7 +1,5 @@
 import re
 
-from ._serialize import resolve_processor as _resolve_processor
-
 
 class Connector:
     """Selects nodes by matching against name, processor, and/or edges.
@@ -14,15 +12,17 @@ class Connector:
             a ``list`` requires exact membership.
         edges: Edge filter. ``{key: dsl_string}`` — for each key, the node's
             resolved ``edges[key]`` must equal this DSL string exactly.
-        processor: Processor class filter, or ``"module.ClassName"`` string
-            reference (same convention as ``Pipeline.set_grp``/``set_node``).
-            The node's resolved processor must be exactly this class.
+        processor: Processor filter as a ``"module.ClassName"`` string — not
+            a class. Compared directly (string equality) against the node's
+            stored ``processor`` value, which Pipeline also keeps unresolved
+            (whatever form ``set_grp``/``set_node`` was given). Use the same
+            string form there for the match to line up.
     """
 
     def __init__(self, node_query=None, edges=None, processor=None, role=None):
         self.node_query = node_query
         self.edges = edges
-        self.processor = _resolve_processor(processor)
+        self.processor = processor
         self.role = role
 
     def match(self, node_attrs):

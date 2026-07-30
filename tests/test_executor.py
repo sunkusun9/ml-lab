@@ -195,14 +195,16 @@ class TestNJobsCap:
 
 
 class TestWorkerLogCapture:
-    """Multi-worker runs capture native stdout/stderr into per-worker log files."""
+    """Multi-worker runs capture native stdout/stderr into per-worker log
+    files, only while OS log capture is open (open_os_log/os_log)."""
 
-    def test_native_output_captured_to_worker_logs(self, exp, pipeline, capfd):
+    def test_native_output_captured_to_worker_logs_when_open(self, exp, pipeline, capfd):
         pipeline.set_grp('nc', role='stage', processor=NativeChatterStage,
                           method='transform', edges={'X': '{f1}'})
         pipeline.set_node('nc_node', grp='nc')
 
-        exp.build(n_jobs=2)
+        with exp.os_log():
+            exp.build(n_jobs=2)
 
         # native chatter went to the worker log files, not the parent console
         out, err = capfd.readouterr()
@@ -210,16 +212,56 @@ class TestWorkerLogCapture:
         assert 'NATIVE_STDERR_XYZ' not in err
 
         logs = exp.get_worker_logs()
-        assert logs, "expected per-worker log files"
-        combined = '\n'.join(logs.values())
+        worker_logs = {k: v for k, v in logs.items() if k != 'master'}
+        assert worker_logs, "expected per-worker log files"
+        combined = '\n'.join(worker_logs.values())
         assert 'NATIVE_STDOUT_XYZ' in combined
         assert 'NATIVE_STDERR_XYZ' in combined
         assert (exp.path / '__worker_logs').exists()
+
+    def test_native_output_not_captured_when_closed(self, exp, pipeline, capfd):
+        pipeline.set_grp('nc', role='stage', processor=NativeChatterStage,
+                          method='transform', edges={'X': '{f1}'})
+        pipeline.set_node('nc_node', grp='nc')
+
+        exp.build(n_jobs=2)  # no os_log() — capture stays off, matches pre-existing behavior
+
+        out, err = capfd.readouterr()
+        assert 'NATIVE_STDOUT_XYZ' in out
+        assert 'NATIVE_STDERR_XYZ' in err
+        assert exp.get_worker_logs() == {}
 
     def test_get_worker_logs_empty_without_multi_run(self, exp, pipeline):
         _setup_full(pipeline)
         exp.build(n_jobs=1)
         assert exp.get_worker_logs() == {}
+
+    def test_single_worker_captured_by_master_log_when_open(self, exp, pipeline, capfd):
+        pipeline.set_grp('nc', role='stage', processor=NativeChatterStage,
+                          method='transform', edges={'X': '{f1}'})
+        pipeline.set_node('nc_node', grp='nc')
+
+        with exp.os_log():
+            exp.build(n_jobs=1)  # single-worker path — no build()-internal dup2, covered by the open master redirect
+
+        out, err = capfd.readouterr()
+        assert 'NATIVE_STDOUT_XYZ' not in out
+        assert 'NATIVE_STDERR_XYZ' not in err
+
+        master_log = exp.get_worker_logs('master')
+        assert 'NATIVE_STDOUT_XYZ' in master_log
+        assert 'NATIVE_STDERR_XYZ' in master_log
+
+    def test_open_os_log_twice_raises(self, exp):
+        exp.open_os_log()
+        try:
+            with pytest.raises(RuntimeError):
+                exp.open_os_log()
+        finally:
+            exp.close_os_log()
+
+    def test_close_os_log_without_open_is_noop(self, exp):
+        exp.close_os_log()  # must not raise
 
 
 class TestWorkerWarningVerbosity:

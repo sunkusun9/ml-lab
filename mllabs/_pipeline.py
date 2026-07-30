@@ -3,10 +3,6 @@ import uuid
 import json
 from pathlib import Path
 from ._describer import desc_pipeline, desc_node, compare_nodes
-from .adapter  import get_adapter
-from ._serialize import resolve_processor as _resolve_processor
-from ._serialize import resolve_adapter as _resolve_adapter
-from ._serialize import resolve_ref_values as _resolve_ref_values
 from ._pipeline_store import PipelineStore
 from ._edge_dsl import referenced_nodes, validate_edges
 
@@ -83,11 +79,15 @@ class PipelineGroup:
     Attributes:
         name (str): Group name.
         role (str): ``'stage'`` or ``'head'``.
-        processor: Processor class (optional, may be inherited).
+        processor: ``"module.ClassName"`` string (optional, may be inherited)
+            — stored as-is, resolved to the actual class only at point of use
+            (``_node_processor.py``).
         edges (dict): Edge definitions (optional, merged with parent).
         method (str): Processor method name (optional, may be inherited).
         parent (str): Parent group name, or ``None``.
-        adapter: ModelAdapter instance (optional, may be inherited).
+        adapter: ``None`` / ``"module.ClassName"`` string / ``{"__ref__":...}``
+            dict / instance (optional, may be inherited) — stored as-is,
+            resolved only at point of use (``resolve_node_adapter``).
         params (dict): Constructor parameters (optional, merged with parent).
         children (list[str]): Child group names.
         nodes (list[str]): Node names belonging to this group.
@@ -186,10 +186,13 @@ class PipelineNode:
     Attributes:
         name (str): Node name.
         grp (str): Parent group name.
-        processor: Processor class override (``None`` → inherit from group).
+        processor: ``"module.ClassName"`` string override (``None`` → inherit
+            from group) — stored as-is, resolved only at point of use.
         edges (dict): Additional or overriding edge definitions.
         method (str): Processor method name override.
-        adapter: ModelAdapter instance override.
+        adapter: ``None`` / ``"module.ClassName"`` string / ``{"__ref__":...}``
+            dict / instance override — stored as-is, resolved only at point
+            of use.
         params (dict): Constructor parameter overrides.
         output_edges (list[str]): Names of nodes that consume this node's output.
     """
@@ -231,13 +234,13 @@ class PipelineNode:
                 if k not in params:
                     params[k] = v
         processor = grp_attrs['processor'] if self.processor is None else self.processor
-        if self.adapter is None:
-            if grp_attrs['adapter'] is None:
-                adapter = get_adapter(processor)
-            else:
-                adapter = grp_attrs['adapter']
-        else:
-            adapter = self.adapter
+        # adapter is left as whatever spec was stored (str / {'__ref__':...} /
+        # instance / None) — never resolved to an instance here. The
+        # by-processor-class default (when nothing was specified anywhere) is
+        # also deferred, via resolve_node_adapter, to the point of use
+        # (_node_processor.py / _executor.py._needs_gpu), not pipeline-definition
+        # time.
+        adapter = grp_attrs['adapter'] if self.adapter is None else self.adapter
         self.attrs = {
             'name': self.name,
             'grp': self.grp,
@@ -825,7 +828,9 @@ class Pipeline:
         Args:
             name (str): Group name. Cannot contain ``__`` or path-invalid chars.
             role (str): ``'stage'`` or ``'head'``. Inherited from parent if omitted.
-            processor: Processor class, or ``"module.ClassName"`` string reference.
+            processor: ``"module.ClassName"`` string reference — not a class.
+                Stored as-is; resolved to the actual class only at point of
+                use (``_node_processor.py``), never here.
             edges (dict): Edge definitions ``{key: dsl_string}`` (see ``_edge_dsl``).
             method (str): Processor method name (e.g. ``'fit_transform'``).
             parent (str): Parent group name, or ``None``.
@@ -848,13 +853,15 @@ class Pipeline:
         self._validate_name(name)
         if name in self.nodes:
             raise ValueError(f"Name '{name}' already exists as a node")
-        processor = _resolve_processor(processor)
-        adapter = _resolve_adapter(adapter)
+        # processor and adapter are stored as-is (str / {'__ref__':...} dict /
+        # class-or-instance / None) — never eagerly resolved here. Resolution
+        # happens only at point of use (_node_processor.py / resolve_node_adapter).
         if edges is None:
             edges = {}
         if params is None:
             params = {}
-        params = _resolve_ref_values(params)
+        # params is stored as-is too — {'__ref__':...}/{'__callable__':...}
+        # entries inside it are resolved lazily in _node_processor.py.
 
         if parent is not None:
             if parent not in self.grps:
@@ -1085,7 +1092,9 @@ class Pipeline:
         Args:
             name (str): Node name.
             grp (str): Group the node belongs to.
-            processor: Processor class override, or ``"module.ClassName"`` string reference.
+            processor: ``"module.ClassName"`` string reference override — not
+                a class. Stored as-is; resolved to the actual class only at
+                point of use (``_node_processor.py``), never here.
             edges (dict): Edge definitions ``{key: dsl_string}`` (see ``_edge_dsl``),
                 merged on top of the group.
             method (str): Method name override.
@@ -1113,13 +1122,15 @@ class Pipeline:
         if grp not in self.grps:
             raise ValueError(f"Group '{grp}' not found")
 
-        processor = _resolve_processor(processor)
-        adapter = _resolve_adapter(adapter)
+        # processor and adapter are stored as-is (str / {'__ref__':...} dict /
+        # class-or-instance / None) — never eagerly resolved here. Resolution
+        # happens only at point of use (_node_processor.py / resolve_node_adapter).
         if edges is None:
             edges = {}
         if params is None:
             params = {}
-        params = _resolve_ref_values(params)
+        # params is stored as-is too — {'__ref__':...}/{'__callable__':...}
+        # entries inside it are resolved lazily in _node_processor.py.
 
         grp_edges = self.grps[grp].get_attrs(self.grps)['edges']
         self._check_edges(edges, grp_edges)

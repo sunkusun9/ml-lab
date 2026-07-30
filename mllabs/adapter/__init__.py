@@ -96,7 +96,9 @@ def get_adapter(model_or_name):
         >>> adapter = get_adapter('XGBClassifier')
     """
     if isinstance(model_or_name, str):
-        model_name = model_or_name
+        # bare name or a "module.ClassName" ref (Pipeline's processor convention) — either way,
+        # the part after the last '.' is the class name.
+        model_name = model_or_name.rpartition('.')[-1]
     else:
         # model instance or class
         if hasattr(model_or_name, '__name__'):
@@ -109,6 +111,30 @@ def get_adapter(model_or_name):
     if model_name in _LAZY_ADAPTERS:
         return _load_lazy_adapter(model_name)
     return DefaultAdapter()
+
+
+def resolve_node_adapter(processor, adapter_spec):
+    """Resolve a node's effective adapter at the point of use.
+
+    Args:
+        processor: The node's processor as a ``"module.ClassName"`` string —
+            Pipeline always stores/passes processor as a string (see
+            ``_pipeline.py``, ``Pipeline.set_grp``/``set_node``). Used for the
+            by-class default when *adapter_spec* is not given — passed
+            straight to ``get_adapter``, which never needs to import the
+            processor's module just to pick a default adapter.
+        adapter_spec: ``None``, a ``"module.ClassName"`` string, a
+            ``{"__ref__": ..., "__params__": {...}}`` dict, or an already
+            instantiated adapter — whatever a Pipeline node/group stored as-is
+            (Pipeline never eagerly instantiates it; see ``_pipeline.py``).
+
+    Returns:
+        ModelAdapter: An instance, resolved/instantiated only now.
+    """
+    if adapter_spec is not None:
+        from .._serialize import resolve_instance
+        return resolve_instance(adapter_spec)
+    return get_adapter(processor)
 
 
 def __getattr__(name):
@@ -160,5 +186,6 @@ __all__ = [
     'DecisionTreeAdapter',
     'MODEL_ADAPTERS',
     'get_adapter',
+    'resolve_node_adapter',
     'register_adapter',
 ]

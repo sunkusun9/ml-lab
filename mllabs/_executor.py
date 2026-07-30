@@ -351,11 +351,17 @@ def _build_flow_multi(outer_folds, pipeline, nodes, n_jobs, gpu_id_list=None, co
         for inner_idx, flow in enumerate(outer_fold.train_data_flows)
     }
 
+    _gpu_cache = {}  # node name -> bool, avoids re-resolving the adapter on every dispatch tick
+
     def _needs_gpu(node_attrs):
         if not gpu_id_list:
             return False
-        adapter = node_attrs.get('adapter')
-        return adapter is not None and adapter.get_gpu_usage(node_attrs.get('params')) != GPU_NO
+        name = node_attrs['name']
+        if name not in _gpu_cache:
+            from .adapter import resolve_node_adapter
+            adapter = resolve_node_adapter(node_attrs.get('processor'), node_attrs.get('adapter'))
+            _gpu_cache[name] = adapter.get_gpu_usage(node_attrs.get('params')) != GPU_NO
+        return _gpu_cache[name]
 
     workers = []  # [(process, parent_conn)]
     for i in range(n_jobs):
@@ -581,11 +587,17 @@ def _experiment_multi(outer_folds, pipeline, nodes, n_jobs,
     if log_dir is not None:
         os.makedirs(log_dir, exist_ok=True)
 
+    _gpu_cache = {}  # node name -> bool, avoids re-resolving the adapter on every dispatch tick
+
     def _needs_gpu(node_attrs):
         if not gpu_id_list:
             return False
-        adapter = node_attrs.get('adapter')
-        return adapter is not None and adapter.get_gpu_usage(node_attrs.get('params')) != GPU_NO
+        name = node_attrs['name']
+        if name not in _gpu_cache:
+            from .adapter import resolve_node_adapter
+            adapter = resolve_node_adapter(node_attrs.get('processor'), node_attrs.get('adapter'))
+            _gpu_cache[name] = adapter.get_gpu_usage(node_attrs.get('params')) != GPU_NO
+        return _gpu_cache[name]
 
     workers = []
     for i in range(n_jobs):

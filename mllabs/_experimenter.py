@@ -1,9 +1,11 @@
 import os
+import sys
 import uuid
 import pickle as pkl
 import shutil
 import traceback
 import warnings
+import contextlib
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +20,57 @@ from ._logger import resolve_logger
 from ._cache import DataCache
 
 from ._pipeline import Pipeline
+
+
+def _start_native_redirect(log_path):
+    """Redirect the calling process's OS-level stdout/stderr (fd 1/2) to
+    *log_path*, capturing native library chatter (TensorFlow, LightGBM,
+    CatBoost, cuDNN/XLA) written directly to the fd. Split into start/stop so
+    ``Experimenter.open_os_log``/``close_os_log`` can hold the state open
+    across multiple separate ``build``/``exp`` calls, rather than scoping a
+    redirect to a single call.
+
+    The calling process may also write progress/log output the user is meant
+    to see over real stdout (e.g. ``DefaultLogger``'s progress bars via
+    ``sys.stdout.write``/``print``). So before fd 1/2 are redirected to the
+    log file, ``sys.stdout``/``sys.stderr`` are rebound to a duplicate of the
+    original fd — Python-level output keeps reaching the real console, while
+    only native C-level writes (which bypass those Python objects and hit fd
+    1/2 directly) land in the log file.
+
+    Returns:
+        dict: Opaque state to pass to :func:`_stop_native_redirect`.
+    """
+    log_path = str(log_path)
+    log_dir = os.path.dirname(log_path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+
+    saved_out_fd = os.dup(1)
+    saved_err_fd = os.dup(2)
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    sys.stdout = os.fdopen(saved_out_fd, 'w')
+    sys.stderr = os.fdopen(saved_err_fd, 'w')
+    log_f = open(log_path, 'w')
+    os.dup2(log_f.fileno(), 1)
+    os.dup2(log_f.fileno(), 2)
+    return {
+        'saved_out_fd': saved_out_fd, 'saved_err_fd': saved_err_fd,
+        'orig_stdout': orig_stdout, 'orig_stderr': orig_stderr, 'log_f': log_f,
+    }
+
+
+def _stop_native_redirect(state):
+    """Undo :func:`_start_native_redirect` — restore fd 1/2 and sys.stdout/stderr."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.dup2(state['saved_out_fd'], 1)
+    os.dup2(state['saved_err_fd'], 2)
+    sys.stdout.close()  # closes saved_out_fd
+    sys.stderr.close()  # closes saved_err_fd
+    sys.stdout = state['orig_stdout']
+    sys.stderr = state['orig_stderr']
+    state['log_f'].close()
 from ._connector import Connector
 from ._run_common import resolve_common_status, find_stale_nodes, filter_node_names_by_tags
 from ._experimenter_store import ExperimenterStore
@@ -166,6 +219,7 @@ class Experimenter():
         self.collectors = {}
         self.status = "open"
         self.pipeline = None
+        self._os_log_state = None
         self._store = ExperimenterStore(self.path)
         self._store.initialize()
         if pipeline is not None:
@@ -190,6 +244,58 @@ class Experimenter():
     def close(self):
         """Experimenter를 close 상태로 변경"""
         self.set_status("close")
+
+    def open_os_log(self, log_path=None):
+        """Start capturing this process's OS-level stdout/stderr — native
+        library chatter (TensorFlow, LightGBM, CatBoost, cuDNN/XLA) written
+        directly to fd 1/2, which would otherwise pollute the console.
+
+        Unrelated to the ``open``/``close`` experiment status — this only
+        toggles OS-level log capture. While open:
+
+        - ``build``/``exp`` with ``n_jobs=1`` run in this same process, so
+          their native chatter is captured directly by this redirect — no
+          separate handling needed per call.
+        - ``build``/``exp`` with ``n_jobs>1`` additionally redirect each
+          worker's own native chatter to ``{path}/__worker_logs/worker_{i}.log``
+          for the duration of that call. When log capture is *not* open,
+          workers do not redirect at all (matches pre-existing behavior).
+
+        Call :meth:`close_os_log` to stop and restore the console. See also
+        :meth:`os_log` for a context-manager form.
+
+        Args:
+            log_path: File to write to. Default:
+                ``{path}/__worker_logs/master.log``.
+        """
+        if self._os_log_state is not None:
+            raise RuntimeError("OS log capture is already open")
+        if log_path is None:
+            log_path = self.path / '__worker_logs' / 'master.log'
+        self._os_log_state = _start_native_redirect(log_path)
+
+    def close_os_log(self):
+        """Stop OS-level stdout/stderr capture started by :meth:`open_os_log`."""
+        if self._os_log_state is None:
+            return
+        _stop_native_redirect(self._os_log_state)
+        self._os_log_state = None
+
+    @contextlib.contextmanager
+    def os_log(self, log_path=None):
+        """Context manager form of :meth:`open_os_log`/:meth:`close_os_log`.
+
+        Usage::
+
+            with e.os_log():
+                e.build(n_jobs=1)
+                e.exp(n_jobs=4)
+        """
+        self.open_os_log(log_path)
+        try:
+            yield
+        finally:
+            self.close_os_log()
 
     @staticmethod
     def create(data, path, data_names=None, sp=ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
@@ -529,9 +635,10 @@ class Experimenter():
 
         try:
             if n_jobs > 1:
+                log_dir = self.path / '__worker_logs' if self._os_log_state is not None else None
                 errors = _build_flow_multi(self.outer_folds, pipeline, target_nodes, n_jobs,
                                            gpu_id_list=gpu_id_list, collectors=collectors,
-                                           tracker=tracker, log_dir=self.path / '__worker_logs')
+                                           tracker=tracker, log_dir=log_dir)
             else:
                 errors = _build_flow_single(self.outer_folds, pipeline, target_nodes,
                                             gpu_id_list=gpu_id_list, collectors=collectors,
@@ -595,10 +702,11 @@ class Experimenter():
 
         try:
             if n_jobs > 1:
+                log_dir = self.path / '__worker_logs' if self._os_log_state is not None else None
                 errors = _experiment_multi(self.outer_folds, pipeline, target_nodes, n_jobs,
                                            gpu_id_list=gpu_id_list, collectors=collectors,
                                            tracker=tracker, finalize=finalize,
-                                           log_dir=self.path / '__worker_logs')
+                                           log_dir=log_dir)
             else:
                 errors = _experiment_single(self.outer_folds, pipeline, target_nodes,
                                             gpu_id_list=gpu_id_list, collectors=collectors,
@@ -751,30 +859,40 @@ class Experimenter():
         return fold.train_data_flows[inner_idx].get_objs(node_name)
 
     def get_worker_logs(self, worker=None):
-        """Native (OS-level stdout/stderr) output captured from parallel workers.
+        """Native (OS-level stdout/stderr) output captured while OS log
+        capture was open (see :meth:`open_os_log`/:meth:`os_log`).
 
         Multi-worker ``build``/``exp`` (``n_jobs > 1``) redirect each worker's
         stdout/stderr to ``{path}/__worker_logs/worker_{i}.log``, capturing
         native library chatter (TensorFlow, LightGBM, CatBoost, cuDNN/XLA) that
-        would otherwise pollute the console. Each run overwrites the previous.
+        would otherwise pollute the console. This process's own (master)
+        output goes to ``worker_logs/master.log``. Each run overwrites the
+        previous.
 
         Args:
-            worker (int, optional): Return only this worker's log as a string.
+            worker: ``int`` for a per-worker log, ``'master'`` for this
+                process's own log, or ``None`` for all.
 
         Returns:
-            dict[int, str] mapping worker index to captured text, or a single
-            string if *worker* is given. Empty if nothing was captured.
+            dict mapping worker index (``int``) / ``'master'`` to captured
+            text, or a single string if *worker* is given. Empty if nothing
+            was captured.
         """
         log_dir = self.path / '__worker_logs'
         if worker is not None:
-            f = log_dir / f'worker_{worker}.log'
+            fname = 'master.log' if worker == 'master' else f'worker_{worker}.log'
+            f = log_dir / fname
             return f.read_text() if f.exists() else ''
         if not log_dir.exists():
             return {}
-        return {
+        logs = {
             int(f.stem.split('_')[1]): f.read_text()
             for f in sorted(log_dir.glob('worker_*.log'))
         }
+        master_f = log_dir / 'master.log'
+        if master_f.exists():
+            logs['master'] = master_f.read_text()
+        return logs
 
     def _save(self):
         self._store.save_meta({

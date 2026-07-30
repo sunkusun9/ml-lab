@@ -1,4 +1,5 @@
-from .adapter._default import DefaultAdapter
+from .adapter import resolve_node_adapter
+from ._serialize import resolve_processor, resolve_ref_values
 from collections.abc import Iterable
 
 
@@ -21,12 +22,22 @@ def _resolve_col_selectors(params, data):
     return resolved
 
 
+def _resolve_params(params):
+    """Resolve {'__ref__':...}/{'__callable__':...} entries (e.g. ColSelector,
+    a metric function) at point of use — params is stored as a raw spec on
+    the Pipeline node/group, never eagerly resolved (see Pipeline.set_grp/
+    set_node)."""
+    if not params:
+        return params
+    return {k: resolve_ref_values(v) for k, v in params.items()}
+
+
 class TransformProcessor():
     def __init__(self, name, transformer, adapter = None, params = {}):
         self.name = name
-        self.transformer = transformer
-        self.params = params
-        self.adapter = adapter if adapter is not None else DefaultAdapter()
+        self.params = _resolve_params(params)
+        self.adapter = resolve_node_adapter(transformer, adapter)
+        self.transformer = resolve_processor(transformer)  # only place processor becomes a real class
         self.output_vars = None
 
     def fit(self, train_data, valid_data=None, gpu_id_list=None, monitor=None, single_worker=False):
@@ -153,11 +164,11 @@ class TransformProcessor():
 class PredictProcessor():
     def __init__(self, name, estimator, method='predict', adapter = None, params = {}):
         self.name = name
-        self.estimator = estimator
-        self.params = params
+        self.params = _resolve_params(params)
         self.method = method
         self.output_vars = None
-        self.adapter = adapter if adapter is not None else DefaultAdapter()
+        self.adapter = resolve_node_adapter(estimator, adapter)
+        self.estimator = resolve_processor(estimator)
         self.y_columns = None
 
     def fit(self, train_data, valid_data=None, gpu_id_list=None, monitor=None, single_worker=True):

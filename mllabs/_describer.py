@@ -379,7 +379,7 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
 
             if show_params:
                 # 파라미터 정보 포맷팅
-                processor_name = node_attrs['processor'].__name__ if node_attrs['processor'] else 'None'
+                processor_name = node_attrs['processor'] if node_attrs['processor'] else 'None'
                 method = node_attrs['method']
 
                 info_parts = ["<table>"]
@@ -480,7 +480,7 @@ def compare_nodes(pipeline, nodes):
     groups = {}
     for name in nodes:
         proc = attrs_map[name]['processor']
-        proc_name = proc.__name__ if proc is not None else 'None'
+        proc_name = proc if proc is not None else 'None'
         groups.setdefault(proc_name, []).append(name)
 
     result = {}

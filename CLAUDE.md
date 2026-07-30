@@ -104,13 +104,19 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 - **Pipeline을 직접 보유** — `self.pipeline` (constructor `pipeline=` 또는 `set_pipeline(pipeline)`으로 설정). `build`/`exp`/`collect` 등 노드 그래프가 필요한 메소드는 더 이상 `pipeline` 인자를 받지 않고 `self.pipeline` 사용
 - `set_pipeline(pipeline)`: 기존에 pipeline이 이미 설정돼 있었다면 노드 `serial` mismatch를 먼저 감지해 reset 후 교체, `{path}/pipeline.pkl`에 저장. `self.pipeline`은 호출자의 `p` 객체와 동일 참조이므로 이후 `p.set_grp`/`p.set_node`로 in-place 수정하면 별도 재호출 없이 반영됨(단, `build`/`exp` 호출 시마다 `_save_pipeline()`으로 최신 상태 저장)
 - `set_status(status)`: `self.status` 설정 + meta의 status row만 갱신 (전체 meta 재저장 X). `open()`/`close()`/`close_exp()`/`reopen_exp()`가 이걸 사용
+- **OS log capture** (`open_os_log`/`close_os_log`/`os_log`) — `open()`/`close()`(experiment status)와는 **무관한 별개 기능**:
+  - `open_os_log(log_path=None)`: 이 프로세스의 OS-level stdout/stderr(fd 1/2)를 `{path}/__worker_logs/master.log`(기본값)로 dup2 리다이렉트 시작 — `self._os_log_state`에 원본 fd/`sys.stdout`·`stderr` 백업 보관. 이미 open이면 에러
+  - `close_os_log()`: 리다이렉트 원복(`sys.stdout`/`stderr` 및 fd 1/2 복구). open 안 된 상태에서 호출하면 no-op
+  - `os_log(log_path=None)`: 위 둘을 감싼 컨텍스트 매니저 — `with e.os_log(): e.build(n_jobs=1); e.exp(n_jobs=4)`
+  - open~close 구간 동안: `n_jobs=1`인 `build`/`exp`는 같은 프로세스에서 돌기 때문에 마스터 리다이렉트가 그대로 캡처(별도 처리 불필요). `n_jobs>1`이면 그 구간에 한해 `log_dir`이 전달되어 워커별 리다이렉트도 같이 동작(위 `build`/`exp` 항목 참조)
+  - `sys.stdout`/`stderr`는 원본 fd의 dup으로 rebind되므로, capture가 열려 있어도 `DefaultLogger`의 진행률 표시 등 Python 레벨 출력은 그대로 콘솔에 보임 — dup2로 fd 1/2만 로그 파일로 돌리기 때문에 native(C-level) 직접 write만 잡힘
 - `tags` (list[str]): `exp()`를 `nodes=None`으로 호출하면 tag가 교집합인 head만 대상 (비어있으면 전체 head)
 - `cache`: DataCache (LRU, 용량 기반) — `_cache.py`에 분리
 - **pipeline 필요** (`self.pipeline`, `_require_pipeline()`로 미설정 시 에러):
   - `build(nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None)` (stage), `exp(nodes=None, finalize=False, n_jobs=1, gpu_id_list=None, logger=None)` (head)
     - 시작 시 `pipeline.check_data_compatibility(self.data)` 호출 후 serial mismatch 노드 자동 감지 → `reset_nodes()` 후 재빌드
     - `n_jobs`는 실제 작업 수(`total = folds × target_nodes`)로 상한 처리됨 (`min(n_jobs, total)`) — 유휴 워커/progress bar 생성 방지 (`Trainer.train`도 동일)
-    - `n_jobs > 1` 시 각 워커의 stdout/stderr(fd 1/2)를 `{path}/__worker_logs/worker_{i}.log`로 os.dup2 리다이렉트 → 네이티브 라이브러리 출력(TF/LightGBM/CatBoost 등) 캡처, 콘솔 오염 방지
+    - `n_jobs > 1`이고 OS log capture가 open 상태(`open_os_log`/`os_log` 참조)일 때만 각 워커의 stdout/stderr(fd 1/2)를 `{path}/__worker_logs/worker_{i}.log`로 os.dup2 리다이렉트 → 네이티브 라이브러리 출력(TF/LightGBM/CatBoost 등) 캡처, 콘솔 오염 방지. capture가 열려있지 않으면 `log_dir=None`이 전달되어 워커는 리다이렉트를 아예 안 함(기존 기본 동작과 동일)
   - `collect(collector, nodes=None, exist='skip', logger=None)`: ad-hoc 수집 (빌드 완료된 head 노드 대상, nodes로 범위 제한 가능, progress 포함)
   - `collect_missing(collector=None, nodes=None, logger=None)`
   - `get_collect_status(collector, nodes=None)`: `{node: status}` 반환 — `'collected'`/`'not_collected'`/`'finalized'`/`'error'`
@@ -125,7 +131,7 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - 내부적으로 `cls(name, connector, **params)` 조립 후 등록, 조립된 인스턴스 반환. collectors 테이블에 클래스 ref 기록
 - `get_collector(name)`: Collector 반환 (없으면 None)
 - `remove_collector(name)`: Collector 제거 + collectors 테이블 row 삭제
-- `get_worker_logs(worker=None)`: 멀티워커 실행이 캡처한 네이티브 stdout/stderr 반환 — `{worker_idx: text}` 또는 `worker` 지정 시 문자열. 매 실행마다 덮어씀
+- `get_worker_logs(worker=None)`: OS log capture가 open이었던 동안 캡처된 네이티브 stdout/stderr 반환 — `{worker_idx: text, 'master': text}` 또는 `worker`(int 또는 `'master'`) 지정 시 문자열. 매 실행마다 덮어씀
 - `get_train_data(edges, o_idx=0, i_idx=0)` / `get_valid_data(...)` / `get_test_data(...)`, `get_node_train_data(pipeline, node, o_idx=0, i_idx=0)` / `get_node_valid_data(...)` / `get_node_test_data(...)`: 노드 출력 추출 헬퍼
 - `aug_data`: 외부 데이터를 DataSource 수준에서 inner train split에 append — 미퍼시스트, create/load 시 전달
 - 저장/로드: `_save()`(생성 시 1회 full meta), `load(filepath, data, data_key)` — `pipeline.pkl`이 있으면 `self.pipeline`으로 복원(단순 대입, staleness 체크 없음). 로드 후 로컬에서 새로 구성한 pipeline 객체를 다시 붙이려면 `set_pipeline(p)` 호출(staleness 체크 발생)
@@ -184,9 +190,9 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 
 ### Connector (`_connector.py`)
 - `__init__(node_query=None, edges=None, processor=None, role=None)` — 4요소 선택적 매칭
-- `processor`: 클래스 객체 또는 `"module.ClassName"` 문자열 참조(Pipeline.set_grp/set_node와 동일 convention) — `_serialize.resolve_processor`로 즉시 resolve
+- `processor`: **`"module.ClassName"` 문자열만** (클래스 인스턴스 아님) — resolve 안 하고 그대로 저장
 - `match(node_attrs)`: 설정된 요소만 검사, 모두 충족 시 True
-  - node_query: str(regex) 또는 list(in), processor: 일치 검사, role: 'stage'/'head' 일치 검사 (None이면 무시)
+  - node_query: str(regex) 또는 list(in), processor: `node_attrs['processor']`(문자열, Pipeline도 항상 문자열로 저장)와 **문자열 그대로 비교**(정규화 없음 — `set_grp`/`set_node`에 준 것과 같은 문자열 형태를 넘겨야 매칭), role: 'stage'/'head' 일치 검사 (None이면 무시)
   - edges: `{key: dsl_string}` — 각 key에 대해 노드의 resolved `edges[key]` 문자열과 **정확히 일치**해야 함 (contain 기반 아님)
 
 ### Collector (`collector/` 패키지)
@@ -308,10 +314,22 @@ p.set_grp('scale', role='stage', processor=StandardScaler,
 - 아티팩트 `info.pkl`에 `node_serial` 저장
 - `build()`, `exp()`, `train()` 시작 시 현재 serial vs 저장된 serial 비교 → 불일치 노드 자동 reset 후 재빌드
 
+## Lazy resolution: processor / adapter / params (edges DSL과 동일한 지연 원칙)
+- `set_grp`/`set_node`는 `processor`/`adapter`/`params`를 **절대 resolve하거나 instantiate하지 않고 받은 그대로 저장** — 구조만 다루고 실제 값으로의 변환은 전부 사용 시점(`_node_processor.py`)으로 미룸
+- **processor**: 항상 `"module.ClassName"` **문자열**로만 지정(클래스 객체 지원 안 함) — 실제 클래스로 resolve되는 유일한 지점은 `_node_processor.py`(`TransformProcessor`/`PredictProcessor.__init__`의 `resolve_processor()` 호출, 즉 노드 인스턴스를 만드는 바로 그 순간). `Connector`, `_describer.py`(desc_node/compare_nodes), `_executor.py._needs_gpu`는 전부 이 문자열을 그대로 다룸(비교/출력 시 클래스 변환 없음)
+- **adapter**: `None` / `"module.ClassName"` 문자열 / `{"__ref__":...,"__params__":{...}}` dict / 인스턴스 — 어느 형태든 그대로 저장, `resolve_node_adapter(processor, adapter_spec)`(`adapter/__init__.py`)가 사용 시점에 resolve
+- **params**: 내부 `{'__ref__':...}`(예: ColSelector)/`{'__callable__':...}`(예: metric 함수) 항목도 eager 미해제 — `_node_processor.py`의 `_resolve_params()`가 Processor 생성 시점에 `resolve_ref_values()`로 해제
+- **왜**: (1) `mllabs.nn.NNClassifier`처럼 무거운 import(TensorFlow)를 유발하는 processor/adapter가 파이프라인 "정의" 시점(`set_grp`/`set_node`, 심지어 `get_attrs()`가 내부적으로 도는 모든 경로)에 실수로 로드되는 걸 방지 — 실제 `build`/`exp` 실행 시점까지 미뤄짐. (2) diff 비교가 raw spec(str/dict) 비교라 인스턴스 `__eq__` 신뢰성 이슈에서 자유로움
+- **diff 비교 트레이드오프**: eager 정규화가 없으므로 **인스턴스와 그와 동등한 `{'__ref__':...}` spec은 더 이상 동일로 취급되지 않음**(타입이 달라 `update` 발생) — 동일한 spec(같은 str/같은 dict)을 두 번 넘기는 경우는 여전히 `skip`
+- **테스트**: `tests/mock.py`에 여러 테스트 파일에 흩어져 있던 더미 processor 클래스 중 string-ref로 참조돼야 하는 것들을 모아둠 — `tests/`엔 `__init__.py`가 없어 pytest가 bare module(`import mock`)로 수집하므로 `processor='mock.DummyStage'`식으로 참조 가능
+
 ## Processor (`_node_processor.py`)
 - **TransformProcessor**: `fit`, `fit_process`, `process`
 - **PredictProcessor**: `fit`, `fit_process`, `process`
-- `adapter=None` 전달 시 `DefaultAdapter()` 로 fallback
+- **processor(=transformer/estimator)/adapter/params가 실제 값으로 resolve되는 유일한 지점** — Pipeline은 이 셋을 절대 resolve 안 하고 spec 그대로 넘김(아래 "Lazy resolution" 섹션 참조)
+  - `__init__`: `self.transformer`/`self.estimator = resolve_processor(transformer/estimator)`(`"module.ClassName"` 문자열 → 클래스, `_serialize.py`) — 이 라인이 processor가 클래스가 되는 유일한 곳
+  - `self.adapter = resolve_node_adapter(transformer/estimator, adapter)` — **resolve 전의 raw(문자열) processor**를 넘김(resolve된 클래스가 아님 — `get_adapter`가 문자열/클래스 둘 다 처리하므로 순서 무관하지만, "processor는 인스턴스 생성 시점에만 클래스로" 원칙에 맞춰 문자열째로 전달)
+  - `self.params = _resolve_params(params)` — `params` 내 `{'__ref__':...}`/`{'__callable__':...}` 항목을 `resolve_ref_values()`로 해제(ColSelector 인스턴스화 등). `mllab_sampler` 값도 여기서 같이 resolve됨
 - `fit`/`fit_process`에서 y 데이터를 `squeeze()` 후 전달 (sklearn DataConversionWarning 억제)
 - `get_feature_names_out` 반환값은 `list()` 로 변환하여 사용 (list/ndarray 호환)
 - `process()`: `adapter.get_process_data(data)` 로 입력 타입 변환 — polars 등 라이브러리별 호환성 처리
@@ -331,7 +349,9 @@ p.set_grp('scale', role='stage', processor=StandardScaler,
 - `result_objs`: `{name: (callable, mergeable_bool)}`
 - `__eq__`: `type(self) is type(other) and self.__dict__ == other.__dict__` — diff 모드에서 adapter 비교에 사용
 - `__hash__`: `id(self)` — set/dict 키로 사용 가능
-- **adapter 지정 방식** (`set_grp`/`set_node`의 `adapter=`, `resolve_adapter`→`resolve_instance`): 인스턴스 / `"module.ClassName"` 문자열(기본값으로 인스턴스화) / `{"__ref__": ..., "__params__": {...}}` 모두 허용
+- **adapter 지정 방식** (`set_grp`/`set_node`의 `adapter=`): 인스턴스 / `"module.ClassName"` 문자열 / `{"__ref__": ..., "__params__": {...}}` / `None` 모두 허용 — **저장 시점엔 resolve 안 함**, `_node_processor.py`가 인스턴스 생성 시 `resolve_node_adapter(processor, adapter)`로 resolve(`adapter.resolve_node_adapter`, `adapter/__init__.py`)
+  - `resolve_node_adapter(processor, adapter_spec)`: `adapter_spec` 있으면 `resolve_instance(adapter_spec)`, 없으면 `get_adapter(processor)`(processor 클래스명 기반 디폴트 — `get_adapter`는 문자열이면 `rpartition('.')[-1]`로 bare/`"module.ClassName"` 둘 다 처리, 클래스/인스턴스면 `.__name__`/`.__class__.__name__`)
+  - `_executor.py._needs_gpu`(멀티 워커 GPU 디스패치 스케줄링)도 이 함수로 resolve하되, 노드별 결과를 `_gpu_cache`(node name → bool)에 캐싱해 매 dispatch tick 재계산 방지
 - **레지스트리** (`adapter/__init__.py`): `MODEL_ADAPTERS`(모델명→인스턴스), `get_adapter(model_or_name)`. `NNAdapter`는 TF를 top-level import하므로 **지연 로드** — `_LAZY_ADAPTERS`(`NNClassifier`/`NNRegressor`)로 first-use 시 인스턴스화·캐시, 모듈 `__getattr__`로 `NNAdapter` 심볼 노출 → `import mllabs`가 TF를 끌어오지 않음
 
 ## Sampler (`sampler/` 패키지)

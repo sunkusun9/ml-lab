@@ -9,14 +9,13 @@ def _dummy_metric(y, p):
     return 0.5
 
 
-class DummyStage:
-    __name__ = 'DummyStage'
-
-class DummyHead:
-    __name__ = 'DummyHead'
-
-class AnotherProcessor:
-    __name__ = 'AnotherProcessor'
+# processor= below is always a "module.ClassName" string (Pipeline never
+# resolves it) — 'mock.DummyStage' etc. reference the classes in mock.py,
+# used here as opaque, structurally-distinct identifiers (these pipeline-graph
+# tests never actually build/fit a node).
+DummyStage = 'mock.DummyStage'
+DummyHead = 'mock.DummyHead'
+AnotherProcessor = 'mock.AnotherProcessor'
 
 
 @pytest.fixture
@@ -265,116 +264,211 @@ class TestSetNode:
 
 
 class TestProcessorStringRef:
-    def test_set_grp_resolves_string(self, p):
+    """processor is always passed/stored as a "module.ClassName" string —
+    Pipeline never resolves it (see resolve_processor in _node_processor.py,
+    the only place it becomes a real class)."""
+
+    def test_set_grp_stores_string_unresolved(self, p):
         p.set_grp('g1', role='stage', processor='sklearn.preprocessing.StandardScaler',
                   method='transform', edges={'X': '{x1}'})
-        assert p.grps['g1'].processor is StandardScaler
+        assert p.grps['g1'].processor == 'sklearn.preprocessing.StandardScaler'
 
-    def test_set_node_resolves_string(self, p):
-        p.set_grp('g1', role='stage', processor=StandardScaler,
+    def test_set_grp_string_resolved_at_use(self, p):
+        from mllabs._serialize import resolve_processor
+        p.set_grp('g1', role='stage', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': '{x1}'})
+        assert resolve_processor(p.grps['g1'].processor) is StandardScaler
+
+    def test_set_node_stores_string_unresolved(self, p):
+        p.set_grp('g1', role='stage', processor='sklearn.preprocessing.StandardScaler',
                   method='transform', edges={'X': '{x1}'})
         p.set_node('n1', grp='g1', processor='sklearn.tree.DecisionTreeClassifier')
-        assert p.nodes['n1'].processor is DecisionTreeClassifier
+        assert p.nodes['n1'].processor == 'sklearn.tree.DecisionTreeClassifier'
 
-    def test_string_and_class_equivalent_for_diff(self, p):
-        p.set_grp('g1', role='stage', processor=StandardScaler,
+    def test_set_node_string_resolved_at_use(self, p):
+        from mllabs._serialize import resolve_processor
+        p.set_grp('g1', role='stage', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': '{x1}'})
+        p.set_node('n1', grp='g1', processor='sklearn.tree.DecisionTreeClassifier')
+        assert resolve_processor(p.nodes['n1'].processor) is DecisionTreeClassifier
+
+    def test_diff_skips_on_identical_string(self, p):
+        p.set_grp('g1', role='stage', processor='sklearn.preprocessing.StandardScaler',
                   method='transform', edges={'X': '{x1}'})
         r = p.set_grp('g1', role='stage', processor='sklearn.preprocessing.StandardScaler',
                        method='transform', edges={'X': '{x1}'})
         assert r['result'] == 'skip'
 
-    def test_invalid_string_raises(self, p):
-        with pytest.raises(Exception):
-            p.set_grp('g1', role='stage', processor='not.a.real.module.Thing',
+    def test_invalid_string_does_not_raise_at_set_time(self, p):
+        # Structure-only — no import happens until resolve_processor runs at
+        # point of use (_node_processor.py), not at set_grp.
+        r = p.set_grp('g1', role='stage', processor='not.a.real.module.Thing',
                        method='transform', edges={'X': '{x1}'})
+        assert r['result'] == 'new'
+
+    def test_invalid_string_raises_when_resolved(self, p):
+        from mllabs._serialize import resolve_processor
+        p.set_grp('g1', role='stage', processor='not.a.real.module.Thing',
+                  method='transform', edges={'X': '{x1}'})
+        with pytest.raises(Exception):
+            resolve_processor(p.grps['g1'].processor)
 
 
 class TestAdapterStringRef:
-    def test_set_grp_string_ref_instantiates(self, p):
-        from mllabs.adapter import DefaultAdapter
-        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+    """set_grp/set_node no longer eagerly instantiate ``adapter`` — the spec
+    (str / {'__ref__':...} dict) is stored as-is on the Node/Grp, and only
+    resolved to an instance at point of use via ``resolve_node_adapter``."""
+
+    def test_set_grp_string_ref_stored_unresolved(self, p):
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict', edges={'X': '{x1}', 'y': '{target}'},
                   adapter='mllabs.adapter._default.DefaultAdapter')
-        adapter = p.grps['g1'].adapter
+        assert p.grps['g1'].adapter == 'mllabs.adapter._default.DefaultAdapter'
+
+    def test_set_grp_string_ref_resolved_at_use(self, p):
+        from mllabs.adapter import DefaultAdapter, resolve_node_adapter
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                  adapter='mllabs.adapter._default.DefaultAdapter')
+        adapter = resolve_node_adapter('sklearn.tree.DecisionTreeClassifier', p.grps['g1'].adapter)
         assert isinstance(adapter, DefaultAdapter)
         assert adapter.eval_mode == 'both'
 
-    def test_set_grp_ref_dict_with_params(self, p):
-        from mllabs.adapter import DefaultAdapter
-        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+    def test_set_grp_ref_dict_stored_unresolved(self, p):
+        spec = {'__ref__': 'mllabs.adapter._default.DefaultAdapter',
+                '__params__': {'eval_mode': 'valid', 'verbose': 0.25}}
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                  adapter=spec)
+        assert p.grps['g1'].adapter == spec
+
+    def test_set_grp_ref_dict_resolved_at_use(self, p):
+        from mllabs.adapter import DefaultAdapter, resolve_node_adapter
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict', edges={'X': '{x1}', 'y': '{target}'},
                   adapter={'__ref__': 'mllabs.adapter._default.DefaultAdapter',
                            '__params__': {'eval_mode': 'valid', 'verbose': 0.25}})
-        adapter = p.grps['g1'].adapter
+        adapter = resolve_node_adapter('sklearn.tree.DecisionTreeClassifier', p.grps['g1'].adapter)
         assert isinstance(adapter, DefaultAdapter)
         assert adapter.eval_mode == 'valid'
         assert adapter.verbose == pytest.approx(0.25)
 
-    def test_set_node_ref_dict_with_params(self, sp):
-        from mllabs.adapter import DefaultAdapter
+    def test_set_node_ref_dict_resolved_at_use(self, sp):
+        from mllabs.adapter import DefaultAdapter, resolve_node_adapter
         sp.set_node('h1', grp='head1',
                     adapter={'__ref__': 'mllabs.adapter._default.DefaultAdapter',
                              '__params__': {'eval_mode': 'none'}}, exist='replace')
-        adapter = sp.nodes['h1'].adapter
+        node_adapter = sp.nodes['h1'].adapter
+        assert node_adapter == {'__ref__': 'mllabs.adapter._default.DefaultAdapter',
+                                 '__params__': {'eval_mode': 'none'}}
+        adapter = resolve_node_adapter(sp.nodes['h1'].processor, node_adapter)
         assert isinstance(adapter, DefaultAdapter)
         assert adapter.eval_mode == 'none'
 
     def test_instance_passthrough(self, p):
         from mllabs.adapter import DefaultAdapter
         inst = DefaultAdapter(eval_mode='valid')
-        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict', edges={'X': '{x1}', 'y': '{target}'}, adapter=inst)
         assert p.grps['g1'].adapter is inst
 
-    def test_ref_dict_and_instance_equivalent_for_diff(self, p):
+    def test_ref_dict_diff_skips_on_identical_spec(self, p):
+        spec = {'__ref__': 'mllabs.adapter._default.DefaultAdapter',
+                '__params__': {'eval_mode': 'valid'}}
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'}, adapter=spec)
+        r = p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
+                      method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                      adapter=dict(spec))
+        assert r['result'] == 'skip'
+
+    def test_instance_and_equivalent_spec_not_equal_for_diff(self, p):
+        # No longer normalized to the same thing at set time (that would require
+        # eagerly instantiating the spec) — an instance and its equivalent
+        # {'__ref__':...} spec are structurally different and register as a change.
         from mllabs.adapter import DefaultAdapter
-        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict', edges={'X': '{x1}', 'y': '{target}'},
                   adapter=DefaultAdapter(eval_mode='valid'))
-        r = p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+        r = p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
                       method='predict', edges={'X': '{x1}', 'y': '{target}'},
                       adapter={'__ref__': 'mllabs.adapter._default.DefaultAdapter',
                                '__params__': {'eval_mode': 'valid'}})
-        assert r['result'] == 'skip'
+        assert r['result'] == 'update'
 
 
 class TestParamsRefDict:
-    def test_set_grp_resolves_colselector_ref(self, p):
+    """set_grp/set_node no longer eagerly resolve {'__ref__':...}/
+    {'__callable__':...} entries inside params — stored as-is, resolved only
+    at point of use (_node_processor.py's _resolve_params, via
+    resolve_ref_values)."""
+
+    def test_set_grp_stores_colselector_ref_unresolved(self, p):
+        spec = {'__ref__': 'mllabs.ColSelector', '__params__': {'dsl_string': '*@categorical'}}
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                  params={'cat_features': spec, 'max_depth': 3})
+        params = p.grps['g1'].params
+        assert params['cat_features'] == spec
+        assert params['max_depth'] == 3
+
+    def test_set_grp_colselector_ref_resolved_at_use(self, p):
         from mllabs import ColSelector
-        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+        from mllabs._serialize import resolve_ref_values
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict', edges={'X': '{x1}', 'y': '{target}'},
                   params={'cat_features': {'__ref__': 'mllabs.ColSelector',
                                            '__params__': {'dsl_string': '*@categorical'}},
                           'max_depth': 3})
-        params = p.grps['g1'].params
-        assert isinstance(params['cat_features'], ColSelector)
-        assert params['cat_features'].dsl_string == '*@categorical'
-        assert params['max_depth'] == 3
+        sel = resolve_ref_values(p.grps['g1'].params['cat_features'])
+        assert isinstance(sel, ColSelector)
+        assert sel.dsl_string == '*@categorical'
 
-    def test_set_node_resolves_colselector_ref(self, p):
+    def test_set_node_stores_colselector_ref_unresolved(self, p):
+        spec = {'__ref__': 'mllabs.ColSelector', '__params__': {'dsl_string': '^cat_'}}
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'})
+        p.set_node('n1', grp='g1', params={'cat_features': spec})
+        assert p.nodes['n1'].params['cat_features'] == spec
+
+    def test_set_node_colselector_ref_resolved_at_use(self, p):
         from mllabs import ColSelector
-        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+        from mllabs._serialize import resolve_ref_values
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict', edges={'X': '{x1}', 'y': '{target}'})
         p.set_node('n1', grp='g1',
                    params={'cat_features': {'__ref__': 'mllabs.ColSelector',
                                             '__params__': {'dsl_string': '^cat_'}}})
-        sel = p.nodes['n1'].params['cat_features']
+        sel = resolve_ref_values(p.nodes['n1'].params['cat_features'])
         assert isinstance(sel, ColSelector)
         assert sel.dsl_string == '^cat_'
 
-    def test_ref_dict_and_instance_equivalent_for_diff(self, p):
+    def test_ref_dict_diff_skips_on_identical_spec(self, p):
+        spec = {'__ref__': 'mllabs.ColSelector', '__params__': {'dsl_string': '*@categorical'}}
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                  params={'cat_features': spec})
+        r = p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
+                      method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                      params={'cat_features': dict(spec)})
+        assert r['result'] == 'skip'
+
+    def test_instance_and_equivalent_spec_not_equal_for_diff(self, p):
+        # Same trade-off as adapter: an already-instantiated ColSelector and
+        # its equivalent {'__ref__':...} spec are structurally different
+        # since neither is eagerly normalized at set time anymore.
         from mllabs import ColSelector
-        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict', edges={'X': '{x1}', 'y': '{target}'},
                   params={'cat_features': ColSelector('*@categorical')})
-        r = p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+        r = p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
                       method='predict', edges={'X': '{x1}', 'y': '{target}'},
                       params={'cat_features': {'__ref__': 'mllabs.ColSelector',
                                                '__params__': {'dsl_string': '*@categorical'}}})
-        assert r['result'] == 'skip'
+        assert r['result'] == 'update'
 
     def test_plain_string_param_untouched(self, p):
-        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+        p.set_grp('g1', role='head', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict', edges={'X': '{x1}', 'y': '{target}'},
                   params={'eval_metric': 'AUC', 'criterion': 'gini'})
         params = p.grps['g1'].params
@@ -574,12 +668,23 @@ class TestNodeAttrs:
         attrs = p.get_node_attrs('n1')
         assert attrs['params'] == {'a': 1, 'b': 3, 'c': 4}
 
-    def test_adapter_auto_detect(self, p):
+    def test_adapter_left_unresolved_when_unspecified(self, p):
+        # By-processor-class default resolution is deferred to point of use
+        # (resolve_node_adapter), not decided at pipeline-definition time.
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
                   edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
         attrs = p.get_node_attrs('n1')
-        assert attrs['adapter'] is not None
+        assert attrs['adapter'] is None
+
+    def test_adapter_auto_detect_at_use(self, p):
+        from mllabs.adapter import resolve_node_adapter
+        p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
+                  edges={'X': '{x1}'})
+        p.set_node('n1', grp='g1')
+        attrs = p.get_node_attrs('n1')
+        adapter = resolve_node_adapter(attrs['processor'], attrs['adapter'])
+        assert adapter is not None
 
     def test_node_attrs_caching(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
@@ -1015,7 +1120,7 @@ class TestCompareNodes:
         p.set_node('n1', grp='g1', params={'a': 1, 'b': 2})
         p.set_node('n2', grp='g1', params={'a': 1, 'b': 3})
         result = p.compare_nodes(['n1', 'n2'])
-        df = result['DummyHead']
+        df = result[DummyHead]
         assert ('params', 'b') in df.columns
         assert ('params', 'a') not in df.columns
 
@@ -1027,8 +1132,8 @@ class TestCompareNodes:
                   edges={'X': '{x1}', 'y': '{target}'})
         p.set_node('n2', grp='g2', params={'a': 2})
         result = p.compare_nodes(['n1', 'n2'])
-        assert 'DummyHead' in result
-        assert 'AnotherProcessor' in result
+        assert DummyHead in result
+        assert AnotherProcessor in result
 
     def test_edge_differences(self, p):
         p.set_grp('g1', role='stage', processor=DummyStage, method='transform',
@@ -1039,7 +1144,7 @@ class TestCompareNodes:
         p.set_node('n1', grp='g2', edges={'X': 's1:({a, b})'})
         p.set_node('n2', grp='g2', edges={'X': 's1:({a, c})'})
         result = p.compare_nodes(['n1', 'n2'])
-        df = result['DummyHead']
+        df = result[DummyHead]
         x_cols = [c for c in df.columns if c[0] == 'X']
         assert len(x_cols) > 0
 
@@ -1049,7 +1154,7 @@ class TestCompareNodes:
         p.set_node('n1', grp='g1', params={'a': 1})
         p.set_node('n2', grp='g1', params={'a': 1})
         result = p.compare_nodes(['n1', 'n2'])
-        df = result['DummyHead']
+        df = result[DummyHead]
         assert len(df.columns) == 0
 
 

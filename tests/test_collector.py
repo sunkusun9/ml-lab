@@ -119,14 +119,12 @@ class TestConnector:
         assert c.match({'name': 'dt3'}) is False
 
     def test_match_processor(self):
-        c = Connector(processor=DecisionTreeClassifier)
-        assert c.match({'name': 'dt', 'processor': DecisionTreeClassifier}) is True
-        assert c.match({'name': 'dt', 'processor': StandardScaler}) is False
-
-    def test_match_processor_by_ref_string(self):
+        # Connector.processor is a "module.ClassName" string, compared
+        # directly (string equality) against node_attrs['processor'], which
+        # Pipeline also always stores as that same string form.
         c = Connector(processor='sklearn.tree.DecisionTreeClassifier')
-        assert c.match({'name': 'dt', 'processor': DecisionTreeClassifier}) is True
-        assert c.match({'name': 'dt', 'processor': StandardScaler}) is False
+        assert c.match({'name': 'dt', 'processor': 'sklearn.tree.DecisionTreeClassifier'}) is True
+        assert c.match({'name': 'dt', 'processor': 'sklearn.preprocessing.StandardScaler'}) is False
 
     def test_match_edges(self):
         c = Connector(edges={'X': '{f1}'})
@@ -143,10 +141,10 @@ class TestConnector:
         assert c.match({'name': 'dt', 'edges': {'X': '{f1}'}}) is False
 
     def test_match_combined(self):
-        c = Connector(node_query='dt', processor=DecisionTreeClassifier)
-        assert c.match({'name': 'dt1', 'processor': DecisionTreeClassifier}) is True
-        assert c.match({'name': 'dt1', 'processor': StandardScaler}) is False
-        assert c.match({'name': 'scaler', 'processor': DecisionTreeClassifier}) is False
+        c = Connector(node_query='dt', processor='sklearn.tree.DecisionTreeClassifier')
+        assert c.match({'name': 'dt1', 'processor': 'sklearn.tree.DecisionTreeClassifier'}) is True
+        assert c.match({'name': 'dt1', 'processor': 'sklearn.preprocessing.StandardScaler'}) is False
+        assert c.match({'name': 'scaler', 'processor': 'sklearn.tree.DecisionTreeClassifier'}) is False
 
 
 class TestMetricCollector:

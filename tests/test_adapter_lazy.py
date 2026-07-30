@@ -38,3 +38,26 @@ class TestLazyTensorFlow:
         import mllabs.adapter as A
         with pytest.raises(AttributeError):
             A.NoSuchAdapter
+
+    def test_set_node_with_nn_named_processor_does_not_load_tensorflow(self):
+        # Pipeline.set_grp/set_node must not resolve the by-processor-class
+        # default adapter eagerly — that used to import TensorFlow just from
+        # defining a node, before any build/exp ever ran.
+        code = (
+            "import sys\n"
+            "from mllabs import Pipeline\n"
+            "class NNClassifier:\n"
+            "    __name__ = 'NNClassifier'\n"
+            "    def __init__(self, **kwargs): pass\n"
+            "p = Pipeline()\n"
+            "p.set_datasource({'x1': 'numerical', 'target': 'numerical'})\n"
+            "p.set_grp('g1', role='head', processor=NNClassifier, method='predict',\n"
+            "          edges={'X': '{x1}', 'y': '{target}'})\n"
+            "p.set_node('n1', grp='g1')\n"
+            "p.get_node_attrs('n1')\n"
+            "assert 'tensorflow' not in sys.modules, 'tensorflow eagerly imported'\n"
+            "print('ok')\n"
+        )
+        r = _run(code)
+        assert r.returncode == 0, r.stderr
+        assert 'ok' in r.stdout
