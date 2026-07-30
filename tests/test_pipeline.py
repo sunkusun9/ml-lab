@@ -289,6 +289,99 @@ class TestProcessorStringRef:
                        method='transform', edges={'X': '{x1}'})
 
 
+class TestAdapterStringRef:
+    def test_set_grp_string_ref_instantiates(self, p):
+        from mllabs.adapter import DefaultAdapter
+        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                  adapter='mllabs.adapter._default.DefaultAdapter')
+        adapter = p.grps['g1'].adapter
+        assert isinstance(adapter, DefaultAdapter)
+        assert adapter.eval_mode == 'both'
+
+    def test_set_grp_ref_dict_with_params(self, p):
+        from mllabs.adapter import DefaultAdapter
+        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                  adapter={'__ref__': 'mllabs.adapter._default.DefaultAdapter',
+                           '__params__': {'eval_mode': 'valid', 'verbose': 0.25}})
+        adapter = p.grps['g1'].adapter
+        assert isinstance(adapter, DefaultAdapter)
+        assert adapter.eval_mode == 'valid'
+        assert adapter.verbose == pytest.approx(0.25)
+
+    def test_set_node_ref_dict_with_params(self, sp):
+        from mllabs.adapter import DefaultAdapter
+        sp.set_node('h1', grp='head1',
+                    adapter={'__ref__': 'mllabs.adapter._default.DefaultAdapter',
+                             '__params__': {'eval_mode': 'none'}}, exist='replace')
+        adapter = sp.nodes['h1'].adapter
+        assert isinstance(adapter, DefaultAdapter)
+        assert adapter.eval_mode == 'none'
+
+    def test_instance_passthrough(self, p):
+        from mllabs.adapter import DefaultAdapter
+        inst = DefaultAdapter(eval_mode='valid')
+        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'}, adapter=inst)
+        assert p.grps['g1'].adapter is inst
+
+    def test_ref_dict_and_instance_equivalent_for_diff(self, p):
+        from mllabs.adapter import DefaultAdapter
+        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                  adapter=DefaultAdapter(eval_mode='valid'))
+        r = p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+                      method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                      adapter={'__ref__': 'mllabs.adapter._default.DefaultAdapter',
+                               '__params__': {'eval_mode': 'valid'}})
+        assert r['result'] == 'skip'
+
+
+class TestParamsRefDict:
+    def test_set_grp_resolves_colselector_ref(self, p):
+        from mllabs import ColSelector
+        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                  params={'cat_features': {'__ref__': 'mllabs.ColSelector',
+                                           '__params__': {'dsl_string': '*@categorical'}},
+                          'max_depth': 3})
+        params = p.grps['g1'].params
+        assert isinstance(params['cat_features'], ColSelector)
+        assert params['cat_features'].dsl_string == '*@categorical'
+        assert params['max_depth'] == 3
+
+    def test_set_node_resolves_colselector_ref(self, p):
+        from mllabs import ColSelector
+        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'})
+        p.set_node('n1', grp='g1',
+                   params={'cat_features': {'__ref__': 'mllabs.ColSelector',
+                                            '__params__': {'dsl_string': '^cat_'}}})
+        sel = p.nodes['n1'].params['cat_features']
+        assert isinstance(sel, ColSelector)
+        assert sel.dsl_string == '^cat_'
+
+    def test_ref_dict_and_instance_equivalent_for_diff(self, p):
+        from mllabs import ColSelector
+        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                  params={'cat_features': ColSelector('*@categorical')})
+        r = p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+                      method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                      params={'cat_features': {'__ref__': 'mllabs.ColSelector',
+                                               '__params__': {'dsl_string': '*@categorical'}}})
+        assert r['result'] == 'skip'
+
+    def test_plain_string_param_untouched(self, p):
+        p.set_grp('g1', role='head', processor=DecisionTreeClassifier,
+                  method='predict', edges={'X': '{x1}', 'y': '{target}'},
+                  params={'eval_metric': 'AUC', 'criterion': 'gini'})
+        params = p.grps['g1'].params
+        assert params['eval_metric'] == 'AUC'
+        assert params['criterion'] == 'gini'
+
+
 class TestAddRemoveTag:
     def test_add_tag_basic(self, sp):
         sp.add_tag('h1', 'cv')

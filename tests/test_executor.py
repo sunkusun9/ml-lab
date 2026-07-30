@@ -11,6 +11,23 @@ from mllabs._trainer import Trainer
 from mllabs._pipeline import Pipeline
 from mllabs._cache import DataCache
 from mllabs._data_wrapper import wrap
+from mllabs._logger import ProgressSessionLogger
+
+
+class RecordingLogger(ProgressSessionLogger):
+    """No-op progress logger that records session create/remove ids."""
+    def __init__(self):
+        super().__init__(level=[])
+        self.created = []
+        self.removed = []
+
+    def create_session(self, session_id, **kwargs):
+        self.created.append(session_id)
+        return super().create_session(session_id, **kwargs)
+
+    def remove_session(self, session_id):
+        self.removed.append(session_id)
+        return super().remove_session(session_id)
 
 
 class BadProcessor:
@@ -99,6 +116,37 @@ class TestBuildFlowMulti:
         exp.build(n_jobs=2)
 
         assert exp.outer_folds[0].train_data_flows[0].get_info('scaler')['build_id'] == build_id
+
+
+class TestNJobsCap:
+    """n_jobs is capped to the actual task count so no idle workers/progress bars."""
+
+    def test_build_caps_worker_sessions_to_total(self, exp, pipeline):
+        # 2 folds x 1 stage node = 2 tasks; request far more workers
+        pipeline.set_grp('scale', role='stage', processor=StandardScaler,
+                          method='transform', edges={'X': '{f1}'})
+        pipeline.set_node('scaler', grp='scale')
+
+        logger = RecordingLogger()
+        exp.build(n_jobs=8, logger=logger)
+
+        worker_sessions = [s for s in logger.created if s != 0]
+        assert worker_sessions == [1, 2]                     # capped to total=2, not 8
+        assert sorted(logger.created) == sorted(logger.removed)  # every bar torn down
+        for flow in exp.outer_folds[0].train_data_flows:
+            assert flow.status('scaler') == 'built'
+
+    def test_exp_caps_worker_sessions_to_total(self, exp, pipeline):
+        _setup_full(pipeline)
+        exp.build(n_jobs=2)
+
+        logger = RecordingLogger()
+        exp.exp(n_jobs=8, logger=logger)                     # 2 folds x 1 head = 2 tasks
+
+        worker_sessions = [s for s in logger.created if s != 0]
+        assert worker_sessions == [1, 2]
+        assert sorted(logger.created) == sorted(logger.removed)
+        assert exp.get_status('dt') == 'built'
 
 
 class TestDataPrepErrors:

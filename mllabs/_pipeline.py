@@ -5,6 +5,8 @@ from pathlib import Path
 from ._describer import desc_pipeline, desc_node, compare_nodes
 from .adapter  import get_adapter
 from ._serialize import resolve_processor as _resolve_processor
+from ._serialize import resolve_adapter as _resolve_adapter
+from ._serialize import resolve_ref_values as _resolve_ref_values
 from ._pipeline_store import PipelineStore
 from ._edge_dsl import referenced_nodes, validate_edges
 
@@ -827,8 +829,12 @@ class Pipeline:
             edges (dict): Edge definitions ``{key: dsl_string}`` (see ``_edge_dsl``).
             method (str): Processor method name (e.g. ``'fit_transform'``).
             parent (str): Parent group name, or ``None``.
-            adapter: ModelAdapter instance.
-            params (dict): Constructor parameters for the processor.
+            adapter: ModelAdapter instance, a ``"module.ClassName"`` string
+                (instantiated with defaults), or ``{"__ref__": ..., "__params__": {...}}``.
+            params (dict): Constructor parameters for the processor. A value of
+                the form ``{"__ref__": "mod.Cls", "__params__": {...}}`` is
+                instantiated (e.g. a ``ColSelector``); ``{"__callable__": "mod.fn"}``
+                resolves to the object itself (not called); plain strings/scalars pass through.
             exist (str): Conflict resolution — ``'diff'`` (default, skip if unchanged),
                 ``'skip'``, ``'error'``, or ``'replace'``.
 
@@ -843,10 +849,12 @@ class Pipeline:
         if name in self.nodes:
             raise ValueError(f"Name '{name}' already exists as a node")
         processor = _resolve_processor(processor)
+        adapter = _resolve_adapter(adapter)
         if edges is None:
             edges = {}
         if params is None:
             params = {}
+        params = _resolve_ref_values(params)
 
         if parent is not None:
             if parent not in self.grps:
@@ -1081,8 +1089,12 @@ class Pipeline:
             edges (dict): Edge definitions ``{key: dsl_string}`` (see ``_edge_dsl``),
                 merged on top of the group.
             method (str): Method name override.
-            adapter: ModelAdapter instance override.
-            params (dict): Constructor parameter overrides.
+            adapter: ModelAdapter instance override, a ``"module.ClassName"`` string
+                (instantiated with defaults), or ``{"__ref__": ..., "__params__": {...}}``.
+            params (dict): Constructor parameter overrides. A value of the form
+                ``{"__ref__": "mod.Cls", "__params__": {...}}`` is instantiated
+                (e.g. a ``ColSelector``); ``{"__callable__": "mod.fn"}`` resolves to
+                the object itself (not called); plain strings/scalars pass through.
             exist (str): Conflict resolution — ``'diff'`` (default), ``'skip'``,
                 ``'error'``, or ``'replace'``.
 
@@ -1102,10 +1114,12 @@ class Pipeline:
             raise ValueError(f"Group '{grp}' not found")
 
         processor = _resolve_processor(processor)
+        adapter = _resolve_adapter(adapter)
         if edges is None:
             edges = {}
         if params is None:
             params = {}
+        params = _resolve_ref_values(params)
 
         grp_edges = self.grps[grp].get_attrs(self.grps)['edges']
         self._check_edges(edges, grp_edges)

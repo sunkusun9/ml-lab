@@ -303,6 +303,7 @@ class Trainer:
             return
 
         total = len(self.train_folds) * (len(target_stages) + len(target_heads))
+        n_jobs = min(n_jobs, total)
         tracker = LoggerExecuteTracker(total, n_jobs, logger)
         error_nodes = set()
         try:

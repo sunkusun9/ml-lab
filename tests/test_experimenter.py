@@ -276,46 +276,49 @@ class TestExp:
     def test_exp_with_collector(self, exp, pipeline):
         _setup_full(pipeline)
         exp.build()
-        mc = MetricCollector(
-            'acc', Connector(),
-            output_var=None,
-            metric_func=accuracy_metric,
+        mc = exp.set_collector(
+            'acc', MetricCollector, Connector(),
+            params={'output_var': None, 'metric_func': accuracy_metric},
         )
-        exp.add_collector(mc)
+        exp.exp()
+        assert mc.has('dt')
+
+    def test_set_collector_resolves_callable_metric(self, exp, pipeline):
+        from sklearn.metrics import balanced_accuracy_score
+        _setup_full(pipeline)
+        exp.build()
+        mc = exp.set_collector(
+            'bacc', MetricCollector, Connector(),
+            params={'output_var': None,
+                    'metric_func': {'__callable__': 'sklearn.metrics.balanced_accuracy_score'}},
+        )
+        assert mc.metric_func is balanced_accuracy_score
         exp.exp()
         assert mc.has('dt')
 
 
 class TestCollectorManagement:
-    def test_add_collector(self, exp, pipeline):
-        mc = MetricCollector('acc', Connector(),
-                            output_var=None,
-                            metric_func=dummy_metric)
-        exp.add_collector(mc)
+    def test_set_collector(self, exp, pipeline):
+        mc = exp.set_collector('acc', MetricCollector, Connector(),
+                               params={'output_var': None, 'metric_func': dummy_metric})
         assert exp.get_collector('acc') is not None
         assert mc.path is not None
 
-    def test_add_collector_skip(self, exp, pipeline):
-        mc1 = MetricCollector('acc', Connector(),
-                             output_var=None,
-                             metric_func=dummy_metric)
-        mc2 = MetricCollector('acc', Connector(),
-                             output_var=None,
-                             metric_func=dummy_metric)
-        exp.add_collector(mc1)
-        result = exp.add_collector(mc2, exist='skip')
+    def test_set_collector_skip(self, exp, pipeline):
+        mc1 = exp.set_collector('acc', MetricCollector, Connector(),
+                                params={'output_var': None, 'metric_func': dummy_metric})
+        result = exp.set_collector('acc', MetricCollector, Connector(),
+                                   params={'output_var': None, 'metric_func': dummy_metric},
+                                   exist='skip')
         assert result is mc1
 
-    def test_add_collector_error(self, exp, pipeline):
-        mc1 = MetricCollector('acc', Connector(),
-                             output_var=None,
-                             metric_func=dummy_metric)
-        exp.add_collector(mc1)
-        mc2 = MetricCollector('acc', Connector(),
-                             output_var=None,
-                             metric_func=dummy_metric)
+    def test_set_collector_error(self, exp, pipeline):
+        exp.set_collector('acc', MetricCollector, Connector(),
+                          params={'output_var': None, 'metric_func': dummy_metric})
         with pytest.raises(RuntimeError):
-            exp.add_collector(mc2, exist='error')
+            exp.set_collector('acc', MetricCollector, Connector(),
+                              params={'output_var': None, 'metric_func': dummy_metric},
+                              exist='error')
 
 
 class TestResetNodes:
@@ -449,8 +452,8 @@ class TestStateManagement:
     def test_reopen_exp_collector_data_valid(self, exp, pipeline):
         _setup_full(pipeline)
         exp.build()
-        mc = MetricCollector('acc', Connector(edges = {'y': '{target}'}), output_var=None, metric_func=accuracy_metric)
-        exp.add_collector(mc)
+        mc = exp.set_collector('acc', MetricCollector, Connector(edges={'y': '{target}'}),
+                               params={'output_var': None, 'metric_func': accuracy_metric})
         exp.exp()
         assert mc.has('dt')
         first_result = mc.get_metrics_agg(None)[0]
@@ -466,8 +469,8 @@ class TestStateManagement:
     def test_reset_nodes_clears_collector_sub(self, exp, pipeline):
         _setup_full(pipeline)
         exp.build()
-        mc = MetricCollector('acc', Connector(), output_var=None, metric_func=accuracy_metric)
-        exp.add_collector(mc)
+        mc = exp.set_collector('acc', MetricCollector, Connector(),
+                               params={'output_var': None, 'metric_func': accuracy_metric})
         exp.exp()
 
         mc._buf['dt'] = [{'valid': 0.9}]
@@ -487,8 +490,8 @@ class TestStateManagement:
     def test_reopen_exp_after_save_load(self, exp, pipeline, sample_data):
         _setup_full(pipeline)
         exp.build()
-        mc = MetricCollector('acc', Connector(edges = {'y': '{target}'}), output_var=None, metric_func=accuracy_metric)
-        exp.add_collector(mc)
+        mc = exp.set_collector('acc', MetricCollector, Connector(edges={'y': '{target}'}),
+                               params={'output_var': None, 'metric_func': accuracy_metric})
         exp.exp()
         first_result = mc.get_metrics_agg(None)[0]
         exp.close_exp()
@@ -535,7 +538,7 @@ class TestSetPipeline:
 class TestSaveLoad:
     def test_save_creates_file(self, exp, pipeline):
         _setup_stage(pipeline)
-        assert (exp.path / '__exp.pkl').exists()
+        assert (exp.path / '__exp.db').exists()
 
     def test_load_restores(self, exp, pipeline, sample_data):
         _setup_full(pipeline)
@@ -573,6 +576,51 @@ class TestSaveLoad:
         loaded = Experimenter.load(path, sample_data)
         assert loaded.get_n_splits() == exp.get_n_splits()
         assert loaded.get_n_splits_inner() == exp.get_n_splits_inner()
+
+    def test_persistence_layout(self, exp, pipeline):
+        _setup_stage(pipeline)
+        assert (exp.path / '__exp.db').exists()
+        assert (exp.path / '__splitters.pkl').exists()
+        assert not (exp.path / '__exp.pkl').exists()
+
+    def test_meta_table_holds_only_simple_values(self, exp):
+        meta = exp._store.fetch_meta()
+        assert meta['status'] == 'open'
+        assert 'exp_id' in meta and 'tags' in meta
+        assert 'sp' not in meta and 'splitter_params' not in meta
+
+    def test_load_restores_collector_via_ref(self, exp, pipeline, sample_data):
+        _setup_full(pipeline)
+        exp.build()
+        exp.set_collector('acc', MetricCollector, Connector(edges={'y': '{target}'}),
+                          params={'output_var': None, 'metric_func': accuracy_metric})
+        exp.exp()
+
+        loaded = Experimenter.load(exp.path, sample_data)
+        restored = loaded.get_collector('acc')
+        assert type(restored) is MetricCollector
+        assert restored.has('dt')
+
+    def test_collectors_table_stores_class_ref(self, exp, pipeline):
+        exp.set_collector('acc', MetricCollector, Connector(),
+                          params={'output_var': None, 'metric_func': dummy_metric})
+        collectors = exp._store.fetch_collectors()
+        assert collectors['acc'] is MetricCollector
+
+    def test_remove_collector_drops_db_row(self, exp, pipeline, sample_data):
+        exp.set_collector('acc', MetricCollector, Connector(),
+                          params={'output_var': None, 'metric_func': dummy_metric})
+        exp.remove_collector('acc')
+        assert 'acc' not in exp._store.fetch_collectors()
+        loaded = Experimenter.load(exp.path, sample_data)
+        assert loaded.get_collector('acc') is None
+
+    def test_set_status_updates_only_status_row(self, exp, sample_data):
+        exp.title = 'mutated_not_saved'
+        exp.set_status('closed')
+        loaded = Experimenter.load(exp.path, sample_data)
+        assert loaded.status == 'closed'
+        assert loaded.title != 'mutated_not_saved'
 
 
 class TestGetStatus:

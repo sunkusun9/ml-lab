@@ -20,7 +20,9 @@ from ._cache import DataCache
 from ._pipeline import Pipeline
 from ._connector import Connector
 from ._run_common import resolve_common_status, find_stale_nodes, filter_node_names_by_tags
-from .collector import Collector, MetricCollector, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector, ProcessCollector
+from ._experimenter_store import ExperimenterStore
+from ._serialize import resolve_processor, resolve_instance, resolve_ref_values
+from .collector import Collector
 
 
 class OuterFold:
@@ -164,6 +166,8 @@ class Experimenter():
         self.collectors = {}
         self.status = "open"
         self.pipeline = None
+        self._store = ExperimenterStore(self.path)
+        self._store.initialize()
         if pipeline is not None:
             self.set_pipeline(pipeline)
         if _save:
@@ -174,15 +178,18 @@ class Experimenter():
         if self.status != "open":
             raise RuntimeError(f"Experimenter is '{self.status}'. Only 'open' status allows modifications.")
 
+    def set_status(self, status):
+        """Set status and persist only the status meta row."""
+        self.status = status
+        self._store.set_meta('status', status)
+
     def open(self):
         """Experimenter를 open 상태로 변경"""
-        self.status = "open"
-        self._save()
+        self.set_status("open")
 
     def close(self):
         """Experimenter를 close 상태로 변경"""
-        self.status = "close"
-        self._save()
+        self.set_status("close")
 
     @staticmethod
     def create(data, path, data_names=None, sp=ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
@@ -235,16 +242,24 @@ class Experimenter():
             if collector_path.exists():
                 shutil.rmtree(collector_path)
             del self.collectors[name]
-            self._save()
+            self._store.remove_collector(name)
 
-    def add_collector(self, collector, exist = 'skip'):
-        """Register a Collector.
+    def set_collector(self, name, collector, connector, params=None, exist='skip'):
+        """Build and register a Collector from its parts.
 
         Does not collect from already-built Head nodes — call
         :meth:`collect` explicitly afterward if needed.
 
         Args:
-            collector (Collector): Collector instance to register.
+            name (str): Collector name.
+            collector: Collector class, or ``"module.ClassName"`` string reference.
+            connector: :class:`~mllabs.Connector` instance, or
+                ``{"__ref__": ..., "__params__": {...}}`` spec.
+            params (dict): Remaining constructor parameters for the collector
+                (everything after ``name``/``connector``). A value of the form
+                ``{"__callable__": "mod.fn"}`` resolves to the referenced object
+                (not called — e.g. a metric function); ``{"__ref__": "mod.Cls",
+                "__params__": {...}}`` is instantiated.
             exist (str): ``'skip'`` (default) returns existing if already registered;
                 ``'error'`` raises; ``'replace'`` removes the existing collector and
                 registers the new one from scratch.
@@ -252,23 +267,26 @@ class Experimenter():
         Returns:
             Collector: The registered collector.
         """
-        if collector.name in self.collectors:
+        if name in self.collectors:
             if exist == 'skip':
-                return self.collectors[collector.name]
+                return self.collectors[name]
             elif exist == 'error':
                 raise RuntimeError("")
             elif exist == 'replace':
-                self.remove_collector(collector.name)
+                self.remove_collector(name)
 
         self._check_open()
-        collector.path = self.path / '__collector' / collector.name
+        cls = resolve_processor(collector)
+        connector = resolve_instance(connector)
+        collector = cls(name, connector, **resolve_ref_values(params or {}))
+        collector.path = self.path / '__collector' / name
         collector.on_attach(self)
         collector._setup(
             len(self.outer_folds), len(self.outer_folds[0].train_data_flows)
         )
         collector.save()
-        self.collectors[collector.name] = collector
-        self._save()
+        self.collectors[name] = collector
+        self._store.write_collector(collector)
         return collector
 
     def get_collect_status(self, collector, nodes=None):
@@ -377,8 +395,7 @@ class Experimenter():
                         if store.status(name) == 'built':
                             finalized_list.append(name)
                             store.finalize(name)
-        self.status = "closed"
-        self._save()
+        self.set_status("closed")
         return finalized_list
 
     def reopen_exp(self):
@@ -395,9 +412,8 @@ class Experimenter():
                 for name in store.list_nodes():
                     if store.status(name) == 'finalized':
                         store.reset_node(name)
-        self.status = "open"
+        self.set_status("open")
         self.build()
-        self._save()
 
     def reset_nodes(self, nodes):
         """Reset nodes to ``init`` state.
@@ -508,6 +524,7 @@ class Experimenter():
         logger.info(f"Building {len(target_nodes)} node(s)")
         collectors = list(self.collectors.values())
         total = sum(len(of.train_data_flows) for of in self.outer_folds) * len(target_nodes)
+        n_jobs = min(n_jobs, total)
         tracker = LoggerExecuteTracker(total, n_jobs, logger)
 
         try:
@@ -573,6 +590,7 @@ class Experimenter():
         logger.info(f"Experimenting {len(target_nodes)} node(s)")
         collectors = list(self.collectors.values())
         total = sum(len(of.train_data_flows) for of in self.outer_folds) * len(target_nodes)
+        n_jobs = min(n_jobs, total)
         tracker = LoggerExecuteTracker(total, n_jobs, logger)
 
         try:
@@ -731,25 +749,24 @@ class Experimenter():
             return artifact_store.get_objs(node_name)
         return fold.train_data_flows[inner_idx].get_objs(node_name)
 
-    def _save(self, filepath=None):
-        if filepath is None:
-            filepath = self.path / '__exp.pkl'
-
-        save_data = {
+    def _save(self):
+        self._store.save_meta({
             'data_key': self.data_key,
             'title': self.title,
-            'sp': self.sp,
-            'sp_v': self.sp_v,
-            'splitter_params': self.splitter_params,
             'cache_maxsize': self.cache_maxsize,
             'exp_id': self.exp_id,
             'tags': self.tags,
-            'collector_keys': {name: type(c).__name__ for name, c in self.collectors.items()},
-            'status': self.status
-        }
+            'status': self.status,
+        })
+        self._save_splitters()
 
-        with open(filepath, 'wb') as f:
-            pkl.dump(save_data, f)
+    def _save_splitters(self):
+        with open(self.path / '__splitters.pkl', 'wb') as f:
+            pkl.dump({
+                'sp': self.sp,
+                'sp_v': self.sp_v,
+                'splitter_params': self.splitter_params,
+            }, f)
 
     @staticmethod
     def load(filepath, data, data_key=None, aug_data=None):
@@ -757,7 +774,7 @@ class Experimenter():
 
         Args:
             filepath (str | Path): Path to the experiment directory
-                (contains ``__exp.pkl``).
+                (contains ``__exp.db``).
             data: Dataset to attach. Must match the original data shape.
             data_key (str, optional): If the saved experiment has a ``data_key``,
                 this must match.
@@ -769,56 +786,44 @@ class Experimenter():
         Raises:
             ValueError: If ``data_key`` does not match the saved value.
         """
-        COLLECTOR_TYPES = {
-            'MetricCollector': MetricCollector,
-            'StackingCollector': StackingCollector,
-            'ModelAttrCollector': ModelAttrCollector,
-            'SHAPCollector': SHAPCollector,
-            'OutputCollector': OutputCollector,
-            'ProcessCollector': ProcessCollector,
-        }
-
         filepath = Path(filepath)
-        with open(filepath / '__exp.pkl', 'rb') as f:
-            save_data = pkl.load(f)
+        store = ExperimenterStore(filepath)
+        meta = store.fetch_meta()
 
-        saved_data_key = save_data.get('data_key')
+        saved_data_key = meta.get('data_key')
         if saved_data_key is not None and saved_data_key != data_key:
             raise ValueError(
                 f"data_key mismatch: saved='{saved_data_key}', provided='{data_key}'"
             )
 
+        with open(filepath / '__splitters.pkl', 'rb') as f:
+            splitters = pkl.load(f)
+
         exp = Experimenter(
             data=data,
             path=filepath,
-            sp=save_data['sp'],
-            sp_v=save_data['sp_v'],
-            splitter_params=save_data['splitter_params'],
-            title=save_data['title'],
+            sp=splitters['sp'],
+            sp_v=splitters['sp_v'],
+            splitter_params=splitters['splitter_params'],
+            title=meta['title'],
             data_key=saved_data_key,
-            cache_maxsize=save_data.get('cache_maxsize', 4 * 1024 ** 3),
+            cache_maxsize=meta.get('cache_maxsize', 4 * 1024 ** 3),
             aug_data=aug_data,
             _save=False
         )
-        exp.exp_id = save_data['exp_id']
-        exp.tags = save_data.get('tags', [])
-        exp.status = save_data['status']
+        exp.exp_id = meta['exp_id']
+        exp.tags = meta.get('tags', [])
+        exp.status = meta['status']
 
         pipeline_path = filepath / 'pipeline.pkl'
         if pipeline_path.exists():
             with open(pipeline_path, 'rb') as f:
                 exp.pipeline = pkl.load(f)
 
-        # Collector 복원
-        collector_keys = save_data.get('collector_keys', {})
-        for coll_name, type_name in collector_keys.items():
-            cls = COLLECTOR_TYPES.get(type_name)
-            if cls is None:
-                continue
+        for coll_name, cls in store.fetch_collectors().items():
             coll_path = filepath / '__collector' / coll_name
             if (coll_path / '__config.pkl').exists():
-                collector = cls.load(coll_path)
-                exp.collectors[coll_name] = collector
+                exp.collectors[coll_name] = cls.load(coll_path)
 
         return exp
 

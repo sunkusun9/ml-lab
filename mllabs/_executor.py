@@ -320,7 +320,7 @@ def _build_flow_multi(outer_folds, pipeline, nodes, n_jobs, gpu_id_list=None, co
 
     gpu_id_list = gpu_id_list or []
     collectors = collectors or []
-    n_gpu = len(gpu_id_list)
+    n_gpu = min(len(gpu_id_list), n_jobs)
 
     flow_map = {
         (outer_idx, inner_idx): flow
@@ -550,7 +550,7 @@ def _experiment_multi(outer_folds, pipeline, nodes, n_jobs,
 
     gpu_id_list = gpu_id_list or []
     collectors = collectors or []
-    n_gpu = len(gpu_id_list)
+    n_gpu = min(len(gpu_id_list), n_jobs)
 
     def _needs_gpu(node_attrs):
         if not gpu_id_list:
