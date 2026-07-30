@@ -311,7 +311,8 @@ class Trainer:
                 if n_jobs > 1:
                     stage_errors = _build_flow_multi(
                         self.train_folds, pipeline, target_stages, n_jobs,
-                        gpu_id_list=gpu_id_list, tracker=tracker)
+                        gpu_id_list=gpu_id_list, tracker=tracker,
+                        log_dir=self.path / '__worker_logs')
                 else:
                     stage_errors = _build_flow_single(
                         self.train_folds, pipeline, target_stages,
@@ -322,7 +323,8 @@ class Trainer:
                 if n_jobs > 1:
                     head_errors = _experiment_multi(
                         self.train_folds, pipeline, target_heads, n_jobs,
-                        gpu_id_list=gpu_id_list, tracker=tracker)
+                        gpu_id_list=gpu_id_list, tracker=tracker,
+                        log_dir=self.path / '__worker_logs')
                 else:
                     head_errors = _experiment_single(
                         self.train_folds, pipeline, target_heads,

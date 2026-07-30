@@ -90,7 +90,11 @@ class LoggerExecuteTracker(ExecuteTracker):
 
     def _on_update(self, event, **kwargs):
         if event == 'message':
-            self.logger.info(f"[worker {kwargs['worker_idx']}] {kwargs['msg']}")
+            text = f"[worker {kwargs['worker_idx']}] {kwargs['msg']}"
+            if kwargs.get('typ') == 'warning':
+                self.logger.warning(text)
+            else:
+                self.logger.info(text)
             return
 
         if event == 'start':

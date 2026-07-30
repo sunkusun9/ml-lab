@@ -531,7 +531,7 @@ class Experimenter():
             if n_jobs > 1:
                 errors = _build_flow_multi(self.outer_folds, pipeline, target_nodes, n_jobs,
                                            gpu_id_list=gpu_id_list, collectors=collectors,
-                                           tracker=tracker)
+                                           tracker=tracker, log_dir=self.path / '__worker_logs')
             else:
                 errors = _build_flow_single(self.outer_folds, pipeline, target_nodes,
                                             gpu_id_list=gpu_id_list, collectors=collectors,
@@ -597,7 +597,8 @@ class Experimenter():
             if n_jobs > 1:
                 errors = _experiment_multi(self.outer_folds, pipeline, target_nodes, n_jobs,
                                            gpu_id_list=gpu_id_list, collectors=collectors,
-                                           tracker=tracker, finalize=finalize)
+                                           tracker=tracker, finalize=finalize,
+                                           log_dir=self.path / '__worker_logs')
             else:
                 errors = _experiment_single(self.outer_folds, pipeline, target_nodes,
                                             gpu_id_list=gpu_id_list, collectors=collectors,
@@ -748,6 +749,32 @@ class Experimenter():
         if artifact_store.status(node_name) is not None:
             return artifact_store.get_objs(node_name)
         return fold.train_data_flows[inner_idx].get_objs(node_name)
+
+    def get_worker_logs(self, worker=None):
+        """Native (OS-level stdout/stderr) output captured from parallel workers.
+
+        Multi-worker ``build``/``exp`` (``n_jobs > 1``) redirect each worker's
+        stdout/stderr to ``{path}/__worker_logs/worker_{i}.log``, capturing
+        native library chatter (TensorFlow, LightGBM, CatBoost, cuDNN/XLA) that
+        would otherwise pollute the console. Each run overwrites the previous.
+
+        Args:
+            worker (int, optional): Return only this worker's log as a string.
+
+        Returns:
+            dict[int, str] mapping worker index to captured text, or a single
+            string if *worker* is given. Empty if nothing was captured.
+        """
+        log_dir = self.path / '__worker_logs'
+        if worker is not None:
+            f = log_dir / f'worker_{worker}.log'
+            return f.read_text() if f.exists() else ''
+        if not log_dir.exists():
+            return {}
+        return {
+            int(f.stem.split('_')[1]): f.read_text()
+            for f in sorted(log_dir.glob('worker_*.log'))
+        }
 
     def _save(self):
         self._store.save_meta({

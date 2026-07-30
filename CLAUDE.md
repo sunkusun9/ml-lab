@@ -103,11 +103,14 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 - 생성자: `(data, path, ..., cache_maxsize=4GB, logger, aug_data=None, tags=None, pipeline=None)`
 - **Pipeline을 직접 보유** — `self.pipeline` (constructor `pipeline=` 또는 `set_pipeline(pipeline)`으로 설정). `build`/`exp`/`collect` 등 노드 그래프가 필요한 메소드는 더 이상 `pipeline` 인자를 받지 않고 `self.pipeline` 사용
 - `set_pipeline(pipeline)`: 기존에 pipeline이 이미 설정돼 있었다면 노드 `serial` mismatch를 먼저 감지해 reset 후 교체, `{path}/pipeline.pkl`에 저장. `self.pipeline`은 호출자의 `p` 객체와 동일 참조이므로 이후 `p.set_grp`/`p.set_node`로 in-place 수정하면 별도 재호출 없이 반영됨(단, `build`/`exp` 호출 시마다 `_save_pipeline()`으로 최신 상태 저장)
+- `set_status(status)`: `self.status` 설정 + meta의 status row만 갱신 (전체 meta 재저장 X). `open()`/`close()`/`close_exp()`/`reopen_exp()`가 이걸 사용
 - `tags` (list[str]): `exp()`를 `nodes=None`으로 호출하면 tag가 교집합인 head만 대상 (비어있으면 전체 head)
 - `cache`: DataCache (LRU, 용량 기반) — `_cache.py`에 분리
 - **pipeline 필요** (`self.pipeline`, `_require_pipeline()`로 미설정 시 에러):
   - `build(nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None)` (stage), `exp(nodes=None, finalize=False, n_jobs=1, gpu_id_list=None, logger=None)` (head)
     - 시작 시 `pipeline.check_data_compatibility(self.data)` 호출 후 serial mismatch 노드 자동 감지 → `reset_nodes()` 후 재빌드
+    - `n_jobs`는 실제 작업 수(`total = folds × target_nodes`)로 상한 처리됨 (`min(n_jobs, total)`) — 유휴 워커/progress bar 생성 방지 (`Trainer.train`도 동일)
+    - `n_jobs > 1` 시 각 워커의 stdout/stderr(fd 1/2)를 `{path}/__worker_logs/worker_{i}.log`로 os.dup2 리다이렉트 → 네이티브 라이브러리 출력(TF/LightGBM/CatBoost 등) 캡처, 콘솔 오염 방지
   - `collect(collector, nodes=None, exist='skip', logger=None)`: ad-hoc 수집 (빌드 완료된 head 노드 대상, nodes로 범위 제한 가능, progress 포함)
   - `collect_missing(collector=None, nodes=None, logger=None)`
   - `get_collect_status(collector, nodes=None)`: `{node: status}` 반환 — `'collected'`/`'not_collected'`/`'finalized'`/`'error'`
@@ -115,13 +118,21 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `get_node_info()`: 노드 요약 Markdown
 - **pipeline 불필요** (디스크 상태만으로 동작): `get_status(node_name)`, `finalize(nodes)`, `reinitialize(nodes)`, `close_exp()`, `reset_nodes(nodes)`, `show_error_nodes(nodes=None, traceback=False)`, `get_objs(node_name, outer_idx=0, inner_idx=0)`
   - **주의**: 같은 fold의 `train_data_flows[j]`와 `artifact_stores[j]`는 디스크상 동일 디렉토리를 가리키지만 서로 독립적인 lazy info 캐시(`NodeStore._info_cache`)를 가짐. 양쪽을 합쳐 하나의 상태로 캐싱한 뒤 한쪽만 mutate(예: finalize)하면 다른 쪽 캐시가 stale해짐 — 그래서 `get_status`는 pipeline으로 role을 판별해 해당 store 하나만 조회함(`_reset_serial_stale_nodes`도 동일 패턴). `finalize`/`reinitialize`/`reset_nodes`/`close_exp`는 store별로 조회 직후 바로 그 store에 실행(check-and-act, 캐싱된 판단을 다른 store에 넘기지 않음)하는 구조라 pipeline 없이도 안전함
-- `add_collector(collector, exist='skip')`: Collector **등록만** (path 설정, save) — pipeline 불필요, **자동 수집 안 함**. 이미 빌드된 head에서 즉시 수집하려면 별도로 `collect(collector)` 호출
+- `set_collector(name, collector, connector, params=None, exist='skip')`: Collector를 **부품에서 조립하여 등록** (구 `add_collector` 대체) — pipeline 불필요, **자동 수집 안 함**. 이미 빌드된 head에서 즉시 수집하려면 별도로 `collect(collector)` 호출
+  - `collector`: Collector 클래스 또는 `"module.ClassName"` 문자열 ref (`resolve_processor`)
+  - `connector`: `Connector` 인스턴스 또는 `{"__ref__": ..., "__params__": {...}}` (`resolve_instance`)
+  - `params`: name/connector 이후 생성자 인자 dict — 값에 `resolve_ref_values` 적용(`{__ref__}` 인스턴스화 / `{__callable__}` 참조)
+  - 내부적으로 `cls(name, connector, **params)` 조립 후 등록, 조립된 인스턴스 반환. collectors 테이블에 클래스 ref 기록
 - `get_collector(name)`: Collector 반환 (없으면 None)
-- `remove_collector(name)`: Collector 제거 후 `_save()`
+- `remove_collector(name)`: Collector 제거 + collectors 테이블 row 삭제
+- `get_worker_logs(worker=None)`: 멀티워커 실행이 캡처한 네이티브 stdout/stderr 반환 — `{worker_idx: text}` 또는 `worker` 지정 시 문자열. 매 실행마다 덮어씀
 - `get_train_data(edges, o_idx=0, i_idx=0)` / `get_valid_data(...)` / `get_test_data(...)`, `get_node_train_data(pipeline, node, o_idx=0, i_idx=0)` / `get_node_valid_data(...)` / `get_node_test_data(...)`: 노드 출력 추출 헬퍼
 - `aug_data`: 외부 데이터를 DataSource 수준에서 inner train split에 append — 미퍼시스트, create/load 시 전달
-- 저장/로드: `_save()`, `load(filepath, data, data_key)` — `pipeline.pkl`이 있으면 `self.pipeline`으로 복원(단순 대입, staleness 체크 없음). 로드 후 로컬에서 새로 구성한 pipeline 객체를 다시 붙이려면 `set_pipeline(p)` 호출(staleness 체크 발생)
-  - collector_keys, tags 저장/복원
+- 저장/로드: `_save()`(생성 시 1회 full meta), `load(filepath, data, data_key)` — `pipeline.pkl`이 있으면 `self.pipeline`으로 복원(단순 대입, staleness 체크 없음). 로드 후 로컬에서 새로 구성한 pipeline 객체를 다시 붙이려면 `set_pipeline(p)` 호출(staleness 체크 발생)
+  - **SQLite 저장** (`ExperimenterStore`, `_experimenter_store.py`, `{path}/__exp.db`):
+    - `meta` 테이블 (key→JSON): 단순 ref-직렬화 가능 값만 (`data_key, title, cache_maxsize, exp_id, tags, status`)
+    - `collectors` 테이블 (name→`module.QualName` ref): 클래스 정보를 ref로 저장 → load 시 `_ref_to_obj`로 복원, **COLLECTOR_TYPES 매핑 불필요**
+    - splitter 객체(`sp, sp_v, splitter_params`)는 ref-직렬화 불가라 `{path}/__splitters.pkl`에 별도 pickle
 
 ### DataCache (`_cache.py`)
 - `cachetools.LRUCache` 기반, 용량(bytes) 단위 관리
@@ -180,10 +191,10 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 
 ### Collector (`collector/` 패키지)
 - **Collector** (`_base.py`): 기본 클래스
-  - `__init__(name, connector)`, `path`는 add_collector 시 설정
+  - `__init__(name, connector)`, `path`는 `set_collector` 시 설정
   - 라이프사이클: `_start(node)`, `_collect(node, idx, inner_idx, context)`, `_end_idx(node, idx)`, `_end(node)`
   - 에러 처리: `_collect`/`_end_idx`는 safe wrapper로 try/except 래핑; `_start`/`_end`는 직접 호출 — 에러 시 `warnings` 리스트에 저장 후 warning 로그
-  - `on_attach(experimenter)`: `add_collector`/`collect` 호출 시 자동 실행 — experimenter identity 비교로 중복 재계산 방지; `_on_attach(experimenter)` no-op 훅을 subclass에서 override
+  - `on_attach(experimenter)`: `set_collector`/`collect` 호출 시 자동 실행 — experimenter identity 비교로 중복 재계산 방지; `_on_attach(experimenter)` no-op 훅을 subclass에서 override
   - `_experimenter`: pickle 제외 (save/load 시 None으로 초기화)
   - `has(node)`: 수집 결과 보유 여부 (has_node에 위임)
   - `has_node(node)`, `reset_nodes(nodes)`(base: `self._buf`에서 해당 노드 제거 — 서브클래스는 `super().reset_nodes(nodes)` 먼저 호출 후 자신의 disk/cache 정리), `save()`, `load(cls, path)`
@@ -320,6 +331,8 @@ p.set_grp('scale', role='stage', processor=StandardScaler,
 - `result_objs`: `{name: (callable, mergeable_bool)}`
 - `__eq__`: `type(self) is type(other) and self.__dict__ == other.__dict__` — diff 모드에서 adapter 비교에 사용
 - `__hash__`: `id(self)` — set/dict 키로 사용 가능
+- **adapter 지정 방식** (`set_grp`/`set_node`의 `adapter=`, `resolve_adapter`→`resolve_instance`): 인스턴스 / `"module.ClassName"` 문자열(기본값으로 인스턴스화) / `{"__ref__": ..., "__params__": {...}}` 모두 허용
+- **레지스트리** (`adapter/__init__.py`): `MODEL_ADAPTERS`(모델명→인스턴스), `get_adapter(model_or_name)`. `NNAdapter`는 TF를 top-level import하므로 **지연 로드** — `_LAZY_ADAPTERS`(`NNClassifier`/`NNRegressor`)로 first-use 시 인스턴스화·캐시, 모듈 `__getattr__`로 `NNAdapter` 심볼 노출 → `import mllabs`가 TF를 끌어오지 않음
 
 ## Sampler (`sampler/` 패키지)
 - **Sampler** (`_base.py`): 기본 클래스 — `sample(fit_params) → fit_params` 인터페이스
@@ -333,6 +346,14 @@ p.set_grp('scale', role='stage', processor=StandardScaler,
   - `PolarsWrapper.get_columns()`: `pl.DataFrame`이면 `.columns`, `pl.Series`이면 `.name` 반환
   - `select_by_dtype(kind)`: `'category'|'numeric'|'int'|'float'|'str'|'bool'`에 해당하는 컬럼명(numpy는 정수 offset) 리스트 반환 — `col.py`의 `@numeric` 등 dtype selector가 사용하는 primitive. (예전 `get_column_list(ColSelector(col_type=, pattern=))`는 제거됨 — pattern 부분은 이제 DSL의 `Pattern` 노드가 담당)
 - **_edge_dsl.py**: edges DSL 파서/평가기 — 위 "Edge DSL" 섹션 참조
+- **_serialize.py**: ref 기반 직렬화/해석
+  - `serialize_value`/`deserialize_value` (JSON 왕복), `_obj_to_ref`/`_ref_to_obj`
+  - `resolve_processor(x)`: `"module.ClassName"` str → 클래스, else passthrough
+  - `resolve_instance(spec)`: str→인스턴스(기본값) / `{__ref__, __params__}`→`cls(**params)` / else passthrough. `resolve_adapter`가 위임
+  - `resolve_ref_values(value)`: params 값 재귀 해석 — `{"__callable__": "mod.fn"}`→**호출 안 하고** 그 객체 참조(metric_func 등), `{"__ref__": ..., "__params__": {...}}`→인스턴스화, 문자열/스칼라는 그대로. `set_grp`/`set_node`/`set_collector`의 params에 적용
+- **_experimenter_store.py**: `ExperimenterStore` — Experimenter의 `__exp.db`(meta/collectors 테이블) SQLite 저장
+- **_executor.py**: 빌드/실험 실제 실행 — `_build_flow_single/multi`, `_experiment_single/multi`, `ProcessWorker`(spawn). 멀티워커 시 fd 리다이렉트로 네이티브 출력을 `__worker_logs/`에 캡처, fit/predict 경고는 `catch_warnings`로 잡아 logger 채널로 forward(node prefix)
+- **_tracker.py**: `LoggerExecuteTracker` — 워커 이벤트→logger. 메시지 `typ`에 따라 `logger.info`/`logger.warning` 라우팅(경고는 verbosity로 게이팅 + `warning_list` 수집)
 - **_describer.py**: desc_spec, desc_status, desc_pipeline, desc_node
 - **_logger.py**: BaseLogger, DefaultLogger (start/update/end_progress, adhoc_progress, rename_progress)
 - **col.py**: `@name` column-selector 레지스트리 — 위 "col.py" 섹션 참조
@@ -359,8 +380,10 @@ Pipeline/Experimenter/Trainer는 서로의 경로를 관리하지 않음 — 각
   pipeline.db                       # Pipeline 노드/그룹 정의 (SQLite)
 
 {experimenter.path}/
-  __exp.pkl                         # collector_keys, tags, 메타정보
+  __exp.db                          # SQLite: meta(단순값) + collectors(클래스 ref) 테이블
+  __splitters.pkl                   # sp, sp_v, splitter_params (ref-직렬화 불가라 pickle)
   pipeline.pkl                      # set_pipeline()으로 저장된 Pipeline (있으면 load() 시 self.pipeline으로 복원)
+  __worker_logs/worker_{i}.log      # 멀티워커 실행이 캡처한 네이티브 stdout/stderr (get_worker_logs())
   __collector/{name}/
     __config.pkl                    # Collector 설정
     metrics.db                      # MetricCollector 결과 (node, idx, inner_idx, split, value)

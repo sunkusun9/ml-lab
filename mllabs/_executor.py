@@ -107,32 +107,38 @@ def _run_collectors(collectors, node_attrs, obj, result, info, train_data, valid
                     outer_idx, inner_idx, monitor, on_collect=_default_on_collect):
     matched = [c for c in collectors if c.connector.match(node_attrs)]
     if not matched:
-        return
-    proc_test = False
-    proc_train = False
-    for c in matched:
-        prop = c.get_properties()
-        if prop['need_output_train']:
-            proc_train = True
-        if prop['need_output_test']:
-            proc_test = True
-    context = {
-        'node_attrs': node_attrs,
-        'processor': obj,
-        'spec': info,
-        'input': (train_data, valid_data, test_data),
-        'outer_idx': outer_idx,
-        'inner_idx': inner_idx,
-    }
-    if proc_test:
-        context['output_test'] = obj.process(test_data) if test_data else None
-    if proc_train:
-        context['output_valid'] = obj.process(valid_data) if valid_data else None
-        context['output_train'] = (result if result is not None else obj.process(train_data))
-    for c in matched:
-        if ext_data is not None and c.name in ext_data:
-            context['output_ext'] = obj.process(ext_data[c.name])
-        on_collect(c, node_attrs['name'], outer_idx, inner_idx, _safe_collect_call(c, context, monitor))
+        return []
+    # Capture predict/collect-time warnings (e.g. XGBoost device-mismatch on
+    # process()) so they flow through the logger channel like fit warnings,
+    # instead of leaking raw to stderr.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        proc_test = False
+        proc_train = False
+        for c in matched:
+            prop = c.get_properties()
+            if prop['need_output_train']:
+                proc_train = True
+            if prop['need_output_test']:
+                proc_test = True
+        context = {
+            'node_attrs': node_attrs,
+            'processor': obj,
+            'spec': info,
+            'input': (train_data, valid_data, test_data),
+            'outer_idx': outer_idx,
+            'inner_idx': inner_idx,
+        }
+        if proc_test:
+            context['output_test'] = obj.process(test_data) if test_data else None
+        if proc_train:
+            context['output_valid'] = obj.process(valid_data) if valid_data else None
+            context['output_train'] = (result if result is not None else obj.process(train_data))
+        for c in matched:
+            if ext_data is not None and c.name in ext_data:
+                context['output_ext'] = obj.process(ext_data[c.name])
+            on_collect(c, node_attrs['name'], outer_idx, inner_idx, _safe_collect_call(c, context, monitor))
+    return [f"{w.category.__name__}: {w.message}" for w in caught]
 
 
 
@@ -174,14 +180,24 @@ class ProcessWorker(_mp_ctx.Process):
         ('error', error_info)
     """
 
-    def __init__(self, conn, collectors, finalize=False, gpu_id=None):
+    def __init__(self, conn, collectors, finalize=False, gpu_id=None, log_path=None):
         super().__init__(daemon=True)
         self.conn = conn
         self.collectors = collectors
         self.finalize = finalize
         self.gpu_id = gpu_id
+        self.log_path = log_path
 
     def run(self):
+        if self.log_path is not None:
+            # Redirect this worker's OS-level stdout/stderr (fd 1/2) so native
+            # library chatter (TensorFlow, LightGBM, CatBoost, cuDNN/XLA) is
+            # captured here instead of polluting the parent console. Framework
+            # results/progress travel over the Pipe and are unaffected. Done
+            # before any fit / lazy TF import so their banners are captured too.
+            _f = open(self.log_path, 'w')
+            os.dup2(_f.fileno(), 1)
+            os.dup2(_f.fileno(), 2)
         logger = _PipeLogger(self.conn)
         monitor = _ProgressRouter(self.conn)
         gpu_id_list = [self.gpu_id] if self.gpu_id is not None else []
@@ -210,10 +226,12 @@ class ProcessWorker(_mp_ctx.Process):
             def _send_collect(collector, node_name, outer_idx, inner_idx, res):
                 self.conn.send(('collect', collector.name, node_name, outer_idx, inner_idx, res))
 
-            _run_collectors(
+            collect_warns = _run_collectors(
                 self.collectors, node_attrs, obj, result, info, train_data, valid_data, test_data, ext_data,
                 outer_idx, inner_idx, monitor, on_collect=_send_collect,
             )
+            for w in collect_warns:
+                logger.warning(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}")
             self.conn.send(('done', info))
 
 # ---------------------------------------------------------------------------
@@ -308,19 +326,24 @@ def _build_flow_single(outer_folds, pipeline, nodes, gpu_id_list=None, collector
                 tracker.done(0, node_name, outer_idx, inner_idx, info)
 
             if collectors:
-                _run_collectors(collectors, node_attrs, obj, result, info, train_data, valid_data, test_data, ext_data,
-                                outer_idx, inner_idx, router)
+                collect_warns = _run_collectors(collectors, node_attrs, obj, result, info, train_data, valid_data, test_data, ext_data,
+                                                outer_idx, inner_idx, router)
+                if tracker:
+                    for w in collect_warns:
+                        tracker.message(0, f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}", typ='warning')
 
     return errors
 
 
 def _build_flow_multi(outer_folds, pipeline, nodes, n_jobs, gpu_id_list=None, collectors=None, tracker=None,
-                      gpu_fallback_cpu=True, cpu_fallback_gpu=True):
+                      gpu_fallback_cpu=True, cpu_fallback_gpu=True, log_dir=None):
     from .adapter._base import GPU_NO
 
     gpu_id_list = gpu_id_list or []
     collectors = collectors or []
     n_gpu = min(len(gpu_id_list), n_jobs)
+    if log_dir is not None:
+        os.makedirs(log_dir, exist_ok=True)
 
     flow_map = {
         (outer_idx, inner_idx): flow
@@ -337,7 +360,8 @@ def _build_flow_multi(outer_folds, pipeline, nodes, n_jobs, gpu_id_list=None, co
     workers = []  # [(process, parent_conn)]
     for i in range(n_jobs):
         parent_conn, child_conn = _mp_ctx.Pipe()
-        w = ProcessWorker(child_conn, collectors, gpu_id=gpu_id_list[i] if i < n_gpu else None)
+        w = ProcessWorker(child_conn, collectors, gpu_id=gpu_id_list[i] if i < n_gpu else None,
+                          log_path=os.path.join(log_dir, f'worker_{i}.log') if log_dir else None)
         w.start()
         child_conn.close()
         workers.append((w, parent_conn))
@@ -536,21 +560,26 @@ def _experiment_single(outer_folds, pipeline, nodes,
                     for i in [c for c in collectors if c.connector.match(node_attrs)]:
                         if i.get_properties().get('need_process_data', False):
                             ext_data[i.name] = train_flow.get_data(i.get_ext_data(), node_attrs['edges'])
-                    _run_collectors(matched, node_attrs, obj, result, info,
+                    collect_warns = _run_collectors(matched, node_attrs, obj, result, info,
                                     train_data, valid_data, test_data, ext_data,
                                     outer_idx, inner_idx, monitor)
+                    if tracker:
+                        for w in collect_warns:
+                            tracker.message(0, f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}", typ='warning')
 
     return errors
 
 
 def _experiment_multi(outer_folds, pipeline, nodes, n_jobs,
                        gpu_id_list=None, collectors=None, tracker=None,
-                       finalize=False, gpu_fallback_cpu=True, cpu_fallback_gpu=True):
+                       finalize=False, gpu_fallback_cpu=True, cpu_fallback_gpu=True, log_dir=None):
     from .adapter._base import GPU_NO
 
     gpu_id_list = gpu_id_list or []
     collectors = collectors or []
     n_gpu = min(len(gpu_id_list), n_jobs)
+    if log_dir is not None:
+        os.makedirs(log_dir, exist_ok=True)
 
     def _needs_gpu(node_attrs):
         if not gpu_id_list:
@@ -563,7 +592,8 @@ def _experiment_multi(outer_folds, pipeline, nodes, n_jobs,
         parent_conn, child_conn = _mp_ctx.Pipe()
         w = ProcessWorker(child_conn, collectors,
                           finalize=finalize,
-                          gpu_id=gpu_id_list[i] if i < n_gpu else None)
+                          gpu_id=gpu_id_list[i] if i < n_gpu else None,
+                          log_path=os.path.join(log_dir, f'worker_{i}.log') if log_dir else None)
         w.start()
         child_conn.close()
         workers.append((w, parent_conn))

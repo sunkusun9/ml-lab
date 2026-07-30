@@ -50,6 +50,51 @@ class BadPredictor:
         pass
 
 
+class NativeChatterStage:
+    """Writes to OS-level fd 1/2 (like a native lib), bypassing Python stdout."""
+    __name__ = 'NativeChatterStage'
+    def __init__(self, **kwargs):
+        pass
+    def fit(self, X, y=None):
+        import os
+        os.write(1, b'NATIVE_STDOUT_XYZ\n')
+        os.write(2, b'NATIVE_STDERR_XYZ\n')
+        return self
+    def transform(self, X):
+        return X
+
+
+class WarnStage:
+    """Emits a Python warning during fit (captured into info['warnings'])."""
+    __name__ = 'WarnStage'
+    def __init__(self, **kwargs):
+        pass
+    def fit(self, X, y=None):
+        import warnings
+        warnings.warn("WORKER_WARN_ABC")
+        return self
+    def transform(self, X):
+        return X
+
+
+def _const_metric(y, p):
+    return 0.5
+
+
+class WarnPredictor:
+    """Emits a Python warning during predict (i.e. at collector/process time)."""
+    __name__ = 'WarnPredictor'
+    def __init__(self, **kwargs):
+        pass
+    def fit(self, X, y=None):
+        self.classes_ = np.unique(y)
+        return self
+    def predict(self, X):
+        import warnings
+        warnings.warn("PREDICT_WARN_XYZ")
+        return np.zeros(len(X), dtype=int)
+
+
 @pytest.fixture
 def sample_data():
     np.random.seed(42)
@@ -147,6 +192,85 @@ class TestNJobsCap:
         assert worker_sessions == [1, 2]
         assert sorted(logger.created) == sorted(logger.removed)
         assert exp.get_status('dt') == 'built'
+
+
+class TestWorkerLogCapture:
+    """Multi-worker runs capture native stdout/stderr into per-worker log files."""
+
+    def test_native_output_captured_to_worker_logs(self, exp, pipeline, capfd):
+        pipeline.set_grp('nc', role='stage', processor=NativeChatterStage,
+                          method='transform', edges={'X': '{f1}'})
+        pipeline.set_node('nc_node', grp='nc')
+
+        exp.build(n_jobs=2)
+
+        # native chatter went to the worker log files, not the parent console
+        out, err = capfd.readouterr()
+        assert 'NATIVE_STDOUT_XYZ' not in out
+        assert 'NATIVE_STDERR_XYZ' not in err
+
+        logs = exp.get_worker_logs()
+        assert logs, "expected per-worker log files"
+        combined = '\n'.join(logs.values())
+        assert 'NATIVE_STDOUT_XYZ' in combined
+        assert 'NATIVE_STDERR_XYZ' in combined
+        assert (exp.path / '__worker_logs').exists()
+
+    def test_get_worker_logs_empty_without_multi_run(self, exp, pipeline):
+        _setup_full(pipeline)
+        exp.build(n_jobs=1)
+        assert exp.get_worker_logs() == {}
+
+
+class TestWorkerWarningVerbosity:
+    """Worker warnings route to logger.warning: collected in warning_list and
+    gated by the logger's level."""
+
+    def test_warnings_collected_and_silenced_when_level_excludes_warning(self, exp, pipeline, capfd):
+        from mllabs._logger import ProgressSessionLogger
+        pipeline.set_grp('wn', role='stage', processor=WarnStage,
+                          method='transform', edges={'X': '{f1}'})
+        pipeline.set_node('wn_node', grp='wn')
+
+        logger = ProgressSessionLogger(level=['info', 'progress'])  # no 'warning'
+        exp.build(n_jobs=2, logger=logger)
+
+        # collected in warning_list even though not printed
+        assert any('WORKER_WARN_ABC' in w for w in logger.warning_list)
+        out, err = capfd.readouterr()
+        assert 'WORKER_WARN_ABC' not in out and 'WORKER_WARN_ABC' not in err
+
+    def test_warnings_printed_when_level_includes_warning(self, exp, pipeline, capfd):
+        from mllabs._logger import ProgressSessionLogger
+        pipeline.set_grp('wn', role='stage', processor=WarnStage,
+                          method='transform', edges={'X': '{f1}'})
+        pipeline.set_node('wn_node', grp='wn')
+
+        logger = ProgressSessionLogger(level=['info', 'warning', 'progress'])
+        exp.build(n_jobs=2, logger=logger)
+
+        out, err = capfd.readouterr()
+        assert 'WORKER_WARN_ABC' in (out + err)
+
+    def test_predict_warnings_routed_via_logger(self, exp, pipeline, capfd):
+        # predict/collect-time warnings (like XGBoost device mismatch) now flow
+        # through the logger with the node prefix, not raw to stderr.
+        from mllabs._logger import ProgressSessionLogger
+        from mllabs import Connector, MetricCollector
+        pipeline.set_grp('wp', role='head', processor=WarnPredictor, method='predict',
+                          edges={'X': '{f1, f2, f3}', 'y': '{target}'})
+        pipeline.set_node('wp_node', grp='wp')
+        exp.build()
+        exp.set_collector('m', MetricCollector, Connector(),
+                          params={'output_var': None, 'metric_func': _const_metric})
+
+        logger = ProgressSessionLogger(level=['info', 'progress'])  # no 'warning'
+        exp.exp(logger=logger)
+
+        assert any('PREDICT_WARN_XYZ' in w for w in logger.warning_list)
+        assert any('[wp_node]' in w for w in logger.warning_list)   # node prefix present
+        out, err = capfd.readouterr()
+        assert 'PREDICT_WARN_XYZ' not in out and 'PREDICT_WARN_XYZ' not in err
 
 
 class TestDataPrepErrors:
