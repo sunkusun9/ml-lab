@@ -1,6 +1,7 @@
 import re
 import uuid
 import json
+import hashlib
 from pathlib import Path
 from ._describer import desc_pipeline, desc_node, compare_nodes
 from ._pipeline_store import PipelineStore
@@ -543,7 +544,7 @@ class Pipeline:
     value already resolved, plus the DataSource schema. Groups do not survive
     the build, and a node's originating group name is kept as ``label``.
     A Pipeline holds Stages only; Heads are now :class:`~mllabs.Trial` objects
-    produced by a :class:`~mllabs.BaseExperiment`.
+    handed to ``Experimenter.exp``.
 
     Consumers (Experimenter, Trainer, Inferencer) hold one of these rather than
     a builder, so later edits to the builder cannot silently change a run that
@@ -567,6 +568,25 @@ class Pipeline:
     @property
     def datasource(self):
         return self.nodes[None]
+
+    def content_key(self):
+        """Stable hash of what this Pipeline *is*, for versioning.
+
+        ``build_id`` is minted fresh on every :meth:`PipelineBuilder.build`
+        call, so it identifies the call, not the content — rebuilding an
+        unchanged builder would otherwise look like a new version. Node serials
+        already change whenever a definition (or anything upstream of it) does,
+        so hashing them plus the DataSource serial is enough.
+        """
+        payload = json.dumps(
+            {
+                'datasource': self.datasource.serial,
+                'nodes': {name: node.serial
+                          for name, node in self.nodes.items() if name is not None},
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
     def get_node(self, name):
         return self.nodes[name]
@@ -861,6 +881,25 @@ class PipelineBuilder:
     @property
     def datasource(self):
         return self.nodes[None]
+
+    def content_key(self):
+        """Stable hash of what this Pipeline *is*, for versioning.
+
+        ``build_id`` is minted fresh on every :meth:`PipelineBuilder.build`
+        call, so it identifies the call, not the content — rebuilding an
+        unchanged builder would otherwise look like a new version. Node serials
+        already change whenever a definition (or anything upstream of it) does,
+        so hashing them plus the DataSource serial is enough.
+        """
+        payload = json.dumps(
+            {
+                'datasource': self.datasource.serial,
+                'nodes': {name: node.serial
+                          for name, node in self.nodes.items() if name is not None},
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
     def set_datasource(self, schema, targets=None):
         """Define the input data schema and target columns.

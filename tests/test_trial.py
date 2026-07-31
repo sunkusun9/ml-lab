@@ -1,7 +1,7 @@
 import pytest
 
 from mllabs import Collectors, Connector, PipelineBuilder
-from mllabs.experiment import Trial, BaseExperiment, SimpleExperiment
+from mllabs import Trial, make_trials
 
 
 LGBM = 'lightgbm.LGBMClassifier'
@@ -20,151 +20,121 @@ def pipeline():
 
 
 @pytest.fixture
-def simple():
-    return SimpleExperiment(
+def swept():
+    return make_trials(
         'lgbm', processor=LGBM, edges=EDGES,
         params={'random_state': 42},
         param_grid={'max_depth': [3, 5], 'learning_rate': [0.05, 0.1]},
     )
 
 
-class TestSimpleExperimentGrid:
-    def test_trial_count_is_cartesian_product(self, simple):
-        assert simple.get_trial_nums() == 4
+class TestMakeTrialsGrid:
+    def test_trial_count_is_cartesian_product(self, swept):
+        assert len(swept) == 4
 
     def test_no_grid_yields_single_trial(self):
-        e = SimpleExperiment('one', processor=TREE, edges=EDGES, params={'max_depth': 3})
-        assert e.get_trial_nums() == 1
-        assert e.get_next_trial().name == 'one'
+        trials = make_trials('one', processor=TREE, edges=EDGES, params={'max_depth': 3})
+        assert len(trials) == 1
+        assert trials[0].name == 'one'
 
-    def test_fixed_params_merged_into_every_trial(self, simple):
-        assert all(t.params['random_state'] == 42 for t in simple.get_trials())
+    def test_fixed_params_merged_into_every_trial(self, swept):
+        assert all(t.params['random_state'] == 42 for t in swept)
 
-    def test_grid_params_cover_all_combinations(self, simple):
+    def test_grid_params_cover_all_combinations(self, swept):
         combos = {(t.params['max_depth'], t.params['learning_rate'])
-                  for t in simple.get_trials()}
+                  for t in swept}
         assert combos == {(3, 0.05), (3, 0.1), (5, 0.05), (5, 0.1)}
 
     def test_grid_overrides_fixed_param(self):
-        e = SimpleExperiment('x', processor=TREE, edges=EDGES,
+        trials = make_trials('x', processor=TREE, edges=EDGES,
                              params={'max_depth': 1}, param_grid={'max_depth': [7]})
-        assert e.get_next_trial().params['max_depth'] == 7
+        assert trials[0].params['max_depth'] == 7
 
-    def test_shared_fields_are_identical(self, simple):
-        for t in simple.get_trials():
+    def test_shared_fields_are_identical(self, swept):
+        for t in swept:
             assert t.processor == LGBM
             assert t.method == 'predict'
             assert t.edges == EDGES
             assert t.label == 'lgbm'
 
-    def test_edges_not_shared_between_trials(self, simple):
-        a, b = simple.get_trials()[:2]
+    def test_edges_not_shared_between_trials(self, swept):
+        a, b = swept[:2]
         a.edges['X'] = 'mutated'
         assert b.edges['X'] == 'scaler:(*)'
 
-    def test_tags_propagate_to_trials(self):
-        e = SimpleExperiment('t', processor=TREE, edges=EDGES,
-                             param_grid={'max_depth': [1, 2]}, tags=['final'])
-        assert all(t.tag == ['final'] for t in e.get_trials())
-
-
-class TestSimpleExperimentSequence:
-    def test_names_are_unique_and_zero_padded(self, simple):
-        assert [t.name for t in simple.get_trials()] == [
-            'lgbm_0', 'lgbm_1', 'lgbm_2', 'lgbm_3']
+    def test_names_are_unique_and_padded(self, swept):
+        assert [t.name for t in swept] == ['lgbm_0', 'lgbm_1', 'lgbm_2', 'lgbm_3']
 
     def test_wide_index_padding(self):
-        e = SimpleExperiment('w', processor=TREE, edges=EDGES,
+        trials = make_trials('w', processor=TREE, edges=EDGES,
                              param_grid={'max_depth': list(range(12))})
-        assert e.get_trials()[0].name == 'w_00'
+        assert trials[0].name == 'w_00'
 
     def test_order_is_deterministic(self):
         def mk():
-            return SimpleExperiment('d', processor=TREE, edges=EDGES,
-                                    param_grid={'b': [1, 2], 'a': ['x', 'y']})
-        assert ([t.params for t in mk().get_trials()]
-                == [t.params for t in mk().get_trials()])
+            return make_trials('d', processor=TREE, edges=EDGES,
+                               param_grid={'b': [1, 2], 'a': ['x', 'y']})
+        assert [t.params for t in mk()] == [t.params for t in mk()]
 
-    def test_cursor_advances(self, simple):
-        assert simple.get_next_trial().name == 'lgbm_0'
-        assert simple.get_next_trial().name == 'lgbm_1'
-
-    def test_exhausted_cursor_raises(self):
-        e = SimpleExperiment('s', processor=TREE, edges=EDGES)
-        e.get_next_trial()
-        with pytest.raises(StopIteration):
-            e.get_next_trial()
-
-    def test_reset_rewinds(self, simple):
-        simple.get_next_trial()
-        simple.reset()
-        assert simple.get_next_trial().name == 'lgbm_0'
-
-    def test_get_trials_is_repeatable(self, simple):
-        assert [t.name for t in simple.get_trials()] == [t.name for t in simple.get_trials()]
-
-    def test_get_trial_does_not_move_cursor(self, simple):
-        assert simple.get_trial(2).name == 'lgbm_2'
-        assert simple.get_next_trial().name == 'lgbm_0'
-
-    def test_get_trial_out_of_range(self, simple):
-        with pytest.raises(IndexError):
-            simple.get_trial(4)
+    def test_tags_propagate_to_trials(self):
+        trials = make_trials('t', processor=TREE, edges=EDGES,
+                             param_grid={'max_depth': [1, 2]}, tags=['final'])
+        assert all(t.tag == ['final'] for t in trials)
 
 
-class TestSimpleExperimentValidation:
+class TestMakeTrialsValidation:
     def test_processor_class_rejected(self):
         from sklearn.tree import DecisionTreeClassifier
         with pytest.raises(TypeError, match='processor must be'):
-            SimpleExperiment('x', processor=DecisionTreeClassifier, edges=EDGES)
+            make_trials('x', processor=DecisionTreeClassifier, edges=EDGES)
 
     def test_adapter_instance_rejected(self):
         from mllabs.adapter import DefaultAdapter
         with pytest.raises(TypeError, match='adapter must be'):
-            SimpleExperiment('x', processor=TREE, edges=EDGES, adapter=DefaultAdapter())
+            make_trials('x', processor=TREE, edges=EDGES, adapter=DefaultAdapter())
 
     def test_live_object_in_params_rejected(self):
         from mllabs import ColSelector
         with pytest.raises(TypeError, match='must be plain data'):
-            SimpleExperiment('x', processor=TREE, edges=EDGES,
+            make_trials('x', processor=TREE, edges=EDGES,
                              params={'cat_features': ColSelector('*')})
 
     def test_live_object_in_grid_rejected(self):
         from mllabs import ColSelector
         with pytest.raises(TypeError, match='must be plain data'):
-            SimpleExperiment('x', processor=TREE, edges=EDGES,
+            make_trials('x', processor=TREE, edges=EDGES,
                              param_grid={'cat_features': [ColSelector('*')]})
 
     def test_empty_edges_rejected(self):
         with pytest.raises(ValueError, match='non-empty'):
-            SimpleExperiment('x', processor=TREE, edges={})
+            make_trials('x', processor=TREE, edges={})
 
     def test_non_string_edge_rejected(self):
         with pytest.raises(TypeError, match='DSL string'):
-            SimpleExperiment('x', processor=TREE, edges={'X': ['a', 'b']})
+            make_trials('x', processor=TREE, edges={'X': ['a', 'b']})
 
     def test_scalar_grid_value_rejected(self):
         with pytest.raises(TypeError, match='must be a list'):
-            SimpleExperiment('x', processor=TREE, edges=EDGES, param_grid={'max_depth': 3})
+            make_trials('x', processor=TREE, edges=EDGES, param_grid={'max_depth': 3})
 
     def test_empty_grid_value_rejected(self):
         with pytest.raises(ValueError, match='is empty'):
-            SimpleExperiment('x', processor=TREE, edges=EDGES, param_grid={'max_depth': []})
+            make_trials('x', processor=TREE, edges=EDGES, param_grid={'max_depth': []})
 
 
 class TestTrialIdentity:
-    def test_get_attrs_shape_matches_node_attrs(self, pipeline, simple):
+    def test_get_attrs_shape_matches_node_attrs(self, pipeline, swept):
         """A Trial must look like a node to Connector/executor/Collector.
 
         It carries ``tag`` (selection lives on the Experiment side now) and no
         ``serial`` — its identity is ``trial_id(pipeline)`` instead.
         """
-        trial_attrs = simple.get_next_trial().get_attrs()
+        trial_attrs = swept[0].get_attrs()
         node_attrs = pipeline.build().get_node_attrs('scaler')
         assert set(trial_attrs) - {'tag'} == set(node_attrs) - {'serial'}
 
-    def test_role_is_head(self, simple):
-        assert simple.get_next_trial().get_attrs()['role'] == 'head'
+    def test_role_is_head(self, swept):
+        assert swept[0].get_attrs()['role'] == 'head'
 
     def test_same_definition_same_id(self, pipeline):
         built = pipeline.build()
@@ -215,46 +185,6 @@ class TestTrialIdentity:
 
     def test_upstream_serials_lists_referenced_stages(self, pipeline):
         assert set(Trial('a', TREE, EDGES).upstream_serials(pipeline.build())) == {'scaler'}
-
-
-class TestBaseExperimentContract:
-    def test_subclass_must_implement(self):
-        e = BaseExperiment('x')
-        with pytest.raises(NotImplementedError):
-            e.get_trial_nums()
-        with pytest.raises(NotImplementedError):
-            e.get_next_trial()
-
-    def test_reset_is_noop_by_default(self):
-        assert BaseExperiment('x').reset() is None
-
-
-class TestExperimentCollectorNames:
-    """An Experiment records collector *names*; instances live in a registry."""
-
-    def test_no_names_by_default(self, simple):
-        assert simple.collector_names == []
-
-    def test_constructor_names(self):
-        e = SimpleExperiment('x', processor=TREE, edges=EDGES, collectors=['m'])
-        assert e.collector_names == ['m']
-
-    def test_use_collector_appends(self, simple):
-        simple.use_collector('a', 'b')
-        assert simple.collector_names == ['a', 'b']
-
-    def test_use_collector_is_idempotent(self, simple):
-        simple.use_collector('a').use_collector('a')
-        assert simple.collector_names == ['a']
-
-    def test_drop_collector(self, simple):
-        simple.use_collector('a', 'b').drop_collector('a')
-        assert simple.collector_names == ['b']
-
-    def test_holds_no_live_collector(self, simple):
-        """An Experiment must stay pure definition — nothing live inside it."""
-        simple.use_collector('m')
-        assert not hasattr(simple, 'collectors')
 
 
 class TestCollectorsRegistry:
@@ -336,23 +266,23 @@ class TestCollectorsRegistry:
         with pytest.raises(KeyError, match='nope'):
             self._reg(tmp_path).resolve(['nope'])
 
-    def test_match_by_role(self, simple, tmp_path):
+    def test_match_by_role(self, swept, tmp_path):
         reg = self._reg(tmp_path)
         self._set(reg)
-        attrs = simple.get_next_trial().get_attrs()
+        attrs = swept[0].get_attrs()
         assert [c.name for c in reg.match(attrs)] == ['m']
 
-    def test_match_filters_by_connector(self, simple, tmp_path):
+    def test_match_filters_by_connector(self, swept, tmp_path):
         reg = self._reg(tmp_path)
         reg.set_collector('nope', 'mllabs.MetricCollector', Connector(node_query='^zzz'),
                           params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'},
                                   'output_var': '*'})
-        assert reg.match(simple.get_next_trial().get_attrs()) == []
+        assert reg.match(swept[0].get_attrs()) == []
 
-    def test_match_restricted_to_names(self, simple, tmp_path):
+    def test_match_restricted_to_names(self, swept, tmp_path):
         reg = self._reg(tmp_path)
         self._set(reg, 'a'); self._set(reg, 'b')
-        attrs = simple.get_next_trial().get_attrs()
+        attrs = swept[0].get_attrs()
         assert [c.name for c in reg.match(attrs, names=['a'])] == ['a']
 
     def test_save_load_roundtrip(self, tmp_path):

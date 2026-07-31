@@ -9,7 +9,6 @@ from sklearn.model_selection import KFold
 from mllabs._trainer import Trainer
 from mllabs._pipeline import PipelineBuilder
 from mllabs import Trial
-from mock import TrialListExperiment
 from mllabs._cache import DataCache
 from mllabs._data_wrapper import wrap
 
@@ -51,8 +50,8 @@ def _bad_dt(name='bad_dt'):
                  {'X': 'bad_node:(*)', 'y': '{target}'})
 
 
-def _exp(*trials):
-    return TrialListExperiment('e', trials or [_dt()])
+def _trials(*trials):
+    return list(trials) or [_dt()]
 
 
 @pytest.fixture
@@ -81,31 +80,31 @@ class TestSelection:
         assert trainer.selected_stages == ['scaler']
         assert trainer.trial_names() == []
 
-    def test_set_experiment_selects_trials(self, pipeline, sample_data, sp_v):
+    def test_set_trials_selects_them(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         assert trainer.trial_names() == ['dt']
 
-    def test_set_experiment_collects_upstream_stages(self, pipeline, sample_data, sp_v):
+    def test_set_trials_collects_upstream_stages(self, pipeline, sample_data, sp_v):
         pipeline.set_grp('extra', processor='sklearn.preprocessing.StandardScaler',
                          method='transform', edges={'X': '{f1}'})
         pipeline.set_node('unused', grp='extra')
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         assert trainer.selected_stages == ['scaler']   # 'unused' is not referenced
 
     def test_trials_filter_by_name(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp(_dt('a'), _dt('b')), trials=['b'])
+        trainer.set_trials([_dt('b')])
         assert trainer.trial_names() == ['b']
 
     def test_trial_attrs_carry_trial_id(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         built = pipeline.build()
         assert trainer.trial_attrs()['dt']['serial'] == _dt().trial_id(built)
 
@@ -127,7 +126,7 @@ class TestSelection:
     def test_set_pipeline_resets_stale_nodes(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
         assert trainer.get_status('scaler') == 'built'
         pipeline.set_node('scaler', grp='scale', exist='replace')
@@ -139,7 +138,7 @@ class TestTrain:
     def test_train_basic(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
         assert trainer.get_status('scaler') == 'built'
         assert trainer.get_status('dt') == 'built'
@@ -147,7 +146,7 @@ class TestTrain:
     def test_train_skips_built(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
 
         build_ids = {
@@ -162,7 +161,7 @@ class TestTrain:
     def test_train_no_splitter(self, pipeline, sample_data):
         trainer = _make_trainer(pipeline, sample_data, None, name='t_nosplit')
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
         assert trainer.get_status('scaler') == 'built'
         assert trainer.get_status('dt') == 'built'
@@ -174,7 +173,7 @@ class TestTrain:
         pipeline.set_node('bad_node', grp='bad')
         trainer = _make_trainer(pipeline, sample_data, sp_v, name='t_err')
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp(_bad_dt()))
+        trainer.set_trials(_trials(_bad_dt()))
         trainer.train()
         assert trainer.get_status('bad_node') == 'error'
         err = trainer.get_node_error('bad_node')
@@ -188,7 +187,7 @@ class TestTrain:
         pipeline.set_node('bad_node', grp='bad')
         trainer = _make_trainer(pipeline, sample_data, sp_v, name='t_mixed')
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp(_dt(), _bad_dt()))
+        trainer.set_trials(_trials(_dt(), _bad_dt()))
         trainer.train()
         assert trainer.get_status('dt') == 'built'
         assert trainer.get_status('bad_node') == 'error'
@@ -196,7 +195,7 @@ class TestTrain:
     def test_train_n_splits(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         assert trainer.get_n_splits() == 3
         trainer.train()
         for fold in trainer.train_folds:
@@ -205,7 +204,7 @@ class TestTrain:
     def test_serial_in_info(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
         expected_serial = _dt().trial_id(pipeline.build())
         for fold in trainer.train_folds:
@@ -215,7 +214,7 @@ class TestTrain:
     def test_serial_mismatch_triggers_reset(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
 
         build_ids_before = [
@@ -223,7 +222,7 @@ class TestTrain:
             for fold in trainer.train_folds
         ]
 
-        trainer.set_experiment(_exp(_dt(params={'max_depth': 5, 'random_state': 42})))
+        trainer.set_trials(_trials(_dt(params={'max_depth': 5, 'random_state': 42})))
         trainer.train()
 
         build_ids_after = [
@@ -235,7 +234,7 @@ class TestTrain:
     def test_serial_mismatch_stage_cascades(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
 
         build_ids_before = {
@@ -248,7 +247,7 @@ class TestTrain:
                          edges={'X': '{f1, f2, f3}'},
                          params={'with_std': False})
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
 
         for name in ['scaler', 'dt']:
@@ -258,7 +257,7 @@ class TestTrain:
     def test_no_serial_mismatch_skips_rebuild(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
 
         build_ids_before = [
@@ -278,7 +277,7 @@ class TestProcess:
     def test_process_yields_per_split(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
         results = list(trainer.process(sample_data))
         assert len(results) == trainer.get_n_splits()
@@ -286,7 +285,7 @@ class TestProcess:
     def test_process_output_shape(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
         for output in trainer.process(sample_data):
             assert output.get_shape()[0] == len(sample_data)
@@ -296,7 +295,7 @@ class TestResetNodes:
     def test_reset_clears_node_objs(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
         trainer.reset_nodes(['scaler'])
         assert trainer.get_status('scaler') is None
@@ -305,7 +304,7 @@ class TestResetNodes:
     def test_reset_allows_retrain(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
         trainer.reset_nodes(['dt'])
         assert trainer.get_status('dt') is None
@@ -321,7 +320,7 @@ class TestSaveLoad:
     def test_save_load_roundtrip(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
         path = trainer.path
 
@@ -331,21 +330,21 @@ class TestSaveLoad:
         assert loaded.get_status('dt') == 'built'
 
     def test_load_does_not_restore_trials(self, pipeline, sample_data, sp_v):
-        """Trials are not persisted — re-supply them with set_experiment()."""
+        """Trials are not persisted — re-supply them with set_trials()."""
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
 
         loaded = Trainer._load(trainer.path, data=None, cache=DataCache())
         assert loaded.trial_names() == []
-        loaded.set_experiment(_exp())
+        loaded.set_trials(_trials())
         assert loaded.trial_names() == ['dt']
 
     def test_load_restores_pipeline(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_experiment(_exp())
+        trainer.set_trials(_trials())
         trainer.train()
 
         loaded = Trainer._load(trainer.path, data=None, cache=DataCache())

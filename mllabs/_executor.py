@@ -25,7 +25,6 @@ def _write_prep_error(node_path, node_attrs, edges, exc):
     info = {
         'build_id': str(uuid.uuid4()),
         'node_serial': node_attrs.get('serial'),
-        'role': node_attrs.get('role'),
         'fit_time': 0.0,
         'train_shape': None,
         'edges': edges,

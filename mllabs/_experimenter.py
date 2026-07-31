@@ -69,8 +69,17 @@ def _stop_native_redirect(state):
     sys.stdout = state['orig_stdout']
     sys.stderr = state['orig_stderr']
     state['log_f'].close()
-from ._run_common import resolve_common_status, find_stale_nodes, require_built_pipeline, name_matches
+from ._run_common import resolve_common_status, find_stale_nodes, require_built_pipeline
 from ._experimenter_store import ExperimenterStore
+
+
+def _resolve_collectors(collectors):
+    """Accept a Collectors registry, a list of instances, or None."""
+    if collectors is None:
+        return []
+    if hasattr(collectors, 'resolve'):
+        return collectors.resolve(None)
+    return list(collectors)
 
 
 class OuterFold:
@@ -562,23 +571,18 @@ class Experimenter():
         else:
             logger.info(f"Build complete: {len(target_nodes)} node(s)")
 
-    def exp(self, experiment, collectors=None, trials=None, finalize=False,
+    def exp(self, trials, collectors=None, finalize=False,
             n_jobs=1, gpu_id_list=None, logger=None):
-        """Run an :class:`~mllabs.BaseExperiment`'s Trials and invoke its Collectors.
-
-        The Trial sequence is drained up front (``get_trial_nums()`` then that
-        many ``get_next_trial()`` calls) so the dispatcher still knows its full
-        target list before it starts.
+        """Run *trials* against the Stage graph and invoke matching Collectors.
 
         Each Trial's id folds in the serials of the Stages it reads, so a Trial
         whose definition — or whose upstream preprocessing — changed is reset
         and rerun automatically.
 
         Args:
-            experiment (BaseExperiment): Source of Trials.
-            collectors (Collectors, optional): Registry the Experiment's
-                collector names are resolved against.
-            trials: Trial-name filter — ``None`` (all), ``list``, or regex ``str``.
+            trials (list[Trial]): Trials to run.
+            collectors: :class:`~mllabs.Collectors` registry, a list of
+                Collector instances, or ``None`` to collect nothing.
             finalize (bool): If ``True``, finalize after all folds complete.
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
             gpu_id_list (list, optional): GPU IDs to use for GPU-enabled nodes.
@@ -594,8 +598,7 @@ class Experimenter():
 
         attrs_map = {
             t.name: {**t.get_attrs(), 'serial': t.trial_id(pipeline)}
-            for t in experiment.get_trials()
-            if name_matches(t.name, trials)
+            for t in trials
         }
         self._reset_stale_trials(attrs_map)
         target_nodes = [
@@ -607,9 +610,7 @@ class Experimenter():
             return
 
         logger.info(f"Experimenting {len(target_nodes)} trial(s)")
-        collectors = (
-            collectors.resolve(experiment.collector_names) if collectors is not None else []
-        )
+        collectors = _resolve_collectors(collectors)
         for c in collectors:
             c.on_attach(self)
             c._setup(len(self.outer_folds), len(self.outer_folds[0].train_data_flows))

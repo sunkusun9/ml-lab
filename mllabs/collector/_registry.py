@@ -7,11 +7,9 @@ from .._serialize import resolve_processor, resolve_instance, resolve_ref_values
 class Collectors:
     """Registry that owns Collector instances and their storage.
 
-    An :class:`~mllabs.BaseExperiment` records only the *names* of the
-    Collectors it reports into; the instances live here. That split means one
-    registry can serve several Experiments — so their metrics land in the same
-    place and stay comparable — and it keeps an Experiment pure definition
-    (trial space + collector names), with nothing live inside it.
+    Collector instances live here rather than being rebuilt per run, so several
+    runs can share one registry and their metrics land in the same place, where
+    they stay comparable.
 
     Args:
         path (str | Path, optional): Base directory. A Collector registered

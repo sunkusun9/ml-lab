@@ -10,7 +10,6 @@ from mllabs._experimenter import Experimenter
 from mllabs._trainer import Trainer
 from mllabs._pipeline import PipelineBuilder
 from mllabs import Trial
-from mock import TrialListExperiment
 from mllabs._cache import DataCache
 from mllabs._data_wrapper import wrap
 from mllabs._logger import ProgressSessionLogger
@@ -84,18 +83,18 @@ def _dt(name='dt', edges=None):
 
 def _model():
     """One good Trial over the 'scaler' stage."""
-    return TrialListExperiment('e', [_dt()])
+    return [_dt()]
 
 
 def _bad_edges():
     """A good Trial plus one whose edges fail to resolve at dispatch."""
-    return TrialListExperiment('e', [_dt(), _dt('bad_dt', {'X': 'scaler:([)', 'y': '{target}'})])
+    return [_dt(), _dt('bad_dt', {'X': 'scaler:([)', 'y': '{target}'})]
 
 
 def _wp():
-    return TrialListExperiment('e', [
+    return [
         Trial('wp_node', 'mock.WarnPredictor', {'X': '{f1, f2, f3}', 'y': '{target}'}),
-    ])
+    ]
 
 
 class TestBuildFlowMulti:
@@ -275,10 +274,8 @@ class TestWorkerWarningVerbosity:
         registry = Collectors(tmp_path / 'coll')
         registry.set_collector('m', MetricCollector, Connector(),
                                params={'output_var': None, 'metric_func': _const_metric})
-        experiment = _wp().use_collector('m')
-
         logger = ProgressSessionLogger(level=['info', 'progress'])  # no 'warning'
-        exp.exp(experiment, registry, logger=logger)
+        exp.exp(_wp(), registry, logger=logger)
 
         assert any('PREDICT_WARN_XYZ' in w for w in logger.warning_list)
         assert any('[wp_node]' in w for w in logger.warning_list)   # node prefix present
@@ -383,7 +380,7 @@ class TestTrainerMulti:
             splitter_params={}, cache=DataCache(),
         )
         t.set_pipeline(pipeline.build())
-        t.set_experiment(_model())
+        t.set_trials(_model())
 
         t.train(n_jobs=2)
 

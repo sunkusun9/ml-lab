@@ -1,16 +1,4 @@
-"""Shared helpers between Experimenter and Trainer (name matching, serial tracking, status)."""
-import re
-
-
-def name_matches(name, query):
-    """``None`` matches everything, a list is exact membership, a str is a regex."""
-    if query is None:
-        return True
-    if isinstance(query, list):
-        return name in query
-    if isinstance(query, str):
-        return re.search(query, name) is not None
-    raise ValueError(f"query must be None, list, or str, got {type(query)}")
+"""Shared helpers between Experimenter and Trainer (serial tracking, status)."""
 
 
 def require_built_pipeline(pipeline):

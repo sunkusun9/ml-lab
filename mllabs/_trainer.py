@@ -8,7 +8,7 @@ from ._flow import TrainDataFlow
 from ._store import NodeStore
 from ._edge_dsl import parse, eval_expr, referenced_nodes
 from ._logger import resolve_logger
-from ._run_common import resolve_common_status, find_stale_nodes, require_built_pipeline, name_matches
+from ._run_common import resolve_common_status, find_stale_nodes, require_built_pipeline
 
 
 class TrainFold:
@@ -47,7 +47,7 @@ class Trainer:
     """Runs cross-validation training on a subset of Pipeline nodes.
 
     Uses ``self.pipeline`` — set via the constructor or :meth:`set_pipeline`.
-    Trains the Trials supplied via :meth:`set_experiment` plus the Stages they
+    Trains the Trials supplied via :meth:`set_trials` plus the Stages they
     depend on; the Stage selection is recomputed whenever either is set.
 
     Attributes:
@@ -55,7 +55,7 @@ class Trainer:
         pipeline (Pipeline): Pipeline set via the constructor or
             :meth:`set_pipeline`, persisted to ``{path}/pipeline.pkl``.
         selected_stages (list[str]): Stage nodes included in training.
-        trials (list[Trial]): Trials to train (set via :meth:`set_experiment`).
+        trials (list[Trial]): Trials to train (set via :meth:`set_trials`).
         train_folds (list[TrainFold]): Per-split data flows and artifact stores.
     """
 
@@ -121,7 +121,7 @@ class Trainer:
 
         Takes a built :class:`Pipeline`, not a :class:`PipelineBuilder` — see
         :meth:`Experimenter.set_pipeline`. Which Stages are actually selected
-        depends on the Trials: call :meth:`set_experiment` to supply them.
+        depends on the Trials: call :meth:`set_trials` to supply them.
 
         Args:
             pipeline (Pipeline): Built pipeline defining the Stage graph.
@@ -136,14 +136,13 @@ class Trainer:
         self._save_pipeline()
         self.save()
 
-    def set_experiment(self, experiment, trials=None):
+    def set_trials(self, trials):
         """Select the Trials to train, plus the Stages they depend on.
 
         Args:
-            experiment (BaseExperiment): Source of Trials.
-            trials: Trial-name filter — ``None`` (all), ``list``, or regex ``str``.
+            trials (list[Trial]): Trials to train.
         """
-        self.trials = [t for t in experiment.get_trials() if name_matches(t.name, trials)]
+        self.trials = list(trials)
         self._recompute_selection()
         self._reset_stale(self.selected_stages + self.trial_names())
         self.save()

@@ -5,7 +5,9 @@ from ._experimenter import Experimenter
 from ._inferencer import Inferencer
 from ._connector import Connector
 from ._pipeline import ColSelector, Pipeline, PipelineBuilder
-from .experiment import Trial, BaseExperiment, SimpleExperiment
+from ._trial import Trial, make_trials
+from ._trial_store import TrialStore
+from ._project import Project
 from .collector import Collector, Collectors, MetricCollector, ProbToLabel, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector, ProcessCollector
 from .filter import DataFilter, RandomFilter, IndexFilter
 
@@ -29,8 +31,9 @@ __all__ = [
     'Pipeline',
     'PipelineBuilder',
     'Trial',
-    'BaseExperiment',
-    'SimpleExperiment',
+    'make_trials',
+    'TrialStore',
+    'Project',
     'BaseLogger',
     'DefaultLogger',
     'ProgressSessionLogger',
