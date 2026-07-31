@@ -21,7 +21,7 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 # modeler 모듈 요약
 
 ## 아키텍처 개요
-- **Pipeline** (`_pipeline.py`): 노드 그래프 자료구조 (ML 관심사 분리)
+- **PipelineBuilder / Pipeline** (`_pipeline.py`): 가변 빌더 + `build()`가 만드는 불변 노드 그래프
 - **Experimenter** (`_experimenter.py`): 실험 실행/관리 (Pipeline 사용)
 - **Trainer** (`_trainer.py`): 학습 실행/관리 (split 기반)
 - **Inferencer** (`_inferencer.py`): 학습된 파이프라인을 새 데이터에 적용
@@ -51,42 +51,55 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 ## 핵심 클래스
 
 ### Node 역할
-- **DataSource** (`DataSourceNode`, key=`None`): 원본 데이터 스키마 및 target 정의
+- **DataSource** (`_DataSourceNode`, key=`None`): 원본 데이터 스키마 및 target 정의
 - **Stage**: 전처리/변환 (TransformProcessor) — 하위 노드에 데이터 공급
 - **Head**: 모델링/예측 (PredictProcessor) — 최종 결과 생산
 
-### Pipeline 계층 (`_pipeline.py`)
-- `VAR_TYPES = frozenset({'numerical', 'ordinal', 'nominal', 'text', 'binary', 'datetime'})`
-- **`_params_equal(a, b)`**: params dict 안전 비교 헬퍼
-  - dict → key별 재귀 비교
-  - `__dict__` 있는 객체 → `__dict__` 재귀 비교 (lgb_early_stopping 등 콜백 처리)
-  - `__dict__` 없는 객체(primitive, C-ext) → `==` fallback (try/except)
-  - 같은 타입이어야 equal 가능, 다른 타입 → False
-- **Pipeline**: 노드 그래프 자료구조. Experimenter/Trainer를 소유/등록하지 않음 (아래 참조) — 순수 노드 그래프 정의 + serial 무결성 추적 역할만 담당
-  - `nodes`: `{name: PipelineNode}` (`None` → `DataSourceNode`), `grps`: `{name: PipelineGroup}` (`'__datasource__'` 항상 존재)
-  - `datasource`: `nodes[None]` 반환 property
-  - `set_datasource(schema, targets=None)`: DataSource 스키마/target 설정, 변경 시 downstream serial 자동 bump
-  - `set_grp(exist='diff'|'skip'|'error'|'replace')`, `set_node(exist=...)`, `rename_grp`, `remove_grp`, `remove_node`
-  - `get_node_names(query)`, `get_node_attrs(name)`, `_get_affected_nodes(nodes)`
-  - `_bump_serials(node_names)`: 지정 노드들의 serial을 새 UUID로 교체
-  - `copy()`, `copy_stage()`, `copy_nodes(node_names)` — 선택적 복사
-  - `compare_nodes(nodes)` → `{processor_name: DataFrame}` (params 차이 + edges['X'] stage별 변수 차이)
-  - `check_data_compatibility(data)`: datasource schema 컬럼이 모두 `data`에 있는지 체크 (schema 미정의 시 no-op). `Experimenter.build/exp`, `Trainer.set_pipeline/train` 시작 시 자동 호출
-  - `desc_pipeline(max_depth, direction)`, `desc_node(node_name, direction, show_params)`: Mermaid 다이어그램
-  - **Pipeline은 Experimenter/Trainer를 소유하지 않음** — `add_experiment`/`add_trainer`/`get_experiment`/`get_trainer` 등 registry 없음. 반대로 `Experimenter`/`Trainer`가 `set_pipeline(pipeline)`(또는 constructor `pipeline=`)으로 Pipeline을 직접 참조로 보유함 (아래 참조) — `p.set_grp`/`p.set_node`로 in-place 수정하면 별도 재전달 없이 반영됨
+### PipelineBuilder / Pipeline 분리 (`_pipeline.py`)
+```
+PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node, serial bump
+  └─ .build() ──► Pipeline  — 불변 스냅샷. grp 상속 해소 완료, 순수 데이터
+```
+- **Experimenter/Trainer/Inferencer는 `Pipeline`만 보유** — builder를 넘기면 `TypeError`(`_run_common.require_built_pipeline`). 즉 `e.set_pipeline(p.build())`. builder를 나중에 수정해도 진행 중인 실행에 새어 들어가지 않으며, 새 정의를 반영하려면 다시 `build()` 후 `set_pipeline` 재호출
+- grp는 build를 넘어가지 않음 — 구조적으로 의미 있는 건 `role`('stage'/'head')뿐이고, 원래 그룹명은 표시용 `label`로만 남음 (`get_node_attrs`의 키도 `'grp'` → `'label'`)
 
-- **DataSourceNode** (`PipelineNode` 서브클래스):
+#### PipelineBuilder
+- `VAR_TYPES = frozenset({'numerical', 'ordinal', 'nominal', 'text', 'binary', 'datetime'})`
+- **`_params_equal(a, b)`**: `a == b` 한 줄 — params가 순수 데이터/ref spec만 담도록 강제되므로 `__dict__` 재귀 비교 같은 우회가 불필요해짐
+- `nodes`: `{name: _PipelineNode}` (`None` → `_DataSourceNode`), `grps`: `{name: _PipelineGroup}` (`'__datasource__'` 항상 존재)
+- `datasource`: `nodes[None]` 반환 property
+- `set_datasource(schema, targets=None)`: DataSource 스키마/target 설정, 변경 시 downstream serial 자동 bump
+- `set_grp(exist='diff'|'skip'|'error'|'replace')`, `set_node(exist=...)`, `rename_grp`, `remove_grp`, `remove_node`
+  - **`processor`/`adapter`/`params` 스펙 검증** (`_validate_processor`/`_validate_adapter`/`_validate_params`) — 산 객체를 넘기면 `TypeError`. 아래 "Lazy resolution" 참조
+- `build()` → `Pipeline`
+- `get_node_names(query)`, `get_node_attrs(name)`, `_get_affected_nodes(nodes)`, `_find_descendants(name)`
+- `_bump_serials(node_names)`: 지정 노드들의 serial을 새 UUID로 교체
+- `copy()`, `copy_stage()`, `copy_nodes(node_names)` — 선택적 복사 (builder→builder)
+- `compare_nodes(nodes)` → `{processor_name: DataFrame}` (params 차이 + edges['X'] stage별 변수 차이)
+- `desc_pipeline(max_depth, direction)`, `desc_node(node_name, direction, show_params)`: Mermaid 다이어그램 — grp 계층이 필요하므로 **builder 전용**
+
+#### Pipeline (빌드 결과)
+- `nodes`: `{name: _BuiltNode}` — `None` 키는 `_BuiltDataSource` (builder와 동일한 관례)
+- `_BuiltNode` 속성(`__slots__`): `name`, `label`, `role`, `processor`, `edges`, `method`, `adapter`, `params`, `serial`, `tag`, `desc`, `output_edges`
+- `pipeline_id`(builder 신원) / `build_id`(이 빌드의 신원)
+- `get_node(name)`, `get_node_attrs(name)`, `get_node_names(query=None)`
+- `topo_order()`: DataSource에서 내려오는 깊이순 노드명 (DataSource 제외) — 빌드 시 1회 계산해 캐시
+- `descendants(name)`, `check_data_compatibility(data)`
+- `subset(node_names)`: 지정 노드 + 조상만 담은 새 Pipeline (구 `copy_nodes`, Inferencer용)
+- **불변성의 한계**: `params`/`edges`는 shallow copy — 중첩 값은 builder와 공유. "수정하지 않는다"는 관례로 지킴
+
+- **`_DataSourceNode`** (`_PipelineNode` 서브클래스):
   - `schema`: `{col: var_type}` — var_type은 VAR_TYPES 중 하나
   - `targets`: `list[str]` — 타겟 컬럼 목록 (타입과 별도)
   - `get_attrs(grps)`: role='datasource', serial, schema, targets 반환 (processor/edges/method/params 없음)
 
-- **PipelineGroup**: 노드 그룹 (stage/head 역할)
+- **`_PipelineGroup`**: 노드 그룹 (stage/head 역할) — builder 내부 전용
   - 속성: `name`, `role`, `processor`, `edges`, `method`, `parent`, `adapter`, `params`, `desc`
   - `children`: 자식 그룹명 리스트, `nodes`: 소속 노드명 리스트
   - `get_attrs(grps)`: 상위 그룹 속성 병합하여 반환 (`desc`는 상속 안 됨, 각 요소 독립)
   - `diff(processor, edges, method, parent, adapter, params)`: 달라진 필드명 리스트 반환 (`desc` 제외 → desc-only 변경은 rebuild 미유발)
 
-- **PipelineNode**: 개별 노드
+- **`_PipelineNode`**: 개별 노드 — builder 내부 전용
   - 속성: `name`, `grp`, `processor`, `edges`, `method`, `adapter`, `params`, `desc`, **`serial`** (UUID str), **`tag`** (`list[str]`)
   - `serial`: 노드 정의가 변경될 때마다 `_bump_serials`에 의해 새 UUID로 교체 → 아티팩트 무결성 추적
   - `output_edges`: 이 노드를 입력으로 사용하는 노드명 리스트
@@ -96,13 +109,37 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 
 - **ColSelector** (`_pipeline.py`): processor params(예: `cat_features`, `cat_cols`)에 쓰는 지연(lazy) 컬럼 선택자
   - `__init__(dsl_string='*')` — DSL 문자열 하나만 보유(정의 시점엔 데이터 불필요, `edges[key]`와 동일한 원칙)
-  - 실제 resolve는 fit 시점에 `_node_processor._resolve_col_selectors`가 `eval_expr(parse(v.dsl_string), data)`로 수행
-  - 예: `ColSelector('*@categorical')`, `ColSelector('^cat_')`
+  - **params에는 인스턴스가 아니라 ref-dict로 지정**: `{"__ref__": "mllabs.ColSelector", "__params__": {"dsl_string": "*@categorical"}}` (인스턴스는 `set_grp`/`set_node`가 `TypeError`로 거부)
+  - `_node_processor`가 Processor 생성 시 `resolve_ref_values()`로 인스턴스화하고, fit 시점에 `_resolve_col_selectors`가 `eval_expr(parse(v.dsl_string), data)`로 컬럼 확정
+
+### Experiment / Trial (`experiment/` 패키지)
+Head를 Pipeline에서 떼어내 Experiment가 소유하도록 하는 방향의 1단계. **아직 `Experimenter.exp()`와 연결되지 않았고, Pipeline에도 Head가 그대로 남아 있음** — 새 레이어만 추가된 상태.
+
+- **`Trial`** (`_trial.py`): 평가할 구성 하나 = 기존 Head 노드에 해당. `name`, `processor`, `method`, `adapter`, `params`, `edges`, `label`, `tag`
+  - `get_attrs()`: `Pipeline.get_node_attrs()`와 같은 모양(`role='head'` 고정, `serial` 없음) → Connector/executor/Collector가 Head 노드와 동일하게 취급 가능
+  - **신원 2중 구조**:
+    - `name` — 사람이 읽는 식별자이자 디스크 아티팩트 디렉토리명 (기존 Head 노드명 역할)
+    - `trial_id(pipeline)` — 정의(`content_key()`)+ **참조하는 stage 노드들의 serial**의 sha256
+  - **stage serial을 해시에 넣는 이유**: Head가 Pipeline을 떠나면 `_bump_serials`가 `output_edges`를 타고 Head까지 전파하던 연쇄가 끊김. 이 해시가 그 연쇄를 대체 — 없으면 "전처리를 바꿨는데 모델이 재실행 안 되는" 조용한 오류 발생
+  - `upstream_serials(pipeline)`: 직접 참조 stage만 수집 (stage 자신의 serial이 이미 상위 변경 시 bump되므로 전이적으로 커버됨)
+  - `content_key()`에 `name`/`label` 제외 — 이름을 바꿔도 계산 결과는 같음. **params가 순수 데이터로 강제된 덕에** 안정적 해시가 가능 (산 객체였다면 불가)
+
+- **`BaseExperiment`** (`_base.py`): Trial 공급원 + Collector 소유
+  - Trial 계약(서브클래스 구현): `get_trial_nums()`, `get_next_trial()`, `reset()`
+  - `get_trials()`: `reset()` 후 `get_trial_nums()`만큼 `get_next_trial()` 호출해 리스트로 드레인 — pull 인터페이스를 유지하되 executor의 "대상 목록 사전 확정" 전제(worker 상한, GPU/CPU 사전 분배, progress 분모)를 건드리지 않음. 적응적 제안은 나중에 이 계약 위에서 구현
+  - `set_collector(name, collector, connector, path, params=None, exist='skip')` / `get_collector` / `remove_collector` / `match_collectors(trial)`
+  - **Experimenter에 대한 의존성 없음** — Collector에게 저장 경로만 지정하고, fold 수/target 등 Experimenter가 필요한 부분은 Collector가 자기 `on_attach`/`_setup`으로 해결. 덕분에 데이터/split 없이도 Experiment를 만들고 들여다볼 수 있음
+  - **Collector가 자기 경로를 소유** — `{experimenter.path}/__collector/` 하위가 아님. 한 데이터셋에 여러 Experiment를 붙여도 결과가 섞이지 않음
+
+- **`SimpleExperiment`** (`_simple.py`): processor/method/adapter/edges 고정 + `param_grid` 카테시안 곱
+  - `params`(전 trial 공통 고정값) + `param_grid`(`{param: [values]}`) → grid 키 정렬 기준 결정적 순서
+  - trial 이름: 단일이면 `{name}`, 복수면 `{name}_{idx}` (0 패딩)
+  - 생성 시 `_validate_processor`/`_validate_adapter`/`_validate_params`로 spec 검증 (Pipeline과 동일 규칙)
 
 ### Experimenter (`_experimenter.py`)
 - 생성자: `(data, path, ..., cache_maxsize=4GB, logger, aug_data=None, tags=None, pipeline=None)`
-- **Pipeline을 직접 보유** — `self.pipeline` (constructor `pipeline=` 또는 `set_pipeline(pipeline)`으로 설정). `build`/`exp`/`collect` 등 노드 그래프가 필요한 메소드는 더 이상 `pipeline` 인자를 받지 않고 `self.pipeline` 사용
-- `set_pipeline(pipeline)`: 기존에 pipeline이 이미 설정돼 있었다면 노드 `serial` mismatch를 먼저 감지해 reset 후 교체, `{path}/pipeline.pkl`에 저장. `self.pipeline`은 호출자의 `p` 객체와 동일 참조이므로 이후 `p.set_grp`/`p.set_node`로 in-place 수정하면 별도 재호출 없이 반영됨(단, `build`/`exp` 호출 시마다 `_save_pipeline()`으로 최신 상태 저장)
+- **빌드된 `Pipeline`을 보유** — `self.pipeline` (constructor `pipeline=` 또는 `set_pipeline(pipeline)`으로 설정). `build`/`exp`/`collect` 등 노드 그래프가 필요한 메소드는 `pipeline` 인자를 받지 않고 `self.pipeline` 사용
+- `set_pipeline(pipeline)`: **빌드된 `Pipeline`만 수락**(builder를 넘기면 `TypeError`). 기존에 pipeline이 설정돼 있었다면 노드 `serial` mismatch를 먼저 감지해 reset 후 교체, `{path}/pipeline.pkl`에 저장. **스냅샷이므로 이후 `p.set_grp`/`p.set_node` 수정은 반영되지 않음** — 새 정의를 반영하려면 `e.set_pipeline(p.build())`를 다시 호출
 - `set_status(status)`: `self.status` 설정 + meta의 status row만 갱신 (전체 meta 재저장 X). `open()`/`close()`/`close_exp()`/`reopen_exp()`가 이걸 사용
 - **OS log capture** (`open_os_log`/`close_os_log`/`os_log`) — `open()`/`close()`(experiment status)와는 **무관한 별개 기능**:
   - `open_os_log(log_path=None)`: 이 프로세스의 OS-level stdout/stderr(fd 1/2)를 `{path}/__worker_logs/master.log`(기본값)로 dup2 리다이렉트 시작 — `self._os_log_state`에 원본 fd/`sys.stdout`·`stderr` 백업 보관. 이미 open이면 에러
@@ -167,7 +204,7 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - `get_missing_stages(pipeline)`: 미빌드 stage 목록
 
 ### Trainer (`_trainer.py`)
-- 생성자: `(name, data, path, splitter, splitter_params, cache, logger, tags=None, aug_data=None, pipeline=None)` — Experimenter와 동일하게 `set_pipeline(pipeline)`/constructor `pipeline=`으로 Pipeline을 직접 보유
+- 생성자: `(name, data, path, splitter, splitter_params, cache, logger, tags=None, aug_data=None, pipeline=None)` — Experimenter와 동일하게 빌드된 `Pipeline`만 보유(`set_pipeline`/constructor `pipeline=`, builder는 `TypeError`)
 - `select_head` 없음 — `set_pipeline(pipeline)`이 tags 교집합 head + upstream stage를 자동 선택(`_select_from_pipeline`), staleness 체크 포함
 - `tags` (list[str]): 비어있으면 전체 head 대상
 - `train_folds`: `[TrainFold]` — split별 `(TrainDataFlow, NodeStore)` 쌍, 둘은 같은 fold 디렉토리를 공유 (Experimenter의 outer_fold와 동일 구조)
@@ -315,12 +352,13 @@ p.set_grp('scale', role='stage', processor=StandardScaler,
 - `build()`, `exp()`, `train()` 시작 시 현재 serial vs 저장된 serial 비교 → 불일치 노드 자동 reset 후 재빌드
 
 ## Lazy resolution: processor / adapter / params (edges DSL과 동일한 지연 원칙)
-- `set_grp`/`set_node`는 `processor`/`adapter`/`params`를 **절대 resolve하거나 instantiate하지 않고 받은 그대로 저장** — 구조만 다루고 실제 값으로의 변환은 전부 사용 시점(`_node_processor.py`)으로 미룸
-- **processor**: 항상 `"module.ClassName"` **문자열**로만 지정(클래스 객체 지원 안 함) — 실제 클래스로 resolve되는 유일한 지점은 `_node_processor.py`(`TransformProcessor`/`PredictProcessor.__init__`의 `resolve_processor()` 호출, 즉 노드 인스턴스를 만드는 바로 그 순간). `Connector`, `_describer.py`(desc_node/compare_nodes), `_executor.py._needs_gpu`는 전부 이 문자열을 그대로 다룸(비교/출력 시 클래스 변환 없음)
-- **adapter**: `None` / `"module.ClassName"` 문자열 / `{"__ref__":...,"__params__":{...}}` dict / 인스턴스 — 어느 형태든 그대로 저장, `resolve_node_adapter(processor, adapter_spec)`(`adapter/__init__.py`)가 사용 시점에 resolve
-- **params**: 내부 `{'__ref__':...}`(예: ColSelector)/`{'__callable__':...}`(예: metric 함수) 항목도 eager 미해제 — `_node_processor.py`의 `_resolve_params()`가 Processor 생성 시점에 `resolve_ref_values()`로 해제
-- **왜**: (1) `mllabs.nn.NNClassifier`처럼 무거운 import(TensorFlow)를 유발하는 processor/adapter가 파이프라인 "정의" 시점(`set_grp`/`set_node`, 심지어 `get_attrs()`가 내부적으로 도는 모든 경로)에 실수로 로드되는 걸 방지 — 실제 `build`/`exp` 실행 시점까지 미뤄짐. (2) diff 비교가 raw spec(str/dict) 비교라 인스턴스 `__eq__` 신뢰성 이슈에서 자유로움
-- **diff 비교 트레이드오프**: eager 정규화가 없으므로 **인스턴스와 그와 동등한 `{'__ref__':...}` spec은 더 이상 동일로 취급되지 않음**(타입이 달라 `update` 발생) — 동일한 spec(같은 str/같은 dict)을 두 번 넘기는 경우는 여전히 `skip`
+- `set_grp`/`set_node`는 `processor`/`adapter`/`params`를 **스펙 형태만 검증하고 절대 resolve/instantiate하지 않음** — 실제 값으로의 변환은 전부 사용 시점(`_node_processor.py`)으로 미룸
+- **산 객체는 정의 시점에 `TypeError`로 거부됨** (`_validate_processor`/`_validate_adapter`/`_validate_params`, `_pipeline.py`). 에러 메시지가 써야 할 ref 형태를 그대로 안내함
+- **processor**: `"module.ClassName"` **문자열만** (클래스 객체 거부). 실제 클래스로 resolve되는 유일한 지점은 `_node_processor.py`(`TransformProcessor`/`PredictProcessor.__init__`의 `resolve_processor()` 호출). `Connector`, `_describer.py`, `_executor.py._needs_gpu`는 전부 이 문자열을 그대로 다룸
+  - **클래스를 허용하면 안 되는 이유**: `Connector.match`는 `node_attrs['processor']`를 **문자열 그대로 비교**하므로, 클래스로 정의된 노드는 문자열 ref로 설정한 Connector와 **영영 매칭되지 않음** — 에러 없이 collector가 조용히 아무것도 수집하지 않음. `serialize_value`가 클래스를 `{"__type__":"class"}`로 저장하고 리로드 시 클래스로 되돌리므로 재시작해도 해소되지 않음
+- **adapter**: `None` / `"module.ClassName"` 문자열 / `{"__ref__":...,"__params__":{...}}` dict — 인스턴스 거부. `resolve_node_adapter(processor, adapter_spec)`(`adapter/__init__.py`)가 사용 시점에 resolve
+- **params**: 순수 데이터(스칼라/numpy 스칼라/list/tuple/dict)와 ref spec만 허용 — `{'__ref__':...}`(예: ColSelector, `mllab_sampler`)/`{'__callable__':...}`(예: metric 함수). 중첩 값까지 재귀 검증하며 에러가 경로(`params['a']['b'][0]`)를 표시함. `_node_processor.py`의 `_resolve_params()`가 Processor 생성 시점에 `resolve_ref_values()`로 해제
+- **왜**: (1) `mllabs.nn.NNClassifier`처럼 무거운 import(TensorFlow)를 유발하는 processor/adapter가 파이프라인 "정의" 시점에 실수로 로드되는 걸 방지 — 실제 `build`/`exp` 실행 시점까지 미뤄짐. (2) 파이프라인 전체가 직렬화 가능해짐(declarative config 방향). (3) diff 비교가 raw spec 비교라 `_params_equal`이 `==` 한 줄로 축소됨 — 인스턴스 `__eq__` 신뢰성 이슈 자체가 사라짐
 - **테스트**: `tests/mock.py`에 여러 테스트 파일에 흩어져 있던 더미 processor 클래스 중 string-ref로 참조돼야 하는 것들을 모아둠 — `tests/`엔 `__init__.py`가 없어 pytest가 bare module(`import mock`)로 수집하므로 `processor='mock.DummyStage'`식으로 참조 가능
 
 ## Processor (`_node_processor.py`)
@@ -344,12 +382,12 @@ p.set_grp('scale', role='stage', processor=StandardScaler,
 - `get_params(params, logger)`: 모델 생성 파라미터
 - `get_fit_params(data_dict, params, logger)`: fit 파라미터 — base: X/y를 `unwrap()` 후 반환
 - `get_process_data(data)`: `process()` 입력 데이터 변환 — base: `unwrap(data)`
-  - `LightGBMAdapter`: polars→pandas 변환 (LightGBM polars 미지원); `early_stopping` dict 수락 → 내부에서 `lgb_early_stopping` 콜백으로 변환 (`_params_equal`이 plain dict 비교 가능해 false rebuild 방지)
+  - `LightGBMAdapter`: polars→pandas 변환 (LightGBM polars 미지원); `early_stopping` dict 수락 → 내부에서 `lgb_early_stopping` 콜백으로 변환 (params에 콜백 인스턴스를 넣을 수 없으므로 이 dict 형태가 유일한 지정 방법)
   - `CatBoostAdapter`: `_catboost_supports_polars()` (>=1.3.0) 기반 분기 — 구버전이면 polars→pandas (`get_fit_params`도 동일 적용)
 - `result_objs`: `{name: (callable, mergeable_bool)}`
-- `__eq__`: `type(self) is type(other) and self.__dict__ == other.__dict__` — diff 모드에서 adapter 비교에 사용
+- `__eq__`: `type(self) is type(other) and self.__dict__ == other.__dict__`
 - `__hash__`: `id(self)` — set/dict 키로 사용 가능
-- **adapter 지정 방식** (`set_grp`/`set_node`의 `adapter=`): 인스턴스 / `"module.ClassName"` 문자열 / `{"__ref__": ..., "__params__": {...}}` / `None` 모두 허용 — **저장 시점엔 resolve 안 함**, `_node_processor.py`가 인스턴스 생성 시 `resolve_node_adapter(processor, adapter)`로 resolve(`adapter.resolve_node_adapter`, `adapter/__init__.py`)
+- **adapter 지정 방식** (`set_grp`/`set_node`의 `adapter=`): `"module.ClassName"` 문자열 / `{"__ref__": ..., "__params__": {...}}` / `None`만 허용(**인스턴스는 `TypeError`**) — **저장 시점엔 resolve 안 함**, `_node_processor.py`가 인스턴스 생성 시 `resolve_node_adapter(processor, adapter)`로 resolve(`adapter.resolve_node_adapter`, `adapter/__init__.py`)
   - `resolve_node_adapter(processor, adapter_spec)`: `adapter_spec` 있으면 `resolve_instance(adapter_spec)`, 없으면 `get_adapter(processor)`(processor 클래스명 기반 디폴트 — `get_adapter`는 문자열이면 `rpartition('.')[-1]`로 bare/`"module.ClassName"` 둘 다 처리, 클래스/인스턴스면 `.__name__`/`.__class__.__name__`)
   - `_executor.py._needs_gpu`(멀티 워커 GPU 디스패치 스케줄링)도 이 함수로 resolve하되, 노드별 결과를 `_gpu_cache`(node name → bool)에 캐싱해 매 dispatch tick 재계산 방지
 - **레지스트리** (`adapter/__init__.py`): `MODEL_ADAPTERS`(모델명→인스턴스), `get_adapter(model_or_name)`. `NNAdapter`는 TF를 top-level import하므로 **지연 로드** — `_LAZY_ADAPTERS`(`NNClassifier`/`NNRegressor`)로 first-use 시 인스턴스화·캐시, 모듈 `__getattr__`로 `NNAdapter` 심볼 노출 → `import mllabs`가 TF를 끌어오지 않음
@@ -397,12 +435,12 @@ p.set_grp('scale', role='stage', processor=StandardScaler,
 Pipeline/Experimenter/Trainer는 서로의 경로를 관리하지 않음 — 각자 생성 시 `path`를 직접 받음.
 ```
 {pipeline.path}/
-  pipeline.db                       # Pipeline 노드/그룹 정의 (SQLite)
+  pipeline.db                       # PipelineBuilder 노드/그룹 정의 (SQLite)
 
 {experimenter.path}/
   __exp.db                          # SQLite: meta(단순값) + collectors(클래스 ref) 테이블
   __splitters.pkl                   # sp, sp_v, splitter_params (ref-직렬화 불가라 pickle)
-  pipeline.pkl                      # set_pipeline()으로 저장된 Pipeline (있으면 load() 시 self.pipeline으로 복원)
+  pipeline.pkl                      # set_pipeline()으로 저장된 빌드 결과 Pipeline (있으면 load() 시 self.pipeline으로 복원)
   __worker_logs/worker_{i}.log      # 멀티워커 실행이 캡처한 네이티브 stdout/stderr (get_worker_logs())
   __collector/{name}/
     __config.pkl                    # Collector 설정
@@ -418,7 +456,7 @@ Pipeline/Experimenter/Trainer는 서로의 경로를 관리하지 않음 — 각
 
 {trainer.path}/
   __trainer.pkl                     # name, splitter, tags, selected_stages/heads, split_indices
-  pipeline.pkl                      # set_pipeline()으로 저장된 Pipeline
+  pipeline.pkl                      # set_pipeline()으로 저장된 빌드 결과 Pipeline
   {split_idx}/{node_name}/
     obj.pkl / result.pkl / info.pkl # 마찬가지로 train_data_flows/artifact_stores가 {split_idx} 디렉토리를 공유
 

@@ -373,7 +373,7 @@ def unparse(node):
 
 def validate_edges(dsl_string, pipeline):
     """Structural-only validation: syntax, namespace references (must exist
-    as stage nodes), and the "only '+' at the top level" rule.
+    as nodes), and the "only '+' at the top level" rule.
 
     Deliberately does **not** resolve columns/variables — a node's edges are
     only ever expanded into an actual column list lazily, when the Processor
@@ -385,9 +385,6 @@ def validate_edges(dsl_string, pipeline):
             name = seg.name
             if name not in pipeline.nodes:
                 raise ValueError(f"Edge namespace '{name}:' does not reference an existing node")
-            grp = pipeline.grps[pipeline.nodes[name].grp]
-            if grp.role != 'stage':
-                raise ValueError(f"Edge namespace '{name}:' must be a stage node, got '{grp.role}'")
         else:
             _check_no_namespace(seg)
 

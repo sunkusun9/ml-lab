@@ -1,5 +1,6 @@
 import uuid
 import os
+import gc
 import time
 import traceback
 import warnings
@@ -195,9 +196,9 @@ class ProcessWorker(_mp_ctx.Process):
             # captured here instead of polluting the parent console. Framework
             # results/progress travel over the Pipe and are unaffected. Done
             # before any fit / lazy TF import so their banners are captured too.
-            _f = open(self.log_path, 'w')
-            os.dup2(_f.fileno(), 1)
-            os.dup2(_f.fileno(), 2)
+            with open(self.log_path, 'w') as _f:
+                os.dup2(_f.fileno(), 1)
+                os.dup2(_f.fileno(), 2)
         logger = _PipeLogger(self.conn)
         monitor = _ProgressRouter(self.conn)
         gpu_id_list = [self.gpu_id] if self.gpu_id is not None else []
@@ -207,32 +208,44 @@ class ProcessWorker(_mp_ctx.Process):
             if job is None:
                 break
             node_path, node_attrs, outer_idx, inner_idx, train_data, valid_data, test_data, ext_data = job
-            node_name = node_attrs['name']
-            method = node_attrs['method']
-            fit_process = method in ['fit_transform', 'fit_predict']
-            obj, result, info = _process(node_attrs, train_data, valid_data, fit_process, monitor, gpu_id_list, single_worker = False)
-            for w in info.get('warnings', []):
-                logger.warning(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}")
-            if obj is None:
-                NodeStore.write_info(node_path, info)
-                self.conn.send(('error', {**info['error'], 'fold': (outer_idx, inner_idx)}))
-                continue
+            obj = result = info = None
+            try:
+                node_name = node_attrs['name']
+                method = node_attrs['method']
+                fit_process = method in ['fit_transform', 'fit_predict']
+                obj, result, info = _process(node_attrs, train_data, valid_data, fit_process, monitor, gpu_id_list, single_worker = False)
+                for w in info.get('warnings', []):
+                    logger.warning(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}")
+                if obj is None:
+                    NodeStore.write_info(node_path, info)
+                    self.conn.send(('error', {**info['error'], 'fold': (outer_idx, inner_idx)}))
+                    continue
 
-            if self.finalize:
-                NodeStore.write_info(node_path, {**info, 'status': 'finalized'})
-            else:
-                NodeStore.write_objs(node_path, obj, result, info)
+                if self.finalize:
+                    NodeStore.write_info(node_path, {**info, 'status': 'finalized'})
+                else:
+                    NodeStore.write_objs(node_path, obj, result, info)
 
-            def _send_collect(collector, node_name, outer_idx, inner_idx, res):
-                self.conn.send(('collect', collector.name, node_name, outer_idx, inner_idx, res))
+                def _send_collect(collector, node_name, outer_idx, inner_idx, res):
+                    self.conn.send(('collect', collector.name, node_name, outer_idx, inner_idx, res))
 
-            collect_warns = _run_collectors(
-                self.collectors, node_attrs, obj, result, info, train_data, valid_data, test_data, ext_data,
-                outer_idx, inner_idx, monitor, on_collect=_send_collect,
-            )
-            for w in collect_warns:
-                logger.warning(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}")
-            self.conn.send(('done', info))
+                collect_warns = _run_collectors(
+                    self.collectors, node_attrs, obj, result, info, train_data, valid_data, test_data, ext_data,
+                    outer_idx, inner_idx, monitor, on_collect=_send_collect,
+                )
+                for w in collect_warns:
+                    logger.warning(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}")
+                self.conn.send(('done', info))
+            finally:
+                # Release this job's inputs and fitted model before blocking on the
+                # next recv(). Otherwise the previous fold's data and estimator stay
+                # bound (job also holds a second reference) while the next job's data
+                # is received, so worker peak = old data + model + new data. Estimators
+                # (Keras models, LightGBM callbacks, evals_result_) hold reference
+                # cycles, so refcounting alone will not free them here.
+                job = node_attrs = train_data = valid_data = test_data = ext_data = None
+                obj = result = info = None
+                gc.collect()
 
 # ---------------------------------------------------------------------------
 # Flow build
@@ -244,9 +257,8 @@ def _is_stage_ready(flow, pipeline, node_name):
         for src_name in referenced_nodes(dsl_string):
             if src_name is None:
                 continue
-            if pipeline.grps[pipeline.nodes[src_name].grp].role == 'stage':
-                if src_name not in flow.node_objs:
-                    return False
+            if src_name not in flow.node_objs:
+                return False
     return True
 
 
@@ -498,7 +510,7 @@ def _build_flow_multi(outer_folds, pipeline, nodes, n_jobs, gpu_id_list=None, co
 # Experiment flow
 # ---------------------------------------------------------------------------
 
-def _experiment_single(outer_folds, pipeline, nodes,
+def _experiment_single(outer_folds, attrs_map, nodes,
                         gpu_id_list=None, collectors=None, tracker=None,
                         finalize=False, include_train=True, include_input=True):
     gpu_id_list = gpu_id_list or []
@@ -507,7 +519,7 @@ def _experiment_single(outer_folds, pipeline, nodes,
     monitor = _TrackerRouter(0, tracker)
 
     for node_name in nodes:
-        node_attrs = pipeline.get_node_attrs(node_name)
+        node_attrs = attrs_map[node_name]
         fit_process = node_attrs['method'] in ['fit_transform', 'fit_predict']
         matched = [c for c in collectors if c.connector.match(node_attrs)]
         edges = node_attrs['edges']
@@ -576,7 +588,7 @@ def _experiment_single(outer_folds, pipeline, nodes,
     return errors
 
 
-def _experiment_multi(outer_folds, pipeline, nodes, n_jobs,
+def _experiment_multi(outer_folds, attrs_map, nodes, n_jobs,
                        gpu_id_list=None, collectors=None, tracker=None,
                        finalize=False, gpu_fallback_cpu=True, cpu_fallback_gpu=True, log_dir=None):
     from .adapter._base import GPU_NO
@@ -630,7 +642,7 @@ def _experiment_multi(outer_folds, pipeline, nodes, n_jobs,
                         continue
                     if artifact_store.status(node_name) in ('built', 'finalized'):
                         continue
-                    node_attrs = pipeline.get_node_attrs(node_name)
+                    node_attrs = attrs_map[node_name]
                     job = (outer_idx, inner_idx, node_name, outer_fold, train_flow, artifact_store)
                     (gpu_jobs if _needs_gpu(node_attrs) else cpu_jobs).append(job)
         return gpu_jobs, cpu_jobs
@@ -648,7 +660,7 @@ def _experiment_multi(outer_folds, pipeline, nodes, n_jobs,
 
     def _dispatch(job, worker_idx):
         outer_idx, inner_idx, node_name, outer_fold, train_flow, artifact_store = job
-        node_attrs = pipeline.get_node_attrs(node_name)
+        node_attrs = attrs_map[node_name]
         edges = node_attrs['edges']
         try:
             train_data = train_flow.get_train(edges)
@@ -726,7 +738,7 @@ def _experiment_multi(outer_folds, pipeline, nodes, n_jobs,
                 (free_gpu if worker_idx < n_gpu else free_cpu).append(worker_idx)
                 if tracker:
                     tracker.error(worker_idx, node_name, outer_idx, inner_idx, error_info)
-                node_attrs = pipeline.get_node_attrs(node_name)
+                node_attrs = attrs_map[node_name]
                 for c in collectors:
                     if c.connector.match(node_attrs):
                         c.abort_node(node_name)

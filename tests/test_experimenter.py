@@ -11,38 +11,8 @@ from mllabs._experimenter import Experimenter
 from mllabs._cache import DataCache
 from mllabs._store import NodeStore
 from mllabs._flow import DataFlow
-from mllabs._pipeline import Pipeline
+from mllabs._pipeline import PipelineBuilder
 from mllabs import Connector, MetricCollector
-
-
-class BadProcessor:
-    __name__ = 'BadProcessor'
-    def __init__(self, **kwargs):
-        pass
-    def fit(self, X, y=None):
-        raise ValueError("intentional error")
-    def transform(self, X):
-        pass
-
-
-class ErrorProcessor:
-    __name__ = 'ErrorProcessor'
-    def __init__(self, **kwargs):
-        pass
-    def fit(self, X, y=None):
-        raise TypeError("test error msg")
-    def transform(self, X):
-        pass
-
-
-class BadPredictor:
-    __name__ = 'BadPredictor'
-    def __init__(self, **kwargs):
-        pass
-    def fit(self, X, y=None):
-        raise RuntimeError("predict error")
-    def predict(self, X):
-        pass
 
 
 def accuracy_metric(y, pred):
@@ -66,7 +36,7 @@ def sample_data():
 
 @pytest.fixture
 def pipeline():
-    p = Pipeline()
+    p = PipelineBuilder()
     p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
     return p
 
@@ -77,27 +47,40 @@ def exp(tmp_path, sample_data, pipeline):
         data=sample_data,
         path=tmp_path / 'exp',
         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
-        pipeline=pipeline,
+        pipeline=pipeline.build(),
     )
     return e
 
 
-def _setup_stage(pipeline):
-    pipeline.set_grp('scale', role='stage', processor=StandardScaler,
+def _publish(pipeline, exp):
+    """Hand the current definitions to *exp* as a fresh snapshot.
+
+    Experimenter holds a built Pipeline, so edits made to the builder after
+    construction only take effect once they are built and set again.
+    """
+    if exp is not None:
+        exp.set_pipeline(pipeline.build())
+
+
+def _setup_stage(pipeline, exp=None):
+    pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
                       method='transform', edges={'X': '{f1, f2, f3}'})
     pipeline.set_node('scaler', grp='scale')
+    _publish(pipeline, exp)
 
 
-def _setup_head(pipeline):
-    pipeline.set_grp('model', role='head', processor=DecisionTreeClassifier,
+def _setup_head(pipeline, exp=None):
+    pipeline.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
                       method='predict', edges={'X': '{f1, f2, f3}', 'y': '{target}'},
                       params={'max_depth': 3, 'random_state': 42})
     pipeline.set_node('dt', grp='model')
+    _publish(pipeline, exp)
 
 
-def _setup_full(pipeline):
+def _setup_full(pipeline, exp=None):
     _setup_stage(pipeline)
     _setup_head(pipeline)
+    _publish(pipeline, exp)
 
 
 def _flow(exp, outer=0, inner=0):
@@ -183,14 +166,14 @@ class TestExperimenterInit:
 
 class TestBuild:
     def test_build_stage(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         exp.build()
         flow = _flow(exp)
         assert 'scaler' in flow.node_objs
         assert flow.status('scaler') == 'built'
 
     def test_build_skips_built(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         exp.build()
         flow = _flow(exp)
         build_id = flow.get_info('scaler')['build_id']
@@ -198,21 +181,23 @@ class TestBuild:
         assert flow.get_info('scaler')['build_id'] == build_id
 
     def test_build_error_continues(self, exp, pipeline):
-        pipeline.set_grp('good', role='stage', processor=StandardScaler,
+        pipeline.set_grp('good', processor='sklearn.preprocessing.StandardScaler',
                              method='transform', edges={'X': '{f1}'})
         pipeline.set_node('good_node', grp='good')
-        pipeline.set_grp('bad', role='stage', processor=BadProcessor,
+        pipeline.set_grp('bad', processor='mock.BadProcessor',
                              method='transform', edges={'X': '{f2}'})
         pipeline.set_node('bad_node', grp='bad')
+        _publish(pipeline, exp)
         exp.build()
         flow = _flow(exp)
         assert flow.status('good_node') == 'built'
         assert flow.status('bad_node') == 'error'
 
     def test_build_error_dict(self, exp, pipeline):
-        pipeline.set_grp('err', role='stage', processor=ErrorProcessor,
+        pipeline.set_grp('err', processor='mock.ErrorProcessor',
                              method='transform', edges={'X': '{f1}'})
         pipeline.set_node('err_node', grp='err')
+        _publish(pipeline, exp)
         exp.build()
         info = _flow(exp).get_info('err_node')
         err = info['error']
@@ -225,25 +210,27 @@ class TestBuild:
         # column that doesn't exist in the schema is accepted at definition
         # time and only surfaces as a node-level error once build() actually
         # resolves it against real data.
-        pipeline.set_grp('bad', role='stage', processor=StandardScaler,
+        pipeline.set_grp('bad', processor='sklearn.preprocessing.StandardScaler',
                           method='transform', edges={'X': '{unknown_col}'})
         pipeline.set_node('bad_node', grp='bad')
+        _publish(pipeline, exp)
         exp.build()
         flow = _flow(exp)
         assert flow.status('bad_node') == 'error'
         assert 'Unknown column' in flow.get_info('bad_node')['error']['message']
 
     def test_build_info_contains_node_serial(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         exp.build()
         expected_serial = pipeline.nodes['scaler'].serial
         info = _flow(exp).get_info('scaler')
         assert info['node_serial'] == expected_serial
 
     def test_build_error_info_contains_node_serial(self, exp, pipeline):
-        pipeline.set_grp('err', role='stage', processor=ErrorProcessor,
+        pipeline.set_grp('err', processor='mock.ErrorProcessor',
                              method='transform', edges={'X': '{f1}'})
         pipeline.set_node('err_node', grp='err')
+        _publish(pipeline, exp)
         exp.build()
         expected_serial = pipeline.nodes['err_node'].serial
         info = _flow(exp).get_info('err_node')
@@ -252,13 +239,13 @@ class TestBuild:
 
 class TestExp:
     def test_exp_head(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
         assert exp.get_status('dt') == 'built'
 
     def test_exp_skips_built(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
         store = _store(exp)
@@ -267,14 +254,15 @@ class TestExp:
         assert store.get_info('dt')['build_id'] == build_id
 
     def test_exp_error(self, exp, pipeline):
-        pipeline.set_grp('bad_model', role='head', processor=BadPredictor,
+        pipeline.set_grp('bad_model', processor='mock.BadPredictor',
                              method='predict', edges={'X': '{f1}', 'y': '{target}'})
         pipeline.set_node('bad_dt', grp='bad_model')
+        _publish(pipeline, exp)
         exp.exp()
         assert exp.get_status('bad_dt') == 'error'
 
     def test_exp_with_collector(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         mc = exp.set_collector(
             'acc', MetricCollector, Connector(),
@@ -285,7 +273,7 @@ class TestExp:
 
     def test_set_collector_resolves_callable_metric(self, exp, pipeline):
         from sklearn.metrics import balanced_accuracy_score
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         mc = exp.set_collector(
             'bacc', MetricCollector, Connector(),
@@ -323,7 +311,7 @@ class TestCollectorManagement:
 
 class TestResetNodes:
     def test_reset_removes_node_dir(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         exp.build()
         flow = _flow(exp)
         node_path = flow._node_path('scaler')
@@ -333,14 +321,14 @@ class TestResetNodes:
         assert flow.status('scaler') is None
 
     def test_reset_clears_cache(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         exp.build()
         exp.cache.put_data('scaler', 0, 0, 'train', np.array([1]))
         exp.reset_nodes(['scaler'])
         assert exp.cache.get_data('scaler', 0, 0, 'train') is None
 
     def test_pipeline_set_node_replace_then_build_resets(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         exp.build()
         flow = _flow(exp)
         assert flow.status('scaler') == 'built'
@@ -352,7 +340,7 @@ class TestResetNodes:
 
 class TestRebuild:
     def test_build_with_rebuild_true(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         exp.build()
         flow = _flow(exp)
         old_obj = flow.node_objs['scaler'][0]
@@ -362,18 +350,19 @@ class TestRebuild:
         assert old_obj is not new_obj
 
     def test_set_node_replace_then_build(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         exp.build()
         flow = _flow(exp)
         old_obj = flow.node_objs['scaler'][0]
         pipeline.set_node('scaler', grp='scale', exist='replace')
+        _publish(pipeline, exp)
         exp.build()
         new_obj = _flow(exp).node_objs['scaler'][0]
         assert new_obj is not old_obj
         assert _flow(exp).status('scaler') == 'built'
 
     def test_exp_rebuilds_non_built_node(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
         assert exp.get_status('dt') == 'built'
@@ -383,34 +372,36 @@ class TestRebuild:
         assert exp.get_status('dt') == 'built'
 
     def test_build_auto_resets_on_serial_mismatch_stage(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         exp.build()
         old_build_id = _flow(exp).get_info('scaler')['build_id']
         # Simulate pipeline node change by bumping serial directly
         pipeline._bump_serials(['scaler'])
+        _publish(pipeline, exp)
         exp.build()
         new_build_id = _flow(exp).get_info('scaler')['build_id']
         assert new_build_id != old_build_id
 
     def test_build_skips_when_serial_matches_stage(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         exp.build()
         build_id = _flow(exp).get_info('scaler')['build_id']
         exp.build()  # serial unchanged — should skip
         assert _flow(exp).get_info('scaler')['build_id'] == build_id
 
     def test_exp_auto_resets_on_serial_mismatch_head(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
         old_build_id = exp.outer_folds[0].artifact_stores[0].get_info('dt')['build_id']
         pipeline._bump_serials(['dt'])
+        _publish(pipeline, exp)
         exp.exp()
         new_build_id = exp.outer_folds[0].artifact_stores[0].get_info('dt')['build_id']
         assert new_build_id != old_build_id
 
     def test_exp_skips_when_serial_matches_head(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
         build_id = exp.outer_folds[0].artifact_stores[0].get_info('dt')['build_id']
@@ -426,14 +417,14 @@ class TestStateManagement:
         assert exp.status == 'open'
 
     def test_finalize_head(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
         exp.finalize(['dt'])
         assert exp.get_status('dt') == 'finalized'
 
     def test_reinitialize(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
         exp.finalize(['dt'])
@@ -441,7 +432,7 @@ class TestStateManagement:
         assert exp.get_status('dt') is None
 
     def test_reopen_exp_status(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
         exp.close_exp()
@@ -450,7 +441,7 @@ class TestStateManagement:
         assert exp.status == 'open'
 
     def test_reopen_exp_collector_data_valid(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         mc = exp.set_collector('acc', MetricCollector, Connector(edges={'y': '{target}'}),
                                params={'output_var': None, 'metric_func': accuracy_metric})
@@ -467,7 +458,7 @@ class TestStateManagement:
         assert second_result.shape == first_result.shape
 
     def test_reset_nodes_clears_collector_sub(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         mc = exp.set_collector('acc', MetricCollector, Connector(),
                                params={'output_var': None, 'metric_func': accuracy_metric})
@@ -479,7 +470,7 @@ class TestStateManagement:
         assert 'dt' not in mc._buf
 
     def test_close_exp_saves_status(self, exp, pipeline, sample_data):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
         exp.close_exp()
@@ -488,7 +479,7 @@ class TestStateManagement:
         assert loaded.status == 'closed'
 
     def test_reopen_exp_after_save_load(self, exp, pipeline, sample_data):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         mc = exp.set_collector('acc', MetricCollector, Connector(edges={'y': '{target}'}),
                                params={'output_var': None, 'metric_func': accuracy_metric})
@@ -520,28 +511,34 @@ class TestSetPipeline:
             e.exp()
 
     def test_constructor_pipeline_sets_attribute(self, exp, pipeline):
-        assert exp.pipeline is pipeline
+        from mllabs._pipeline import Pipeline
+        assert isinstance(exp.pipeline, Pipeline)
+        assert exp.pipeline.pipeline_id == pipeline.pipeline_id
+
+    def test_builder_is_rejected(self, tmp_path, sample_data, pipeline):
+        with pytest.raises(TypeError, match='built Pipeline'):
+            Experimenter(data=sample_data, path=tmp_path / 'reject', pipeline=pipeline)
 
     def test_set_pipeline_persists_pkl(self, exp, pipeline):
         assert (exp.path / 'pipeline.pkl').exists()
 
     def test_set_pipeline_resets_stale_nodes(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         exp.build()
         flow = _flow(exp)
         assert flow.status('scaler') == 'built'
         pipeline.set_node('scaler', grp='scale', exist='replace')
-        exp.set_pipeline(pipeline)
+        exp.set_pipeline(pipeline.build())
         assert flow.status('scaler') is None
 
 
 class TestSaveLoad:
     def test_save_creates_file(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         assert (exp.path / '__exp.db').exists()
 
     def test_load_restores(self, exp, pipeline, sample_data):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
         path = exp.path
@@ -554,7 +551,7 @@ class TestSaveLoad:
         assert loaded.get_status('dt') == 'built'
 
     def test_load_restores_pipeline(self, exp, pipeline, sample_data):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
 
@@ -571,14 +568,14 @@ class TestSaveLoad:
             Experimenter.load(tmp_path / 'dk', sample_data, data_key='key_b')
 
     def test_load_preserves_splits(self, exp, pipeline, sample_data):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         path = exp.path
         loaded = Experimenter.load(path, sample_data)
         assert loaded.get_n_splits() == exp.get_n_splits()
         assert loaded.get_n_splits_inner() == exp.get_n_splits_inner()
 
     def test_persistence_layout(self, exp, pipeline):
-        _setup_stage(pipeline)
+        _setup_stage(pipeline, exp)
         assert (exp.path / '__exp.db').exists()
         assert (exp.path / '__splitters.pkl').exists()
         assert not (exp.path / '__exp.pkl').exists()
@@ -590,7 +587,7 @@ class TestSaveLoad:
         assert 'sp' not in meta and 'splitter_params' not in meta
 
     def test_load_restores_collector_via_ref(self, exp, pipeline, sample_data):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.set_collector('acc', MetricCollector, Connector(edges={'y': '{target}'}),
                           params={'output_var': None, 'metric_func': accuracy_metric})
@@ -625,27 +622,28 @@ class TestSaveLoad:
 
 class TestGetStatus:
     def test_get_status_none_before_exp(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         assert exp.get_status('dt') is None
 
     def test_get_status_built_after_exp(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
         assert exp.get_status('dt') == 'built'
 
     def test_get_status_finalized(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
         exp.finalize(['dt'])
         assert exp.get_status('dt') == 'finalized'
 
     def test_get_status_error(self, exp, pipeline):
-        pipeline.set_grp('bad_model', role='head', processor=BadPredictor,
+        pipeline.set_grp('bad_model', processor='mock.BadPredictor',
                              method='predict', edges={'X': '{f1}', 'y': '{target}'})
         pipeline.set_node('bad_dt', grp='bad_model')
+        _publish(pipeline, exp)
         exp.exp()
         assert exp.get_status('bad_dt') == 'error'
 

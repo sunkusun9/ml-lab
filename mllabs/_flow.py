@@ -107,21 +107,11 @@ class TrainDataFlow(DataFlow):
 
     def get_available_stages(self, pipeline):
         """Returns stage node names that this DataFlow can produce output for."""
-        return [
-            n for n in pipeline._get_affected_nodes([None])
-            if n is not None
-            and n in self.node_objs
-            and pipeline.grps[pipeline.nodes[n].grp].role == 'stage'
-        ]
+        return [n for n in pipeline.topo_order() if n in self.node_objs]
 
     def get_missing_stages(self, pipeline):
         """Returns stage node names that are in the pipeline but not yet built in this DataFlow."""
-        return [
-            n for n in pipeline._get_affected_nodes([None])
-            if n is not None
-            and n not in self.node_objs
-            and pipeline.grps[pipeline.nodes[n].grp].role == 'stage'
-        ]
+        return [n for n in pipeline.topo_order() if n not in self.node_objs]
 
     def get_train(self, edges):
         """{key: data} train output resolved via edges."""

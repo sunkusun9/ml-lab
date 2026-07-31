@@ -11,7 +11,7 @@ from mllabs._node_processor import TransformProcessor, PredictProcessor
 from mllabs._experimenter import Experimenter
 from mllabs._trainer import Trainer
 from mllabs._cache import DataCache
-from mllabs._pipeline import Pipeline
+from mllabs._pipeline import PipelineBuilder
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -291,9 +291,9 @@ class TestExperimenterAugData:
 class TestTrainerAugData:
     @pytest.fixture
     def pipeline(self, tmp_path):
-        p = Pipeline(path=tmp_path / 'pipeline')
+        p = PipelineBuilder(path=tmp_path / 'pipeline')
         p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'target': 'binary'})
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+        p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict',
                   edges={'X': '{f1, f2}', 'y': '{target}'},
                   params={'max_depth': 3, 'random_state': 42})

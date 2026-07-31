@@ -836,18 +836,13 @@ class TestColSelector:
         assert self._resolve(numpy_int, '^0$') == [0]
 
 
-class _DummyProc:
-    def fit_transform(self, X, y=None):
-        return X
-
-
 class TestPipelineDesc:
     @pytest.fixture
     def pipeline(self):
-        from mllabs._pipeline import Pipeline
-        p = Pipeline()
-        p.set_grp('g1', role='stage')
-        p.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform')
+        from mllabs._pipeline import PipelineBuilder
+        p = PipelineBuilder()
+        p.set_grp('g1')
+        p.set_node('n1', 'g1', processor='mock._DummyProc', edges={'X': '{x1}'}, method='fit_transform')
         return p
 
     # --- 기본값 ---
@@ -861,68 +856,68 @@ class TestPipelineDesc:
     # --- set_grp / set_node ---
 
     def test_set_grp_desc(self):
-        from mllabs._pipeline import Pipeline
-        p = Pipeline()
-        p.set_grp('g1', role='stage', desc='my group')
+        from mllabs._pipeline import PipelineBuilder
+        p = PipelineBuilder()
+        p.set_grp('g1', desc='my group')
         assert p.grps['g1'].desc == 'my group'
 
     def test_set_node_desc(self, pipeline):
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='my node', exist='replace')
+        pipeline.set_node('n1', 'g1', processor='mock._DummyProc', edges={'X': '{x1}'}, method='fit_transform', desc='my node', exist='replace')
         assert pipeline.nodes['n1'].desc == 'my node'
 
     # --- get_attrs에 desc 포함 안 됨 (상속 없음) ---
 
     def test_desc_not_in_get_attrs(self, pipeline):
-        pipeline.set_grp('g1', role='stage', desc='group desc', exist='replace')
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='node desc', exist='replace')
+        pipeline.set_grp('g1', desc='group desc', exist='replace')
+        pipeline.set_node('n1', 'g1', processor='mock._DummyProc', edges={'X': '{x1}'}, method='fit_transform', desc='node desc', exist='replace')
         attrs = pipeline.get_node_attrs('n1')
         assert 'desc' not in attrs
 
     def test_node_desc_not_inherited_from_grp(self, pipeline):
-        pipeline.set_grp('g1', role='stage', desc='group desc', exist='replace')
+        pipeline.set_grp('g1', desc='group desc', exist='replace')
         assert pipeline.nodes['n1'].desc is None
 
     # --- copy ---
 
     def test_grp_copy_preserves_desc(self):
-        from mllabs._pipeline import Pipeline
-        p = Pipeline()
-        p.set_grp('g1', role='stage', desc='group desc')
+        from mllabs._pipeline import PipelineBuilder
+        p = PipelineBuilder()
+        p.set_grp('g1', desc='group desc')
         assert p.grps['g1'].copy().desc == 'group desc'
 
     def test_node_copy_preserves_desc(self, pipeline):
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='node desc', exist='replace')
+        pipeline.set_node('n1', 'g1', processor='mock._DummyProc', edges={'X': '{x1}'}, method='fit_transform', desc='node desc', exist='replace')
         assert pipeline.nodes['n1'].copy().desc == 'node desc'
 
     # --- desc 변경은 affected_nodes에 영향 없음 ---
 
     def test_set_grp_desc_only_change_returns_skip(self, pipeline):
-        pipeline.set_grp('g1', role='stage', desc='old', exist='replace')
-        result = pipeline.set_grp('g1', role='stage', desc='new')
+        pipeline.set_grp('g1', desc='old', exist='replace')
+        result = pipeline.set_grp('g1', desc='new')
         assert result['result'] == 'skip'
         assert result['affected_nodes'] == []
 
     def test_set_grp_desc_only_change_updates_desc(self, pipeline):
-        pipeline.set_grp('g1', role='stage', desc='old', exist='replace')
-        pipeline.set_grp('g1', role='stage', desc='new')
+        pipeline.set_grp('g1', desc='old', exist='replace')
+        pipeline.set_grp('g1', desc='new')
         assert pipeline.grps['g1'].desc == 'new'
 
     def test_set_node_desc_only_change_returns_skip(self, pipeline):
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='old', exist='replace')
-        result = pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='new')
+        pipeline.set_node('n1', 'g1', processor='mock._DummyProc', edges={'X': '{x1}'}, method='fit_transform', desc='old', exist='replace')
+        result = pipeline.set_node('n1', 'g1', processor='mock._DummyProc', edges={'X': '{x1}'}, method='fit_transform', desc='new')
         assert result['result'] == 'skip'
         assert result['affected_nodes'] == []
 
     def test_set_node_desc_only_change_updates_desc(self, pipeline):
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='old', exist='replace')
-        pipeline.set_node('n1', 'g1', processor=_DummyProc, edges={'X': '{x1}'}, method='fit_transform', desc='new')
+        pipeline.set_node('n1', 'g1', processor='mock._DummyProc', edges={'X': '{x1}'}, method='fit_transform', desc='old', exist='replace')
+        pipeline.set_node('n1', 'g1', processor='mock._DummyProc', edges={'X': '{x1}'}, method='fit_transform', desc='new')
         assert pipeline.nodes['n1'].desc == 'new'
 
     # --- 모델 속성 변경 시 affected_nodes 정상 동작 확인 ---
 
     def test_set_grp_model_change_returns_update(self, pipeline):
         from mllabs.processor import CatConverter
-        result = pipeline.set_grp('g1', role='stage', processor=CatConverter)
+        result = pipeline.set_grp('g1', processor='mllabs.processor.CatConverter')
         assert result['result'] == 'update'
 
 

@@ -1,4 +1,5 @@
 from ._base import Collector
+from ._registry import Collectors
 from ._metric import MetricCollector, ProbToLabel
 from ._stacking import StackingCollector
 from ._model_attr import ModelAttrCollector

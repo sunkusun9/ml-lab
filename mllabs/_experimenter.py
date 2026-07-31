@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import uuid
 import pickle as pkl
@@ -18,8 +19,6 @@ from ._store import NodeStore
 from ._describer import desc_spec
 from ._logger import resolve_logger
 from ._cache import DataCache
-
-from ._pipeline import Pipeline
 
 
 def _start_native_redirect(log_path):
@@ -51,9 +50,9 @@ def _start_native_redirect(log_path):
     orig_stdout, orig_stderr = sys.stdout, sys.stderr
     sys.stdout = os.fdopen(saved_out_fd, 'w')
     sys.stderr = os.fdopen(saved_err_fd, 'w')
-    log_f = open(log_path, 'w')
-    os.dup2(log_f.fileno(), 1)
-    os.dup2(log_f.fileno(), 2)
+    with  open(log_path, 'w') as log_f:
+        os.dup2(log_f.fileno(), 1)
+        os.dup2(log_f.fileno(), 2)
     return {
         'saved_out_fd': saved_out_fd, 'saved_err_fd': saved_err_fd,
         'orig_stdout': orig_stdout, 'orig_stderr': orig_stderr, 'log_f': log_f,
@@ -72,10 +71,21 @@ def _stop_native_redirect(state):
     sys.stderr = state['orig_stderr']
     state['log_f'].close()
 from ._connector import Connector
-from ._run_common import resolve_common_status, find_stale_nodes, filter_node_names_by_tags
+from ._run_common import resolve_common_status, find_stale_nodes, filter_node_names_by_tags, require_built_pipeline
 from ._experimenter_store import ExperimenterStore
 from ._serialize import resolve_processor, resolve_instance, resolve_ref_values
 from .collector import Collector
+
+
+def _name_matches(name, query):
+    """``None`` matches everything, a list is exact membership, a str is a regex."""
+    if query is None:
+        return True
+    if isinstance(query, list):
+        return name in query
+    if isinstance(query, str):
+        return re.search(query, name) is not None
+    raise ValueError(f"query must be None, list, or str, got {type(query)}")
 
 
 class OuterFold:
@@ -216,7 +226,6 @@ class Experimenter():
             )
             for i, (test_idx, inner_folds) in enumerate(raw_splits)
         ]
-        self.collectors = {}
         self.status = "open"
         self.pipeline = None
         self._os_log_state = None
@@ -315,9 +324,15 @@ class Experimenter():
         longer matches the artifacts already on disk before adopting the
         new pipeline.
 
+        Takes a built :class:`Pipeline`, not a :class:`PipelineBuilder` — the
+        snapshot is what makes later builder edits unable to change a run that
+        is already under way. Re-publish definitions with
+        ``e.set_pipeline(p.build())``.
+
         Args:
-            pipeline (Pipeline): Pipeline defining the node graph.
+            pipeline (Pipeline): Built pipeline defining the node graph.
         """
+        require_built_pipeline(pipeline)
         if self.pipeline is not None:
             all_node_names = [n for n in pipeline.nodes if n is not None]
             self._reset_serial_stale_nodes(pipeline, all_node_names)
@@ -339,84 +354,30 @@ class Experimenter():
     def get_n_splits_inner(self):
         return len(self.outer_folds[0].train_data_flows)
 
-    def get_collector(self, name):
-        return self.collectors.get(name)
+    def get_collect_status(self, experiment, collectors, collector, trials=None):
+        """``{trial_name: status}`` for the Trials *collector* targets.
 
-    def remove_collector(self, name):
-        if name in self.collectors:
-            collector_path = self.path / '__collector' / name
-            if collector_path.exists():
-                shutil.rmtree(collector_path)
-            del self.collectors[name]
-            self._store.remove_collector(name)
-
-    def set_collector(self, name, collector, connector, params=None, exist='skip'):
-        """Build and register a Collector from its parts.
-
-        Does not collect from already-built Head nodes — call
-        :meth:`collect` explicitly afterward if needed.
-
-        Args:
-            name (str): Collector name.
-            collector: Collector class, or ``"module.ClassName"`` string reference.
-            connector: :class:`~mllabs.Connector` instance, or
-                ``{"__ref__": ..., "__params__": {...}}`` spec.
-            params (dict): Remaining constructor parameters for the collector
-                (everything after ``name``/``connector``). A value of the form
-                ``{"__callable__": "mod.fn"}`` resolves to the referenced object
-                (not called — e.g. a metric function); ``{"__ref__": "mod.Cls",
-                "__params__": {...}}`` is instantiated.
-            exist (str): ``'skip'`` (default) returns existing if already registered;
-                ``'error'`` raises; ``'replace'`` removes the existing collector and
-                registers the new one from scratch.
-
-        Returns:
-            Collector: The registered collector.
+        Status is ``'collected'``, ``'not_collected'``, ``'finalized'``, or
+        ``'error'``.
         """
-        if name in self.collectors:
-            if exist == 'skip':
-                return self.collectors[name]
-            elif exist == 'error':
-                raise RuntimeError("")
-            elif exist == 'replace':
-                self.remove_collector(name)
-
-        self._check_open()
-        cls = resolve_processor(collector)
-        connector = resolve_instance(connector)
-        collector = cls(name, connector, **resolve_ref_values(params or {}))
-        collector.path = self.path / '__collector' / name
-        collector.on_attach(self)
-        collector._setup(
-            len(self.outer_folds), len(self.outer_folds[0].train_data_flows)
-        )
-        collector.save()
-        self.collectors[name] = collector
-        self._store.write_collector(collector)
-        return collector
-
-    def get_collect_status(self, collector, nodes=None):
-        pipeline = self._require_pipeline()
         if isinstance(collector, str):
-            collector = self.collectors[collector]
-        all_node_names = pipeline.get_node_names(nodes)
-        head_nodes = [
-            n for n in all_node_names
-            if n is not None and pipeline.get_node_attrs(n).get('role') == 'head'
-            and collector.connector.match(pipeline.get_node_attrs(n))
-        ]
+            collector = collectors.resolve([collector])[0]
         result = {}
-        for node in head_nodes:
-            if collector.has_node(node):
-                result[node] = 'collected'
+        for trial in experiment.get_trials():
+            if not _name_matches(trial.name, trials):
+                continue
+            if not collector.connector.match(trial.get_attrs()):
+                continue
+            if collector.has_node(trial.name):
+                result[trial.name] = 'collected'
+                continue
+            status = self.get_status(trial.name)
+            if status == 'finalized':
+                result[trial.name] = 'finalized'
+            elif status == 'error':
+                result[trial.name] = 'error'
             else:
-                node_status = self.get_status(node)
-                if node_status == 'finalized':
-                    result[node] = 'finalized'
-                elif node_status == 'error':
-                    result[node] = 'error'
-                else:
-                    result[node] = 'not_collected'
+                result[trial.name] = 'not_collected'
         return result
 
 
@@ -536,19 +497,31 @@ class Experimenter():
 
         self.cache.clear_nodes(nodes)
 
-        for v in self.collectors.values():
-            v.reset_nodes(nodes)
 
     def _reset_serial_stale_nodes(self, pipeline, node_names):
+        """Reset Stage nodes whose stored serial no longer matches the pipeline."""
         def stores_for_name(name):
-            grp = pipeline.get_grp(pipeline.get_node(name).grp)
             for outer_fold in self.outer_folds:
-                yield from (
-                    outer_fold.train_data_flows if grp.role == 'stage'
-                    else outer_fold.artifact_stores
-                )
+                yield from outer_fold.train_data_flows
 
-        stale = find_stale_nodes(pipeline, node_names, stores_for_name)
+        current = {n: pipeline.nodes[n].serial for n in node_names}
+        stale = find_stale_nodes(current, node_names, stores_for_name)
+        if stale:
+            self.reset_nodes(stale)
+
+    def _reset_stale_trials(self, attrs_map):
+        """Reset Trials whose stored id no longer matches their current definition.
+
+        A Trial's id folds in the serials of every Stage it reads, so editing a
+        Stage lands here as a mismatch — the replacement for the ``_bump_serials``
+        cascade that used to reach Head nodes through ``output_edges``.
+        """
+        def stores_for_name(name):
+            for outer_fold in self.outer_folds:
+                yield from outer_fold.artifact_stores
+
+        current = {name: attrs['serial'] for name, attrs in attrs_map.items()}
+        stale = find_stale_nodes(current, list(attrs_map), stores_for_name)
         if stale:
             self.reset_nodes(stale)
 
@@ -609,12 +582,7 @@ class Experimenter():
         self._save_pipeline()
         pipeline.check_data_compatibility(self.data)
         node_names = set(pipeline.get_node_names(nodes))
-        target_nodes = [
-            i for i in pipeline._get_affected_nodes([None])
-            if i is not None
-            and i in node_names
-            and pipeline.grps[pipeline.nodes[i].grp].role == 'stage'
-        ]
+        target_nodes = [i for i in pipeline.topo_order() if i in node_names]
         if rebuild:
             self.reset_nodes(target_nodes)
         else:
@@ -628,7 +596,7 @@ class Experimenter():
             return
 
         logger.info(f"Building {len(target_nodes)} node(s)")
-        collectors = list(self.collectors.values())
+        collectors = []   # Collectors belong to an Experiment and run against Trials
         total = sum(len(of.train_data_flows) for of in self.outer_folds) * len(target_nodes)
         n_jobs = min(n_jobs, total)
         tracker = LoggerExecuteTracker(total, n_jobs, logger)
@@ -653,16 +621,23 @@ class Experimenter():
         else:
             logger.info(f"Build complete: {len(target_nodes)} node(s)")
 
-    def exp(self, nodes=None, finalize=False, n_jobs=1, gpu_id_list=None, logger=None):
-        """Run Head nodes and invoke all matching Collectors.
+    def exp(self, experiment, collectors=None, trials=None, finalize=False,
+            n_jobs=1, gpu_id_list=None, logger=None):
+        """Run an :class:`~mllabs.BaseExperiment`'s Trials and invoke its Collectors.
 
-        Uses ``self.pipeline`` — compared against the artifacts already on
-        disk, nodes whose ``serial`` no longer matches are reset and rerun
-        automatically.
+        The Trial sequence is drained up front (``get_trial_nums()`` then that
+        many ``get_next_trial()`` calls) so the dispatcher still knows its full
+        target list before it starts.
+
+        Each Trial's id folds in the serials of the Stages it reads, so a Trial
+        whose definition — or whose upstream preprocessing — changed is reset
+        and rerun automatically.
 
         Args:
-            nodes: Node query — ``None`` (all heads matching ``self.tags`` if
-                set, else all heads), ``list``, or regex ``str``.
+            experiment (BaseExperiment): Source of Trials.
+            collectors (Collectors, optional): Registry the Experiment's
+                collector names are resolved against.
+            trials: Trial-name filter — ``None`` (all), ``list``, or regex ``str``.
             finalize (bool): If ``True``, finalize after all folds complete.
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
             gpu_id_list (list, optional): GPU IDs to use for GPU-enabled nodes.
@@ -675,27 +650,28 @@ class Experimenter():
         pipeline = self._require_pipeline()
         self._save_pipeline()
         pipeline.check_data_compatibility(self.data)
-        if nodes is None and self.tags:
-            node_names = filter_node_names_by_tags(pipeline, self.tags)
-        else:
-            node_names = set(pipeline.get_node_names(nodes))
-        candidate_nodes = [
-            i for i in pipeline._get_affected_nodes([None])
-            if i is not None
-            and i in node_names
-            and pipeline.grps[pipeline.nodes[i].grp].role == 'head'
-        ]
-        self._reset_serial_stale_nodes(pipeline, candidate_nodes)
+
+        attrs_map = {
+            t.name: {**t.get_attrs(), 'serial': t.trial_id(pipeline)}
+            for t in experiment.get_trials()
+            if _name_matches(t.name, trials)
+        }
+        self._reset_stale_trials(attrs_map)
         target_nodes = [
-            i for i in candidate_nodes
-            if self.get_status(i) not in ['built', 'finalized']
+            name for name in attrs_map
+            if self.get_status(name) not in ['built', 'finalized']
         ]
         if not target_nodes:
-            logger.info("No head nodes to experiment")
+            logger.info("No trials to run")
             return
 
-        logger.info(f"Experimenting {len(target_nodes)} node(s)")
-        collectors = list(self.collectors.values())
+        logger.info(f"Experimenting {len(target_nodes)} trial(s)")
+        collectors = (
+            collectors.resolve(experiment.collector_names) if collectors is not None else []
+        )
+        for c in collectors:
+            c.on_attach(self)
+            c._setup(len(self.outer_folds), len(self.outer_folds[0].train_data_flows))
         total = sum(len(of.train_data_flows) for of in self.outer_folds) * len(target_nodes)
         n_jobs = min(n_jobs, total)
         tracker = LoggerExecuteTracker(total, n_jobs, logger)
@@ -703,12 +679,12 @@ class Experimenter():
         try:
             if n_jobs > 1:
                 log_dir = self.path / '__worker_logs' if self._os_log_state is not None else None
-                errors = _experiment_multi(self.outer_folds, pipeline, target_nodes, n_jobs,
+                errors = _experiment_multi(self.outer_folds, attrs_map, target_nodes, n_jobs,
                                            gpu_id_list=gpu_id_list, collectors=collectors,
                                            tracker=tracker, finalize=finalize,
                                            log_dir=log_dir)
             else:
-                errors = _experiment_single(self.outer_folds, pipeline, target_nodes,
+                errors = _experiment_single(self.outer_folds, attrs_map, target_nodes,
                                             gpu_id_list=gpu_id_list, collectors=collectors,
                                             tracker=tracker, finalize=finalize)
         finally:
@@ -717,17 +693,18 @@ class Experimenter():
         error_nodes = list({n for _, n in errors})
         n_ok = len(target_nodes) - len(error_nodes)
         if error_nodes:
-            logger.info(f"Exp complete: {n_ok}/{len(target_nodes)} node(s), {len(error_nodes)} error(s): {error_nodes}")
+            logger.info(f"Exp complete: {n_ok}/{len(target_nodes)} trial(s), {len(error_nodes)} error(s): {error_nodes}")
         else:
-            logger.info(f"Exp complete: {len(target_nodes)} node(s)")
+            logger.info(f"Exp complete: {len(target_nodes)} trial(s)")
 
-    def collect(self, collector, nodes=None, exist='skip', logger=None):
-        """Run a Collector ad-hoc over already-built Head nodes.
+    def collect(self, experiment, collector, trials=None, exist='skip', logger=None):
+        """Run a Collector ad-hoc over already-run Trials.
 
         Args:
+            experiment (BaseExperiment): Source of the Trials to collect from.
             collector (Collector): Collector instance to run.
-            nodes: Node query — ``None`` (all heads), ``list``, or regex ``str``.
-            exist (str): ``'skip'`` (default) skips nodes already collected.
+            trials: Trial-name filter — ``None`` (all), ``list``, or regex ``str``.
+            exist (str): ``'skip'`` (default) skips trials already collected.
             logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
 
         Returns:
@@ -736,16 +713,16 @@ class Experimenter():
         from ._executor import _run_collectors
         from ._node_processor import ProgressMonitor
         logger = resolve_logger(logger)
-        pipeline = self._require_pipeline()
 
-        node_names = set(pipeline.get_node_names(nodes))
+        attrs_map = {
+            t.name: t.get_attrs() for t in experiment.get_trials()
+            if _name_matches(t.name, trials)
+        }
         target_nodes = [
-            name for name in pipeline._get_affected_nodes([None])
-            if name is not None
-            and name in node_names
-            and not (exist == 'skip' and collector.has(name))
+            name for name, attrs in attrs_map.items()
+            if not (exist == 'skip' and collector.has(name))
             and self.get_status(name) == 'built'
-            and collector.connector.match(pipeline.get_node_attrs(name))
+            and collector.connector.match(attrs)
         ]
 
         if not target_nodes:
@@ -761,7 +738,7 @@ class Experimenter():
             logger.start_progress(0, 'Collect', n_total)
             n_done = 0
             for name in target_nodes:
-                node_attrs = pipeline.get_node_attrs(name)
+                node_attrs = attrs_map[name]
                 edges = node_attrs['edges']
                 logger.start_progress(1, name)
                 for outer_idx, outer_fold in enumerate(self.outer_folds):
@@ -791,28 +768,30 @@ class Experimenter():
             logger.remove_session(0)
         return collector
 
-    def collect_missing(self, collector=None, nodes=None, logger=None):
-        """Run collect() only for Head nodes still at get_collect_status()=='not_collected'.
+    def collect_missing(self, experiment, collectors, collector=None, trials=None, logger=None):
+        """Run collect() only for Trials still at ``'not_collected'``.
 
         Args:
-            collector: Collector instance, its registered name, or ``None`` (every
-                registered collector).
-            nodes: Node query passed through to ``get_collect_status``/``collect``.
+            experiment (BaseExperiment): Source of Trials and Collectors.
+            collector: Collector instance, its registered name, or ``None``
+                (every Collector registered on *experiment*).
+            trials: Trial-name filter passed through to
+                ``get_collect_status``/``collect``.
             logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
 
         Returns:
-            dict: ``{collector_name: [node_names targeted]}``
+            dict: ``{collector_name: [trial_names targeted]}``
         """
-        collectors = (
-            list(self.collectors.values()) if collector is None
-            else [self.collectors[collector] if isinstance(collector, str) else collector]
+        targets = (
+            collectors.resolve(experiment.collector_names) if collector is None
+            else [collectors.resolve([collector])[0] if isinstance(collector, str) else collector]
         )
         result = {}
-        for c in collectors:
-            status = self.get_collect_status(c, nodes)
+        for c in targets:
+            status = self.get_collect_status(experiment, collectors, c, trials)
             missing = [n for n, s in status.items() if s == 'not_collected']
             if missing:
-                self.collect(c, nodes=missing, exist='skip', logger=logger)
+                self.collect(experiment, c, trials=missing, exist='skip', logger=logger)
             result[c.name] = missing
         return result
 
@@ -833,9 +812,9 @@ class Experimenter():
         for name in pipeline.nodes.keys():
             if name is None:
                 continue
-            node = pipeline.get_node(name)
-            node_attrs = node.get_attrs(pipeline.grps)
-            processor_name = node_attrs['processor'].__name__ if node_attrs['processor'] else 'None'
+            node_attrs = pipeline.get_node_attrs(name)
+            processor = node_attrs['processor']
+            processor_name = getattr(processor, '__name__', processor) if processor else 'None'
             edges_info = ", ".join(
                 f"{key}: {dsl_string}" for key, dsl_string in node_attrs['edges'].items()
             )
@@ -844,7 +823,7 @@ class Experimenter():
             lines.append(f"- **Method**: {node_attrs['method']}")
             lines.append(f"- **Edges**: {edges_info}")
 
-            descendants = pipeline._find_descendants(name)
+            descendants = pipeline.descendants(name)
             if descendants:
                 lines.append(f"- **Descendants**: {sorted(descendants)}")
             lines.append("")
@@ -964,11 +943,6 @@ class Experimenter():
         if pipeline_path.exists():
             with open(pipeline_path, 'rb') as f:
                 exp.pipeline = pkl.load(f)
-
-        for coll_name, cls in store.fetch_collectors().items():
-            coll_path = filepath / '__collector' / coll_name
-            if (coll_path / '__config.pkl').exists():
-                exp.collectors[coll_name] = cls.load(coll_path)
 
         return exp
 

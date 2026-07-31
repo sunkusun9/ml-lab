@@ -8,7 +8,9 @@ from sklearn.model_selection import ShuffleSplit, KFold
 
 from mllabs._experimenter import Experimenter
 from mllabs._trainer import Trainer
-from mllabs._pipeline import Pipeline
+from mllabs._pipeline import PipelineBuilder
+from mllabs import Trial
+from mock import TrialListExperiment
 from mllabs._cache import DataCache
 from mllabs._data_wrapper import wrap
 from mllabs._logger import ProgressSessionLogger
@@ -30,69 +32,8 @@ class RecordingLogger(ProgressSessionLogger):
         return super().remove_session(session_id)
 
 
-class BadProcessor:
-    __name__ = 'BadProcessor'
-    def __init__(self, **kwargs):
-        pass
-    def fit(self, X, y=None):
-        raise ValueError("intentional error")
-    def transform(self, X):
-        pass
-
-
-class BadPredictor:
-    __name__ = 'BadPredictor'
-    def __init__(self, **kwargs):
-        pass
-    def fit(self, X, y=None):
-        raise RuntimeError("predict error")
-    def predict(self, X):
-        pass
-
-
-class NativeChatterStage:
-    """Writes to OS-level fd 1/2 (like a native lib), bypassing Python stdout."""
-    __name__ = 'NativeChatterStage'
-    def __init__(self, **kwargs):
-        pass
-    def fit(self, X, y=None):
-        import os
-        os.write(1, b'NATIVE_STDOUT_XYZ\n')
-        os.write(2, b'NATIVE_STDERR_XYZ\n')
-        return self
-    def transform(self, X):
-        return X
-
-
-class WarnStage:
-    """Emits a Python warning during fit (captured into info['warnings'])."""
-    __name__ = 'WarnStage'
-    def __init__(self, **kwargs):
-        pass
-    def fit(self, X, y=None):
-        import warnings
-        warnings.warn("WORKER_WARN_ABC")
-        return self
-    def transform(self, X):
-        return X
-
-
 def _const_metric(y, p):
     return 0.5
-
-
-class WarnPredictor:
-    """Emits a Python warning during predict (i.e. at collector/process time)."""
-    __name__ = 'WarnPredictor'
-    def __init__(self, **kwargs):
-        pass
-    def fit(self, X, y=None):
-        self.classes_ = np.unique(y)
-        return self
-    def predict(self, X):
-        import warnings
-        warnings.warn("PREDICT_WARN_XYZ")
-        return np.zeros(len(X), dtype=int)
 
 
 @pytest.fixture
@@ -109,7 +50,7 @@ def sample_data():
 
 @pytest.fixture
 def pipeline():
-    p = Pipeline()
+    p = PipelineBuilder()
     p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
     return p
 
@@ -120,31 +61,55 @@ def exp(tmp_path, sample_data, pipeline):
         data=sample_data,
         path=tmp_path / 'exp',
         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
-        pipeline=pipeline,
+        pipeline=pipeline.build(),
     )
 
 
-def _setup_full(pipeline):
-    pipeline.set_grp('scale', role='stage', processor=StandardScaler,
+def _setup_full(pipeline, exp=None):
+    pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
                       method='transform', edges={'X': '{f1, f2, f3}'})
     pipeline.set_node('scaler', grp='scale')
-    pipeline.set_grp('model', role='head', processor=DecisionTreeClassifier,
-                      method='predict', edges={'X': 'scaler:(*)', 'y': '{target}'},
-                      params={'max_depth': 3, 'random_state': 42})
-    pipeline.set_node('dt', grp='model')
+    if exp is not None:
+        exp.set_pipeline(pipeline.build())
+
+
+DT_EDGES = {'X': 'scaler:(*)', 'y': '{target}'}
+DT_PARAMS = {'max_depth': 3, 'random_state': 42}
+
+
+def _dt(name='dt', edges=None):
+    return Trial(name, 'sklearn.tree.DecisionTreeClassifier',
+                 edges or DT_EDGES, params=dict(DT_PARAMS))
+
+
+def _model():
+    """One good Trial over the 'scaler' stage."""
+    return TrialListExperiment('e', [_dt()])
+
+
+def _bad_edges():
+    """A good Trial plus one whose edges fail to resolve at dispatch."""
+    return TrialListExperiment('e', [_dt(), _dt('bad_dt', {'X': 'scaler:([)', 'y': '{target}'})])
+
+
+def _wp():
+    return TrialListExperiment('e', [
+        Trial('wp_node', 'mock.WarnPredictor', {'X': '{f1, f2, f3}', 'y': '{target}'}),
+    ])
 
 
 class TestBuildFlowMulti:
     """Exercise _build_flow_multi's worker-pool dispatch (ProcessWorker, n_jobs>1)."""
 
     def test_builds_across_folds_and_reports_errors(self, exp, pipeline):
-        pipeline.set_grp('good', role='stage', processor=StandardScaler,
+        pipeline.set_grp('good', processor='sklearn.preprocessing.StandardScaler',
                           method='transform', edges={'X': '{f1}'})
         pipeline.set_node('good_node', grp='good')
-        pipeline.set_grp('bad', role='stage', processor=BadProcessor,
+        pipeline.set_grp('bad', processor='mock.BadProcessor',
                           method='transform', edges={'X': '{f2}'})
         pipeline.set_node('bad_node', grp='bad')
 
+        exp.set_pipeline(pipeline.build())
         exp.build(n_jobs=2)
 
         assert exp.get_status('good_node') == 'built'
@@ -154,7 +119,7 @@ class TestBuildFlowMulti:
                 assert flow.status('good_node') == 'built'
 
     def test_skips_already_built_nodes(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build(n_jobs=2)
         build_id = exp.outer_folds[0].train_data_flows[0].get_info('scaler')['build_id']
 
@@ -168,11 +133,12 @@ class TestNJobsCap:
 
     def test_build_caps_worker_sessions_to_total(self, exp, pipeline):
         # 2 folds x 1 stage node = 2 tasks; request far more workers
-        pipeline.set_grp('scale', role='stage', processor=StandardScaler,
+        pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
                           method='transform', edges={'X': '{f1}'})
         pipeline.set_node('scaler', grp='scale')
 
         logger = RecordingLogger()
+        exp.set_pipeline(pipeline.build())
         exp.build(n_jobs=8, logger=logger)
 
         worker_sessions = [s for s in logger.created if s != 0]
@@ -182,11 +148,11 @@ class TestNJobsCap:
             assert flow.status('scaler') == 'built'
 
     def test_exp_caps_worker_sessions_to_total(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build(n_jobs=2)
 
         logger = RecordingLogger()
-        exp.exp(n_jobs=8, logger=logger)                     # 2 folds x 1 head = 2 tasks
+        exp.exp(_model(), n_jobs=8, logger=logger)                     # 2 folds x 1 head = 2 tasks
 
         worker_sessions = [s for s in logger.created if s != 0]
         assert worker_sessions == [1, 2]
@@ -199,11 +165,12 @@ class TestWorkerLogCapture:
     files, only while OS log capture is open (open_os_log/os_log)."""
 
     def test_native_output_captured_to_worker_logs_when_open(self, exp, pipeline, capfd):
-        pipeline.set_grp('nc', role='stage', processor=NativeChatterStage,
+        pipeline.set_grp('nc', processor='mock.NativeChatterStage',
                           method='transform', edges={'X': '{f1}'})
         pipeline.set_node('nc_node', grp='nc')
 
         with exp.os_log():
+            exp.set_pipeline(pipeline.build())
             exp.build(n_jobs=2)
 
         # native chatter went to the worker log files, not the parent console
@@ -220,10 +187,11 @@ class TestWorkerLogCapture:
         assert (exp.path / '__worker_logs').exists()
 
     def test_native_output_not_captured_when_closed(self, exp, pipeline, capfd):
-        pipeline.set_grp('nc', role='stage', processor=NativeChatterStage,
+        pipeline.set_grp('nc', processor='mock.NativeChatterStage',
                           method='transform', edges={'X': '{f1}'})
         pipeline.set_node('nc_node', grp='nc')
 
+        exp.set_pipeline(pipeline.build())
         exp.build(n_jobs=2)  # no os_log() — capture stays off, matches pre-existing behavior
 
         out, err = capfd.readouterr()
@@ -232,16 +200,17 @@ class TestWorkerLogCapture:
         assert exp.get_worker_logs() == {}
 
     def test_get_worker_logs_empty_without_multi_run(self, exp, pipeline):
-        _setup_full(pipeline)
+        _setup_full(pipeline, exp)
         exp.build(n_jobs=1)
         assert exp.get_worker_logs() == {}
 
     def test_single_worker_captured_by_master_log_when_open(self, exp, pipeline, capfd):
-        pipeline.set_grp('nc', role='stage', processor=NativeChatterStage,
+        pipeline.set_grp('nc', processor='mock.NativeChatterStage',
                           method='transform', edges={'X': '{f1}'})
         pipeline.set_node('nc_node', grp='nc')
 
         with exp.os_log():
+            exp.set_pipeline(pipeline.build())
             exp.build(n_jobs=1)  # single-worker path — no build()-internal dup2, covered by the open master redirect
 
         out, err = capfd.readouterr()
@@ -270,11 +239,12 @@ class TestWorkerWarningVerbosity:
 
     def test_warnings_collected_and_silenced_when_level_excludes_warning(self, exp, pipeline, capfd):
         from mllabs._logger import ProgressSessionLogger
-        pipeline.set_grp('wn', role='stage', processor=WarnStage,
+        pipeline.set_grp('wn', processor='mock.WarnStage',
                           method='transform', edges={'X': '{f1}'})
         pipeline.set_node('wn_node', grp='wn')
 
         logger = ProgressSessionLogger(level=['info', 'progress'])  # no 'warning'
+        exp.set_pipeline(pipeline.build())
         exp.build(n_jobs=2, logger=logger)
 
         # collected in warning_list even though not printed
@@ -284,30 +254,31 @@ class TestWorkerWarningVerbosity:
 
     def test_warnings_printed_when_level_includes_warning(self, exp, pipeline, capfd):
         from mllabs._logger import ProgressSessionLogger
-        pipeline.set_grp('wn', role='stage', processor=WarnStage,
+        pipeline.set_grp('wn', processor='mock.WarnStage',
                           method='transform', edges={'X': '{f1}'})
         pipeline.set_node('wn_node', grp='wn')
 
         logger = ProgressSessionLogger(level=['info', 'warning', 'progress'])
+        exp.set_pipeline(pipeline.build())
         exp.build(n_jobs=2, logger=logger)
 
         out, err = capfd.readouterr()
         assert 'WORKER_WARN_ABC' in (out + err)
 
-    def test_predict_warnings_routed_via_logger(self, exp, pipeline, capfd):
+    def test_predict_warnings_routed_via_logger(self, exp, pipeline, capfd, tmp_path):
         # predict/collect-time warnings (like XGBoost device mismatch) now flow
         # through the logger with the node prefix, not raw to stderr.
         from mllabs._logger import ProgressSessionLogger
-        from mllabs import Connector, MetricCollector
-        pipeline.set_grp('wp', role='head', processor=WarnPredictor, method='predict',
-                          edges={'X': '{f1, f2, f3}', 'y': '{target}'})
-        pipeline.set_node('wp_node', grp='wp')
+        from mllabs import Collectors, Connector, MetricCollector
+        exp.set_pipeline(pipeline.build())
         exp.build()
-        exp.set_collector('m', MetricCollector, Connector(),
-                          params={'output_var': None, 'metric_func': _const_metric})
+        registry = Collectors(tmp_path / 'coll')
+        registry.set_collector('m', MetricCollector, Connector(),
+                               params={'output_var': None, 'metric_func': _const_metric})
+        experiment = _wp().use_collector('m')
 
         logger = ProgressSessionLogger(level=['info', 'progress'])  # no 'warning'
-        exp.exp(logger=logger)
+        exp.exp(experiment, registry, logger=logger)
 
         assert any('PREDICT_WARN_XYZ' in w for w in logger.warning_list)
         assert any('[wp_node]' in w for w in logger.warning_list)   # node prefix present
@@ -326,16 +297,17 @@ class TestDataPrepErrors:
     _BAD_X = "src_node:([)"
 
     def test_build_single_reports_error_and_continues(self, exp, pipeline):
-        pipeline.set_grp('good', role='stage', processor=StandardScaler,
+        pipeline.set_grp('good', processor='sklearn.preprocessing.StandardScaler',
                           method='transform', edges={'X': '{f1}'})
         pipeline.set_node('good_node', grp='good')
-        pipeline.set_grp('src', role='stage', processor=StandardScaler,
+        pipeline.set_grp('src', processor='sklearn.preprocessing.StandardScaler',
                           method='transform', edges={'X': '{f2}'})
         pipeline.set_node('src_node', grp='src')
-        pipeline.set_grp('bad', role='stage', processor=StandardScaler,
+        pipeline.set_grp('bad', processor='sklearn.preprocessing.StandardScaler',
                           method='transform', edges={'X': self._BAD_X})
         pipeline.set_node('bad_node', grp='bad')
 
+        exp.set_pipeline(pipeline.build())
         exp.build(n_jobs=1)
 
         assert exp.get_status('good_node') == 'built'
@@ -343,16 +315,17 @@ class TestDataPrepErrors:
         assert exp.get_status('bad_node') == 'error'
 
     def test_build_multi_reports_error_and_continues(self, exp, pipeline):
-        pipeline.set_grp('good', role='stage', processor=StandardScaler,
+        pipeline.set_grp('good', processor='sklearn.preprocessing.StandardScaler',
                           method='transform', edges={'X': '{f1}'})
         pipeline.set_node('good_node', grp='good')
-        pipeline.set_grp('src', role='stage', processor=StandardScaler,
+        pipeline.set_grp('src', processor='sklearn.preprocessing.StandardScaler',
                           method='transform', edges={'X': '{f2}'})
         pipeline.set_node('src_node', grp='src')
-        pipeline.set_grp('bad', role='stage', processor=StandardScaler,
+        pipeline.set_grp('bad', processor='sklearn.preprocessing.StandardScaler',
                           method='transform', edges={'X': self._BAD_X})
         pipeline.set_node('bad_node', grp='bad')
 
+        exp.set_pipeline(pipeline.build())
         exp.build(n_jobs=2)
 
         assert exp.get_status('good_node') == 'built'
@@ -360,27 +333,19 @@ class TestDataPrepErrors:
         assert exp.get_status('bad_node') == 'error'
 
     def test_exp_single_reports_error_and_continues(self, exp, pipeline):
-        _setup_full(pipeline)
-        pipeline.set_grp('bad_model', role='head', processor=DecisionTreeClassifier,
-                          method='predict', edges={'X': "scaler:([)", 'y': '{target}'},
-                          params={'max_depth': 3, 'random_state': 42})
-        pipeline.set_node('bad_dt', grp='bad_model')
+        _setup_full(pipeline, exp)
 
         exp.build(n_jobs=1)
-        exp.exp(n_jobs=1)
+        exp.exp(_bad_edges(), n_jobs=1)
 
         assert exp.get_status('dt') == 'built'
         assert exp.get_status('bad_dt') == 'error'
 
     def test_exp_multi_reports_error_and_continues(self, exp, pipeline):
-        _setup_full(pipeline)
-        pipeline.set_grp('bad_model', role='head', processor=DecisionTreeClassifier,
-                          method='predict', edges={'X': "scaler:([)", 'y': '{target}'},
-                          params={'max_depth': 3, 'random_state': 42})
-        pipeline.set_node('bad_dt', grp='bad_model')
+        _setup_full(pipeline, exp)
 
         exp.build(n_jobs=2)
-        exp.exp(n_jobs=2)
+        exp.exp(_bad_edges(), n_jobs=2)
 
         assert exp.get_status('dt') == 'built'
         assert exp.get_status('bad_dt') == 'error'
@@ -393,13 +358,10 @@ class TestExperimentMulti:
     """Exercise _experiment_multi's worker-pool dispatch (ProcessWorker, n_jobs>1)."""
 
     def test_runs_head_across_folds_and_reports_errors(self, exp, pipeline):
-        _setup_full(pipeline)
-        pipeline.set_grp('bad_model', role='head', processor=BadPredictor,
-                          method='predict', edges={'X': '{f1}', 'y': '{target}'})
-        pipeline.set_node('bad_dt', grp='bad_model')
+        _setup_full(pipeline, exp)
 
         exp.build(n_jobs=2)
-        exp.exp(n_jobs=2)
+        exp.exp(_bad_edges(), n_jobs=2)
 
         assert exp.get_status('dt') == 'built'
         assert exp.get_status('bad_dt') == 'error'
@@ -420,7 +382,8 @@ class TestTrainerMulti:
             splitter=KFold(n_splits=2, shuffle=True, random_state=42),
             splitter_params={}, cache=DataCache(),
         )
-        t.set_pipeline(pipeline)
+        t.set_pipeline(pipeline.build())
+        t.set_experiment(_model())
 
         t.train(n_jobs=2)
 

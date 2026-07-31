@@ -7,7 +7,7 @@ from mllabs._edge_dsl import (
     parse, eval_expr, validate_edges, referenced_nodes, iter_segments, unparse,
     Star, SetLiteral, Pattern, Namespace, BinOp,
 )
-from mllabs._pipeline import Pipeline
+from mllabs._pipeline import PipelineBuilder
 from mllabs._data_wrapper import wrap
 
 
@@ -201,9 +201,9 @@ class TestEvalExpr:
 
 @pytest.fixture
 def pipeline():
-    p = Pipeline()
+    p = PipelineBuilder()
     p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'N': 'numerical', 'target': 'binary'})
-    p.set_grp('ohe_grp', role='stage', processor=OneHotEncoder,
+    p.set_grp('ohe_grp', processor='sklearn.preprocessing.OneHotEncoder',
               method='fit_transform', edges={'X': '{f1}'})
     p.set_node('ohe', grp='ohe_grp')
     return p
@@ -221,7 +221,7 @@ class TestValidateEdges:
         validate_edges('*', pipeline)
 
     def test_no_schema_does_not_matter(self):
-        p = Pipeline()  # no set_datasource() call
+        p = PipelineBuilder()  # no set_datasource() call
         validate_edges('* - {N}', p)  # still just a structural check
 
     def test_namespace_segment_ok(self, pipeline):
@@ -230,13 +230,6 @@ class TestValidateEdges:
     def test_unknown_namespace_raises(self, pipeline):
         with pytest.raises(ValueError, match='does not reference an existing node'):
             validate_edges('bogus:(A.*)', pipeline)
-
-    def test_namespace_must_be_stage(self, pipeline):
-        pipeline.set_grp('model', role='head', processor=StandardScaler,
-                          method='predict', edges={'X': '{f1}', 'y': '{target}'})
-        pipeline.set_node('head1', grp='model')
-        with pytest.raises(ValueError, match="must be a stage node"):
-            validate_edges('head1:(A.*)', pipeline)
 
     def test_multiple_segments_ok(self, pipeline):
         validate_edges('{f1} + ohe:(A.*)', pipeline)

@@ -8,18 +8,11 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import ShuffleSplit, KFold
 
-from mllabs._pipeline import Pipeline
+from mllabs._pipeline import PipelineBuilder
 from mllabs._experimenter import Experimenter
 from mllabs import Connector, MetricCollector, StackingCollector, ModelAttrCollector, OutputCollector, ProcessCollector, ProbToLabel
 
 Built = namedtuple('Built', ['e', 'p'])
-
-
-class FailPredictor:
-    __name__ = 'FailPredictor'
-    def __init__(self, **kwargs): pass
-    def fit(self, X, y=None): raise RuntimeError("fail")
-    def predict(self, X): pass
 
 
 def accuracy_metric(y, pred):
@@ -44,19 +37,19 @@ def sample_data():
 
 @pytest.fixture
 def built_exp(tmp_path, sample_data):
-    p = Pipeline(path=tmp_path / 'pipeline_built')
+    p = PipelineBuilder(path=tmp_path / 'pipeline_built')
     p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
-    p.set_grp('scale', role='stage', processor=StandardScaler,
+    p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
               method='transform', edges={'X': '{f1, f2, f3}'})
     p.set_node('scaler', grp='scale')
-    p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+    p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
               method='predict',
               edges={'X': 'scaler:(*)', 'y': '{target}'},
               params={'max_depth': 3, 'random_state': 42})
     p.set_node('dt', grp='model')
     exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_built',
                            sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-    exp_obj.set_pipeline(p)
+    exp_obj.set_pipeline(p.build())
     exp_obj.build()
     exp_obj.exp()
     return Built(e=exp_obj, p=p)
@@ -64,9 +57,9 @@ def built_exp(tmp_path, sample_data):
 
 @pytest.fixture
 def built_exp_inner(tmp_path, sample_data):
-    p = Pipeline(path=tmp_path / 'pipeline_inner')
+    p = PipelineBuilder(path=tmp_path / 'pipeline_inner')
     p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
-    p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+    p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
               method='predict',
               edges={'X': '{f1, f2, f3}', 'y': '{target}'},
               params={'max_depth': 3, 'random_state': 42})
@@ -74,7 +67,7 @@ def built_exp_inner(tmp_path, sample_data):
     exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_inner',
                            sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
                            sp_v=KFold(n_splits=3, shuffle=True, random_state=42))
-    exp_obj.set_pipeline(p)
+    exp_obj.set_pipeline(p.build())
     exp_obj.build()
     exp_obj.exp()
     return Built(e=exp_obj, p=p)
@@ -82,9 +75,9 @@ def built_exp_inner(tmp_path, sample_data):
 
 @pytest.fixture
 def multi_head_exp(tmp_path, sample_data):
-    p = Pipeline(path=tmp_path / 'pipeline_multi')
+    p = PipelineBuilder(path=tmp_path / 'pipeline_multi')
     p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
-    p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+    p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
               method='predict',
               edges={'X': '{f1, f2, f3}', 'y': '{target}'},
               params={'max_depth': 3, 'random_state': 42})
@@ -92,7 +85,7 @@ def multi_head_exp(tmp_path, sample_data):
     p.set_node('dt2', grp='model', params={'max_depth': 5})
     exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_multi',
                            sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-    exp_obj.set_pipeline(p)
+    exp_obj.set_pipeline(p.build())
     exp_obj.build()
     exp_obj.exp()
     return Built(e=exp_obj, p=p)
@@ -121,7 +114,7 @@ class TestConnector:
     def test_match_processor(self):
         # Connector.processor is a "module.ClassName" string, compared
         # directly (string equality) against node_attrs['processor'], which
-        # Pipeline also always stores as that same string form.
+        # PipelineBuilder also always stores as that same string form.
         c = Connector(processor='sklearn.tree.DecisionTreeClassifier')
         assert c.match({'name': 'dt', 'processor': 'sklearn.tree.DecisionTreeClassifier'}) is True
         assert c.match({'name': 'dt', 'processor': 'sklearn.preprocessing.StandardScaler'}) is False
@@ -359,13 +352,13 @@ class TestStackingCollector:
 class TestModelAttrCollector:
     def test_collect_basic(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
         assert mac.has('dt')
 
     def test_get_attr(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
         result = mac.get_attr('dt')
         assert isinstance(result, list)
@@ -373,14 +366,14 @@ class TestModelAttrCollector:
 
     def test_get_attr_idx(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
         result = mac.get_attr('dt', idx=0)
         assert isinstance(result, list)
 
     def test_get_attrs(self, multi_head_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = multi_head_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        mac = multi_head_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         multi_head_exp.e.collect(mac)
         result = mac.get_attrs()
         assert 'dt1' in result
@@ -388,54 +381,54 @@ class TestModelAttrCollector:
 
     def test_get_attrs_agg(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
         result = mac.get_attrs_agg('dt')
         assert isinstance(result, pd.Series)
 
     def test_get_attrs_agg_inner_only(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
         result = mac.get_attrs_agg('dt', agg_inner=True, agg_outer=False)
         assert isinstance(result, pd.DataFrame)
 
     def test_get_attrs_agg_invalid(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
         with pytest.raises(ValueError):
             mac.get_attrs_agg('dt', agg_inner=False, agg_outer=True)
 
     def test_not_mergeable(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = built_exp.e.set_collector('tree', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'tree', 'adapter': DecisionTreeAdapter()})
+        mac = built_exp.e.set_collector('tree', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'tree', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
         with pytest.raises(ValueError, match='not mergeable'):
             mac.get_attrs_agg('dt')
 
     def test_reset_nodes(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
         mac.reset_nodes(['dt'])
         assert not mac.has('dt')
 
     def test_save_load(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
         loaded = ModelAttrCollector.load(mac.path)
         assert loaded.has('dt')
 
     def test_auto_adapter(self):
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
+        mac = ModelAttrCollector('fi', Connector(processor='sklearn.tree.DecisionTreeClassifier'),
                                 result_key='feature_importances')
         assert mac.adapter is not None
 
     def test_auto_adapter_invalid_key(self):
         with pytest.raises(RuntimeError):
-            ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
+            ModelAttrCollector('fi', Connector(processor='sklearn.tree.DecisionTreeClassifier'),
                                result_key='nonexistent_key')
 
 
@@ -549,7 +542,7 @@ class TestCollectorWithExperimenter:
         built_exp.e.collect(mc)
         oc = built_exp.e.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
         built_exp.e.collect(oc)
-        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
         assert mc.has('dt')
         assert oc.has_node('dt')
@@ -563,7 +556,7 @@ class TestSHAPCollector:
 
     def _make_sc(self, exp):
         from mllabs import SHAPCollector
-        sc = exp.e.set_collector('shap', SHAPCollector, Connector(processor=DecisionTreeClassifier))
+        sc = exp.e.set_collector('shap', SHAPCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'))
         exp.e.collect(sc)
         return sc
 
@@ -662,9 +655,9 @@ class TestBaseCollector:
 class TestCollectorErrorHandling:
     @pytest.fixture
     def pre_exp(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_pre')
+        p = PipelineBuilder(path=tmp_path / 'pipeline_pre')
         p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+        p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict',
                   edges={'X': '{f1, f2, f3}', 'y': '{target}'},
                   params={'max_depth': 3, 'random_state': 42})
@@ -672,7 +665,7 @@ class TestCollectorErrorHandling:
         exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_pre',
                                sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
         e = exp_obj
-        e.set_pipeline(p)
+        e.set_pipeline(p.build())
         e.build()
         return Built(e=e, p=p)
 
@@ -818,9 +811,9 @@ class TestProcessCollector:
 
     @pytest.fixture
     def proba_exp(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_proba')
+        p = PipelineBuilder(path=tmp_path / 'pipeline_proba')
         p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+        p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict_proba',
                   edges={'X': '{f1, f2, f3}', 'y': '{target}'},
                   params={'max_depth': 3, 'random_state': 42})
@@ -828,7 +821,7 @@ class TestProcessCollector:
         exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_proba',
                                sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
         e = exp_obj
-        e.set_pipeline(p)
+        e.set_pipeline(p.build())
         e.build()
         e.exp()
         return Built(e=e, p=p)
@@ -859,9 +852,9 @@ class TestFinalizedBeforeCollect:
 
     @pytest.fixture
     def finalized_exp(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_fin')
+        p = PipelineBuilder(path=tmp_path / 'pipeline_fin')
         p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+        p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict',
                   edges={'X': '{f1, f2, f3}', 'y': '{target}'},
                   params={'max_depth': 3, 'random_state': 42})
@@ -869,7 +862,7 @@ class TestFinalizedBeforeCollect:
         exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_fin',
                                sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
         e = exp_obj
-        e.set_pipeline(p)
+        e.set_pipeline(p.build())
         e.build()
         e.exp()
         e.finalize(['dt'])
@@ -887,13 +880,13 @@ class TestFinalizedBeforeCollect:
 
     def test_model_attr_get_attr_returns_none(self, finalized_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = finalized_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        mac = finalized_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         finalized_exp.e.collect(mac)
         assert mac.get_attr('dt') is None
 
     def test_model_attr_get_attrs_agg_returns_none(self, finalized_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = finalized_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor=DecisionTreeClassifier), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        mac = finalized_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         finalized_exp.e.collect(mac)
         assert mac.get_attrs_agg('dt') is None
 
@@ -916,7 +909,7 @@ class TestFinalizedBeforeCollect:
     def test_shap_get_feature_importance_agg_returns_none(self, finalized_exp):
         pytest.importorskip('shap')
         from mllabs import SHAPCollector
-        sc = finalized_exp.e.set_collector('shap', SHAPCollector, Connector(processor=DecisionTreeClassifier))
+        sc = finalized_exp.e.set_collector('shap', SHAPCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'))
         finalized_exp.e.collect(sc)
         assert sc.get_feature_importance_agg('dt') is None
 
@@ -926,9 +919,9 @@ class TestGetCollectStatus:
     @pytest.fixture
     def not_exp_exp(self, tmp_path, sample_data):
         """Stage built but head exp() not called."""
-        p = Pipeline(path=tmp_path / 'pipeline_notexp')
+        p = PipelineBuilder(path=tmp_path / 'pipeline_notexp')
         p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+        p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict',
                   edges={'X': '{f1, f2, f3}', 'y': '{target}'},
                   params={'max_depth': 3, 'random_state': 42})
@@ -936,15 +929,15 @@ class TestGetCollectStatus:
         exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_notexp',
                                sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
         e = exp_obj
-        e.set_pipeline(p)
+        e.set_pipeline(p.build())
         e.build()
         return Built(e=e, p=p)
 
     @pytest.fixture
     def finalized_exp(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_fin2')
+        p = PipelineBuilder(path=tmp_path / 'pipeline_fin2')
         p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+        p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict',
                   edges={'X': '{f1, f2, f3}', 'y': '{target}'},
                   params={'max_depth': 3, 'random_state': 42})
@@ -952,7 +945,7 @@ class TestGetCollectStatus:
         exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_fin2',
                                sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
         e = exp_obj
-        e.set_pipeline(p)
+        e.set_pipeline(p.build())
         e.build()
         e.exp()
         e.finalize(['dt'])
@@ -960,16 +953,16 @@ class TestGetCollectStatus:
 
     @pytest.fixture
     def error_exp(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_err')
+        p = PipelineBuilder(path=tmp_path / 'pipeline_err')
         p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
-        p.set_grp('model', role='head', processor=FailPredictor,
+        p.set_grp('model', processor='mock.FailPredictor',
                   method='predict',
                   edges={'X': '{f1, f2, f3}', 'y': '{target}'})
         p.set_node('dt', grp='model')
         exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_err',
                                sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
         e = exp_obj
-        e.set_pipeline(p)
+        e.set_pipeline(p.build())
         e.build()
         e.exp()
         return Built(e=e, p=p)
@@ -1014,9 +1007,9 @@ class TestGetCollectStatus:
         assert 'dt2' not in status
 
     def test_mixed_status(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_mixed')
+        p = PipelineBuilder(path=tmp_path / 'pipeline_mixed')
         p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+        p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict',
                   edges={'X': '{f1, f2, f3}', 'y': '{target}'},
                   params={'max_depth': 3, 'random_state': 42})
@@ -1025,7 +1018,7 @@ class TestGetCollectStatus:
         exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_mixed',
                                sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
         e = exp_obj
-        e.set_pipeline(p)
+        e.set_pipeline(p.build())
         e.build()
         e.exp('dt1')
         e.exp('dt2')
@@ -1073,21 +1066,21 @@ class TestCollectMissing:
         assert status['dt2'] == 'not_collected'
 
     def test_excludes_finalized_and_error(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_cm_mixed')
+        p = PipelineBuilder(path=tmp_path / 'pipeline_cm_mixed')
         p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+        p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict',
                   edges={'X': '{f1, f2, f3}', 'y': '{target}'},
                   params={'max_depth': 3, 'random_state': 42})
         p.set_node('dt_ok', grp='model')
         p.set_node('dt_finalized', grp='model')
-        p.set_grp('bad_model', role='head', processor=FailPredictor,
+        p.set_grp('bad_model', processor='mock.FailPredictor',
                   method='predict',
                   edges={'X': '{f1, f2, f3}', 'y': '{target}'})
         p.set_node('dt_error', grp='bad_model')
         e = Experimenter(data=sample_data, path=tmp_path / 'exp_cm_mixed',
                          sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.set_pipeline(p)
+        e.set_pipeline(p.build())
         e.build()
         e.exp()
         e.finalize(['dt_finalized'])

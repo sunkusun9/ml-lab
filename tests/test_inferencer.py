@@ -6,7 +6,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import ShuffleSplit, KFold
 
-from mllabs._pipeline import Pipeline
+from mllabs._pipeline import PipelineBuilder
 from mllabs._experimenter import Experimenter
 from mllabs._trainer import Trainer
 from mllabs._inferencer import Inferencer
@@ -33,12 +33,12 @@ def sample_data():
 
 @pytest.fixture
 def pipeline(tmp_path):
-    p = Pipeline(path=tmp_path / 'pipeline')
+    p = PipelineBuilder(path=tmp_path / 'pipeline')
     p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
-    p.set_grp('scale', role='stage', processor=StandardScaler,
+    p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
               method='transform', edges={'X': '{f1, f2, f3}'})
     p.set_node('scaler', grp='scale')
-    p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+    p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
               method='predict',
               edges={'X': 'scaler:(*)', 'y': '{target}'},
               params={'max_depth': 3, 'random_state': 42})
@@ -51,7 +51,7 @@ def exp(tmp_path, sample_data, pipeline):
     exp_obj = Experimenter(data=sample_data, path=tmp_path / 'exp_main',
                            sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
                            sp_v=KFold(n_splits=3, shuffle=True, random_state=42),
-                           pipeline=pipeline)
+                           pipeline=pipeline.build())
     exp_obj.build()
     exp_obj.exp()
     return exp_obj
@@ -61,7 +61,7 @@ def exp(tmp_path, sample_data, pipeline):
 def trained_trainer(tmp_path, exp, pipeline, sample_data):
     trainer = _make_trainer(pipeline, 't1', sample_data, tmp_path / 'trainer_t1',
                             splitter=KFold(n_splits=2, shuffle=True, random_state=0))
-    trainer.set_pipeline(pipeline)
+    trainer.set_pipeline(pipeline.build())
     trainer.train()
     return trainer
 
@@ -88,7 +88,7 @@ class TestToInferencer:
 
     def test_not_trained_raises(self, tmp_path, exp, pipeline, sample_data):
         trainer = _make_trainer(pipeline, 't_no_train', sample_data, tmp_path / 'trainer_t_no_train')
-        trainer.set_pipeline(pipeline)
+        trainer.set_pipeline(pipeline.build())
         with pytest.raises(RuntimeError, match="not built"):
             trainer.to_inferencer()
 
@@ -120,7 +120,7 @@ class TestProcess:
         assert len(results) == inf.n_splits
 
     def test_v_parameter(self, tmp_path, exp, pipeline, sample_data):
-        pipeline.set_grp('model_proba', role='head', processor=DecisionTreeClassifier,
+        pipeline.set_grp('model_proba', processor='sklearn.tree.DecisionTreeClassifier',
                     method='predict_proba',
                     edges={'X': 'scaler:(*)', 'y': '{target}'},
                     params={'max_depth': 3, 'random_state': 42})
@@ -128,7 +128,7 @@ class TestProcess:
         exp.build()
         exp.exp()
         trainer = _make_trainer(pipeline, 't_proba', sample_data, tmp_path / 'trainer_t_proba', tags=['proba'])
-        trainer.set_pipeline(pipeline)
+        trainer.set_pipeline(pipeline.build())
         trainer.train()
         inf = trainer.to_inferencer(v='-1:')
         result = inf.process(sample_data)
@@ -136,7 +136,7 @@ class TestProcess:
 
     def test_single_split(self, tmp_path, exp, pipeline, sample_data):
         trainer = _make_trainer(pipeline, 't_nosplit', sample_data, tmp_path / 'trainer_nosplit', splitter=None)
-        trainer.set_pipeline(pipeline)
+        trainer.set_pipeline(pipeline.build())
         trainer.train()
         inf = trainer.to_inferencer()
         result = inf.process(sample_data)

@@ -1,7 +1,7 @@
 """SQLite persistence for Pipeline groups, nodes, and datasource.
 
 All table/schema knowledge lives here. Pipeline deals only with in-memory
-PipelineGroup/PipelineNode/DataSourceNode objects and plain dicts returned
+_PipelineGroup/_PipelineNode/_DataSourceNode objects and plain dicts returned
 by fetch_all(); it does not know column names or table structure.
 """
 import json
@@ -15,7 +15,6 @@ _SCHEMA_SQL = """
     );
     CREATE TABLE IF NOT EXISTS grps (
         name TEXT PRIMARY KEY,
-        role TEXT NOT NULL,
         processor TEXT,
         edges TEXT,
         method TEXT,
@@ -93,7 +92,6 @@ class PipelineStore:
             grps = {}
             for row in conn.execute("SELECT * FROM grps ORDER BY rowid").fetchall():
                 grps[row['name']] = {
-                    'role': row['role'],
                     'processor': deserialize_from_json(row['processor']),
                     'edges': deserialize_from_json(row['edges']) or {},
                     'method': row['method'],
@@ -130,9 +128,9 @@ class PipelineStore:
         from ._serialize import serialize_to_json
         conn.execute(
             "INSERT OR REPLACE INTO grps "
-            "(name, role, processor, edges, method, parent, adapter, params, desc) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (grp.name, grp.role,
+            "(name, processor, edges, method, parent, adapter, params, desc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (grp.name,
              serialize_to_json(grp.processor) if grp.processor is not None else None,
              serialize_to_json(grp.edges),
              grp.method, grp.parent,

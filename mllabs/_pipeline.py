@@ -51,25 +51,167 @@ def _combine_edges(own_edges, parent_edges):
 
 
 def _params_equal(a, b):
-    if a is b:
-        return True
-    if type(a) is not type(b):
-        return False
-    if isinstance(a, dict):
-        if set(a.keys()) != set(b.keys()):
-            return False
-        return all(_params_equal(a[k], b[k]) for k in a)
-    a_dict = getattr(a, '__dict__', None)
-    b_dict = getattr(b, '__dict__', None)
-    if a_dict is None and b_dict is None:
-        try:
-            return bool(a == b)
-        except Exception:
-            return True
-    elif a_dict is None or b_dict is None:
-        return False
-    return _params_equal(a_dict, b_dict)
-class PipelineGroup:
+    """Compare two params dicts.
+
+    ``_validate_params`` guarantees params hold plain data or ref specs, so
+    plain ``==`` is exact here — no identity or ``__dict__`` fallbacks needed.
+    """
+    return a == b
+
+
+def _ref_hint(value):
+    """Best-guess ``"module.ClassName"`` string for *value*, for error messages."""
+    target = value if isinstance(value, type) else type(value)
+    module = getattr(target, '__module__', None)
+    qualname = getattr(target, '__qualname__', getattr(target, '__name__', None))
+    if not module or not qualname:
+        return None
+    return f"{module}.{qualname}"
+
+
+def _validate_processor(processor, where):
+    """processor must be a ``"module.ClassName"`` string, never a class/instance.
+
+    Nothing downstream resolves it back to a string, so a class stored here
+    silently fails :meth:`Connector.match`, which compares the stored value as
+    a string. Rejecting at definition time keeps that from ever happening.
+    """
+    if processor is None or isinstance(processor, str):
+        return
+    hint = _ref_hint(processor)
+    suffix = f" Use {hint!r} instead." if hint else ""
+    raise TypeError(
+        f"{where}: processor must be a \"module.ClassName\" string, got "
+        f"{type(processor).__name__}.{suffix}"
+    )
+
+
+def _validate_adapter(adapter, where):
+    """adapter must be a string ref or a ``{'__ref__': ..., '__params__': ...}`` spec."""
+    if adapter is None or isinstance(adapter, str):
+        return
+    if isinstance(adapter, dict) and '__ref__' in adapter:
+        return
+    hint = _ref_hint(adapter)
+    suffix = f" Use {hint!r} or {{'__ref__': {hint!r}, '__params__': {{...}}}}." if hint else ""
+    raise TypeError(
+        f"{where}: adapter must be a \"module.ClassName\" string or a "
+        f"{{'__ref__': ...}} spec, got {type(adapter).__name__}.{suffix}"
+    )
+
+
+def _validate_param_value(value, where, path):
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return
+    if isinstance(value, (list, tuple)):
+        for i, item in enumerate(value):
+            _validate_param_value(item, where, f"{path}[{i}]")
+        return
+    if isinstance(value, dict):
+        if '__ref__' in value or '__callable__' in value:
+            return  # lazy spec — instantiated in _node_processor at point of use
+        for key, item in value.items():
+            _validate_param_value(item, where, f"{path}[{key!r}]")
+        return
+    if hasattr(value, 'item') and hasattr(value, 'dtype') and getattr(value, 'shape', None) == ():
+        return  # numpy scalar
+    hint = _ref_hint(value)
+    if isinstance(value, type):
+        form = f"{{'__ref__': {hint!r}}}" if hint else "{'__ref__': ...}"
+    elif callable(value):
+        form = f"{{'__callable__': {hint!r}}}" if hint else "{'__callable__': ...}"
+    else:
+        form = f"{{'__ref__': {hint!r}, '__params__': {{...}}}}" if hint else "{'__ref__': ..., '__params__': {...}}"
+    raise TypeError(
+        f"{where}: params{path} must be plain data or a ref spec, got "
+        f"{type(value).__name__}. Use {form} — it is instantiated lazily at fit time."
+    )
+
+
+def _validate_params(params, where):
+    """params must hold plain data or ref specs — never live objects.
+
+    Live objects (estimator instances, ColSelector, samplers, callbacks) make
+    the pipeline unserializable and force identity-based comparison when
+    deciding whether a definition changed. Ref specs are resolved lazily by
+    ``_node_processor`` instead.
+    """
+    if not params:
+        return
+    for key, value in params.items():
+        _validate_param_value(value, where, f"[{key!r}]")
+
+
+def _find_descendants(nodes, node_name):
+    """Names of every node reachable downstream of *node_name*.
+
+    Shared by :class:`PipelineBuilder` and the built :class:`Pipeline` — both
+    hold ``output_edges`` on their node objects, which is all this needs.
+    """
+    descendants = set()
+    queue = [node_name]
+
+    while queue:
+        current = queue.pop(0)
+
+        if current not in nodes:
+            continue
+
+        for child_name in nodes[current].output_edges:
+            if child_name not in descendants:
+                descendants.add(child_name)
+                queue.append(child_name)
+
+    return descendants
+
+
+def _affected_nodes(nodes, roots):
+    """Node names downstream of *roots*, ordered by depth (DataSource dropped)."""
+    priorities = {}
+    queue = []
+
+    for node_name in roots:
+        priorities[node_name] = 1
+        queue.append((node_name, 1))
+
+    while queue:
+        current_node, current_priority = queue.pop(0)
+
+        for desc_node_name in _find_descendants(nodes, current_node):
+            new_priority = current_priority + 1
+            if desc_node_name not in priorities or priorities[desc_node_name] < new_priority:
+                priorities[desc_node_name] = new_priority
+                queue.append((desc_node_name, new_priority))
+
+    sorted_nodes = sorted(priorities.items(), key=lambda x: x[1])
+    return [i[0] for i in sorted_nodes if i[0] is not None]
+
+
+def _select_node_names(nodes, query):
+    """Resolve a node query (``None`` / list / regex str) against *nodes*."""
+    if query is None:
+        return list(nodes.keys())
+    if isinstance(query, list):
+        return [n for n in query if n in nodes]
+    if isinstance(query, str):
+        pat = re.compile(query)
+        return [k for k in nodes.keys() if k is not None and pat.search(k)]
+    raise ValueError(f"query must be None, list, or str, got {type(query)}")
+
+
+def _check_data_compatibility(schema, data):
+    """Raise if *data* is missing any column declared in *schema*."""
+    schema_cols = set(schema.keys())
+    if not schema_cols:
+        return
+    missing = schema_cols - set(data.get_columns())
+    if missing:
+        raise ValueError(
+            f"Data is missing columns defined in datasource schema: {sorted(missing)}"
+        )
+
+
+class _PipelineGroup:
     """A named group that shares configuration across its member nodes.
 
     Groups form a hierarchy via ``parent``. Child groups and their nodes
@@ -78,7 +220,6 @@ class PipelineGroup:
 
     Attributes:
         name (str): Group name.
-        role (str): ``'stage'`` or ``'head'``.
         processor: ``"module.ClassName"`` string (optional, may be inherited)
             — stored as-is, resolved to the actual class only at point of use
             (``_node_processor.py``).
@@ -94,10 +235,9 @@ class PipelineGroup:
     """
 
     def __init__(
-        self, name, role, processor=None, edges=None, method=None, parent=None, adapter=None, params=None, desc=None
+        self, name, processor=None, edges=None, method=None, parent=None, adapter=None, params=None, desc=None
     ):
         self.name = name
-        self.role = role  # 'stage' or 'head'
         self.processor = processor
         self.edges = edges if edges is not None else {}
         self.method = method
@@ -144,7 +284,7 @@ class PipelineGroup:
             'params': params,
             'children': self.children,
         }
-        for i in ['role', 'processor', 'method']:
+        for i in ['processor', 'method']:
             self.attrs[i] = parent_attrs.get(i) if getattr(self, i) is None else getattr(self, i)
 
         return self.attrs
@@ -169,15 +309,15 @@ class PipelineGroup:
         return changed
 
     def copy(self):
-        ret = PipelineGroup(
-            self.name, self.role, self.processor, self.edges.copy(),
+        ret = _PipelineGroup(
+            self.name, self.processor, self.edges.copy(),
             self.method, self.parent, self.adapter, self.params.copy(), self.desc
         )
         ret.children = self.children.copy()
         ret.nodes = self.nodes.copy()
         return ret
 
-class PipelineNode:
+class _PipelineNode:
     """An individual executable unit in the pipeline.
 
     Node-level attributes override group attributes. Final resolved values
@@ -215,7 +355,7 @@ class PipelineNode:
         self.attrs = None
 
     def copy(self):
-        ret = PipelineNode(
+        ret = _PipelineNode(
             self.name, self.grp, self.processor, self.edges.copy(),
             self.method, self.adapter, self.params.copy(), self.desc, list(self.tag)
         )
@@ -249,7 +389,7 @@ class PipelineNode:
             'adapter': adapter,
             'params': params,
             'method': grp_attrs.get('method') if self.method is None else self.method,
-            'role': grp_attrs['role'],
+            'role': 'stage',
             'serial': self.serial,
             'tag': list(self.tag),
         }
@@ -276,7 +416,7 @@ class PipelineNode:
         return changed
 
 
-class DataSourceNode(PipelineNode):
+class _DataSourceNode(_PipelineNode):
     """DataSource node that defines input schema and target columns.
 
     Attributes:
@@ -303,7 +443,7 @@ class DataSourceNode(PipelineNode):
         return self.attrs
 
     def copy(self):
-        ret = DataSourceNode()
+        ret = _DataSourceNode()
         ret.serial = self.serial
         ret.schema = self.schema.copy()
         ret.targets = list(self.targets)
@@ -311,21 +451,223 @@ class DataSourceNode(PipelineNode):
         return ret
 
 
+class _BuiltNode:
+    """A node in a built :class:`Pipeline`.
+
+    Group inheritance is already resolved — every attribute here is the final
+    value. ``label`` is the group name the node came from, kept for display and
+    error messages only; it carries no structural meaning — every node in a
+    Pipeline is a Stage.
+
+    Treat instances as immutable. ``params``/``edges`` are shallow-copied at
+    build time, so nested values are shared with the builder.
+    """
+
+    __slots__ = ('name', 'label', 'processor', 'edges', 'method',
+                 'adapter', 'params', 'serial', 'tag', 'desc', 'output_edges')
+
+    role = 'stage'
+
+    def __init__(self, name, label, processor, edges, method, adapter,
+                 params, serial, tag, desc, output_edges):
+        self.name = name
+        self.label = label
+        self.processor = processor
+        self.edges = edges
+        self.method = method
+        self.adapter = adapter
+        self.params = params
+        self.serial = serial
+        self.tag = tag
+        self.desc = desc
+        self.output_edges = output_edges
+
+    def get_attrs(self):
+        return {
+            'name': self.name,
+            'label': self.label,
+            'role': 'stage',
+            'edges': self.edges,
+            'processor': self.processor,
+            'adapter': self.adapter,
+            'params': self.params,
+            'method': self.method,
+            'serial': self.serial,
+            'tag': self.tag,
+        }
+
+    def copy(self, output_edges=None):
+        return _BuiltNode(
+            self.name, self.label, self.processor, dict(self.edges),
+            self.method, self.adapter, dict(self.params), self.serial,
+            list(self.tag), self.desc,
+            list(self.output_edges if output_edges is None else output_edges),
+        )
+
+    def __repr__(self):
+        return f"<_BuiltNode {self.name!r} label={self.label!r}>"
+
+
+class _BuiltDataSource:
+    """DataSource entry of a built :class:`Pipeline` (``nodes[None]``)."""
+
+    __slots__ = ('name', 'role', 'schema', 'targets', 'serial', 'output_edges')
+
+    def __init__(self, name, schema, targets, serial, output_edges):
+        self.name = name
+        self.role = 'datasource'
+        self.schema = schema
+        self.targets = targets
+        self.serial = serial
+        self.output_edges = output_edges
+
+    def get_attrs(self):
+        return {
+            'name': self.name,
+            'role': 'datasource',
+            'serial': self.serial,
+            'schema': self.schema,
+            'targets': self.targets,
+        }
+
+    def copy(self, output_edges=None):
+        return _BuiltDataSource(
+            self.name, dict(self.schema), list(self.targets), self.serial,
+            list(self.output_edges if output_edges is None else output_edges),
+        )
+
+    def __repr__(self):
+        return f"<_BuiltDataSource {self.name!r} targets={self.targets!r}>"
+
+
 class Pipeline:
+    """Immutable node graph produced by :meth:`PipelineBuilder.build`.
+
+    Holds only what running the graph needs: nodes with every group-inherited
+    value already resolved, plus the DataSource schema. Groups do not survive
+    the build, and a node's originating group name is kept as ``label``.
+    A Pipeline holds Stages only; Heads are now :class:`~mllabs.Trial` objects
+    produced by a :class:`~mllabs.BaseExperiment`.
+
+    Consumers (Experimenter, Trainer, Inferencer) hold one of these rather than
+    a builder, so later edits to the builder cannot silently change a run that
+    is already under way.
+
+    Attributes:
+        nodes (dict[str | None, _BuiltNode]): Nodes keyed by name. ``None`` is
+            the DataSource (a :class:`_BuiltDataSource`).
+        pipeline_id (str): Identity of the builder this was built from.
+        build_id (str): Identity of this particular build.
+    """
+
+    def __init__(self, nodes, datasource, pipeline_id, build_id=None):
+        self.nodes = {None: datasource}
+        self.nodes.update(nodes)
+        self.pipeline_id = pipeline_id
+        self.build_id = build_id if build_id is not None else str(uuid.uuid4())
+        self._topo_order = _affected_nodes(self.nodes, [None])
+        self._attrs = {name: node.get_attrs() for name, node in self.nodes.items()}
+
+    @property
+    def datasource(self):
+        return self.nodes[None]
+
+    def get_node(self, name):
+        return self.nodes[name]
+
+    def get_node_attrs(self, name):
+        """Resolved attributes of *name* — see :meth:`_BuiltNode.get_attrs`."""
+        return self._attrs[name]
+
+    def get_node_names(self, query=None):
+        """Resolve a node query to a list of node names.
+
+        Args:
+            query: ``None`` (all nodes), ``list`` (exact names), or ``str``
+                (regex pattern matched against node names).
+
+        Returns:
+            list[str]: Matching node names (DataSource ``None`` excluded for
+            str/list queries).
+        """
+        return _select_node_names(self.nodes, query)
+
+    def topo_order(self):
+        """Node names ordered from the DataSource downwards (DataSource excluded).
+
+        Computed once at build time — the graph cannot change afterwards.
+        """
+        return list(self._topo_order)
+
+    def descendants(self, name):
+        """Names of every node downstream of *name*."""
+        return _find_descendants(self.nodes, name)
+
+    def check_data_compatibility(self, data):
+        """Verify *data* contains every column declared in the DataSource schema.
+
+        Args:
+            data (DataWrapper): Wrapped dataset to check.
+
+        Raises:
+            ValueError: If any schema column is missing from *data*.
+        """
+        _check_data_compatibility(self.datasource.schema, data)
+
+    def subset(self, node_names):
+        """Return a new Pipeline with *node_names* and all their ancestors.
+
+        Args:
+            node_names (list[str]): Target node names. Upstream dependencies
+                referenced through ``edges`` are pulled in automatically.
+
+        Returns:
+            Pipeline: Minimal pipeline needed to run *node_names*.
+        """
+        needed = set()
+        queue = list(node_names)
+
+        while queue:
+            name = queue.pop(0)
+            if name is None or name in needed or name not in self.nodes:
+                continue
+            needed.add(name)
+            for dsl_string in self.nodes[name].edges.values():
+                for edge_name in referenced_nodes(dsl_string):
+                    if edge_name is not None and edge_name not in needed:
+                        queue.append(edge_name)
+
+        nodes = {
+            name: self.nodes[name].copy(
+                output_edges=[e for e in self.nodes[name].output_edges if e in needed]
+            )
+            for name in needed
+        }
+        datasource = self.datasource.copy(
+            output_edges=[e for e in self.datasource.output_edges if e in needed]
+        )
+        return Pipeline(nodes, datasource, self.pipeline_id, self.build_id)
+
+    def __repr__(self):
+        return (f"<Pipeline stages={len(self.nodes) - 1} "
+                f"build_id={self.build_id[:8]}>")
+
+
+class PipelineBuilder:
     """Node graph that describes an ML workflow.
 
-    Holds groups (:class:`PipelineGroup`) and nodes (:class:`PipelineNode`).
+    Holds groups (:class:`_PipelineGroup`) and nodes (:class:`_PipelineNode`).
     The implicit DataSource node is stored as ``nodes[None]``.
 
     Attributes:
-        grps (dict[str, PipelineGroup]): All registered groups.
-        nodes (dict[str | None, PipelineNode]): All nodes, keyed by name.
+        grps (dict[str, _PipelineGroup]): All registered groups.
+        nodes (dict[str | None, _PipelineNode]): All nodes, keyed by name.
             ``None`` is the DataSource.
     """
 
     def __init__(self, path=None, name='pipeline'):
-        self.grps = {'__datasource__': PipelineGroup('__datasource__', role='datasource')}
-        self.nodes = {None: DataSourceNode()}
+        self.grps = {'__datasource__': _PipelineGroup('__datasource__')}
+        self.nodes = {None: _DataSourceNode()}
         self._store = None
         self.pipeline_id = str(uuid.uuid4())
 
@@ -343,23 +685,23 @@ class Pipeline:
             self.pipeline_id = data['pipeline_id']
 
         if data['datasource']:
-            ds = DataSourceNode()
+            ds = _DataSourceNode()
             ds.schema = data['datasource']['schema']
             ds.targets = data['datasource']['targets']
             ds.serial = data['datasource']['serial']
             self.nodes[None] = ds
 
-        self.grps = {'__datasource__': PipelineGroup('__datasource__', role='datasource')}
+        self.grps = {'__datasource__': _PipelineGroup('__datasource__')}
         for name, d in data['grps'].items():
-            self.grps[name] = PipelineGroup(
-                name=name, role=d['role'], processor=d['processor'],
+            self.grps[name] = _PipelineGroup(
+                name=name, processor=d['processor'],
                 edges=d['edges'], method=d['method'], parent=d['parent'],
                 adapter=d['adapter'], params=d['params'], desc=d['desc'],
             )
 
         self.nodes = {None: self.nodes[None]}
         for name, d in data['nodes'].items():
-            node = PipelineNode(
+            node = _PipelineNode(
                 name=name, grp=d['grp'], processor=d['processor'],
                 edges=d['edges'], method=d['method'], adapter=d['adapter'],
                 params=d['params'], desc=d['desc'], tag=d['tag'],
@@ -410,7 +752,7 @@ class Pipeline:
             self._store.execute(fn)
 
     def sync(self):
-        """Update in-memory Pipeline state to match the SQLite DB.
+        """Update in-memory PipelineBuilder state to match the SQLite DB.
 
         DB is always the source of truth. Each element is compared and
         overwritten if different. After applying all changes, children,
@@ -424,10 +766,10 @@ class Pipeline:
             }
 
         Raises:
-            ValueError: If Pipeline has no DB path.
+            ValueError: If PipelineBuilder has no DB path.
         """
         if self._store is None:
-            raise ValueError("Pipeline has no DB path; cannot sync")
+            raise ValueError("PipelineBuilder has no DB path; cannot sync")
 
         changes = {
             'datasource': 'skip',
@@ -458,8 +800,8 @@ class Pipeline:
 
         for name in db_grp_names - mem_grp_names:
             d = db_grps[name]
-            self.grps[name] = PipelineGroup(
-                name=name, role=d['role'], processor=d['processor'],
+            self.grps[name] = _PipelineGroup(
+                name=name, processor=d['processor'],
                 edges=d['edges'], method=d['method'], parent=d['parent'],
                 adapter=d['adapter'], params=d['params'], desc=d['desc'],
             )
@@ -470,8 +812,7 @@ class Pipeline:
             grp = self.grps[name]
             changed = grp.diff(d['processor'], d['edges'], d['method'],
                                d['parent'], d['adapter'], d['params'])
-            if changed or grp.role != d['role'] or grp.desc != d['desc']:
-                grp.role = d['role']
+            if changed or grp.desc != d['desc']:
                 grp.processor = d['processor']
                 grp.edges = d['edges']
                 grp.method = d['method']
@@ -493,7 +834,7 @@ class Pipeline:
 
         for name in db_node_names - mem_node_names:
             d = db_nodes[name]
-            node = PipelineNode(
+            node = _PipelineNode(
                 name=name, grp=d['grp'], processor=d['processor'],
                 edges=d['edges'], method=d['method'], adapter=d['adapter'],
                 params=d['params'], desc=d['desc'], tag=d['tag'],
@@ -575,59 +916,57 @@ class Pipeline:
         Raises:
             ValueError: If any schema column is missing from *data*.
         """
-        schema_cols = set(self.datasource.schema.keys())
-        if not schema_cols:
-            return
-        missing = schema_cols - set(data.get_columns())
-        if missing:
-            raise ValueError(
-                f"Data is missing columns defined in datasource schema: {sorted(missing)}"
+        _check_data_compatibility(self.datasource.schema, data)
+
+    def build(self):
+        """Resolve group inheritance and return an immutable :class:`Pipeline`.
+
+        This is the hand-off point to Experimenter/Trainer/Inferencer: they take
+        the built Pipeline, never the builder, so later ``set_grp``/``set_node``
+        calls do not reach into a run already in progress. Call ``build()``
+        again and re-set it to publish new definitions.
+
+        Returns:
+            Pipeline: Snapshot with every node's inherited values resolved.
+        """
+        nodes = {}
+        for name, node in self.nodes.items():
+            if name is None:
+                continue
+            attrs = node.get_attrs(self.grps)
+            nodes[name] = _BuiltNode(
+                name=name,
+                label=node.grp,
+                processor=attrs['processor'],
+                edges=dict(attrs['edges']),
+                method=attrs['method'],
+                adapter=attrs['adapter'],
+                params=dict(attrs['params']),
+                serial=attrs['serial'],
+                tag=list(attrs['tag']),
+                desc=node.desc,
+                output_edges=list(node.output_edges),
             )
+
+        ds = self.nodes[None]
+        datasource = _BuiltDataSource(
+            name=ds.name,
+            schema=dict(ds.schema),
+            targets=list(ds.targets),
+            serial=ds.serial,
+            output_edges=list(ds.output_edges),
+        )
+        return Pipeline(nodes, datasource, self.pipeline_id)
 
     def copy(self):
         """Return a deep copy of the entire pipeline.
 
         Returns:
-            Pipeline: New pipeline with all groups and nodes copied.
+            PipelineBuilder: New pipeline with all groups and nodes copied.
         """
-        ret = Pipeline()
+        ret = PipelineBuilder()
         ret.grps = {k: v.copy() for k, v in self.grps.items()}
         ret.nodes = {k: v.copy() for k, v in self.nodes.items()}
-        return ret
-
-    def copy_stage(self):
-        """Return a copy containing only Stage groups and nodes.
-
-        Returns:
-            Pipeline: Pipeline with only ``role='stage'`` groups and nodes.
-        """
-        ret = Pipeline()
-
-        stage_grp_names = {name for name, grp in self.grps.items() if grp.role == 'stage'}
-
-        for name in stage_grp_names:
-            grp = self.grps[name].copy()
-            grp.children = [c for c in grp.children if c in stage_grp_names]
-            if grp.parent not in stage_grp_names:
-                grp.parent = None
-            ret.grps[name] = grp
-
-        stage_node_names = set()
-        for name, node in self.nodes.items():
-            if name is None:
-                continue
-            if node.grp in stage_grp_names:
-                stage_node_names.add(name)
-
-        for name in stage_node_names:
-            node = self.nodes[name].copy()
-            node.output_edges = [e for e in node.output_edges if e in stage_node_names]
-            ret.nodes[name] = node
-
-        data_source = self.nodes[None].copy()
-        data_source.output_edges = [e for e in data_source.output_edges if e in stage_node_names]
-        ret.nodes[None] = data_source
-
         return ret
 
     def copy_nodes(self, node_names):
@@ -638,7 +977,7 @@ class Pipeline:
                 dependencies are included automatically.
 
         Returns:
-            Pipeline: Minimal pipeline needed to run *node_names*.
+            PipelineBuilder: Minimal pipeline needed to run *node_names*.
         """
         needed_nodes = set()
         queue = list(node_names)
@@ -663,7 +1002,7 @@ class Pipeline:
                 needed_grps.add(grp_name)
                 grp_name = self.grps[grp_name].parent
 
-        ret = Pipeline()
+        ret = PipelineBuilder()
 
         for name in needed_grps:
             grp = self.grps[name].copy()
@@ -697,21 +1036,7 @@ class Pipeline:
                 raise ValueError(f"Name '{name}' cannot contain '{char}'")
 
     def _find_descendants(self, node_name):
-        descendants = set()
-        queue = [node_name]
-
-        while queue:
-            current = queue.pop(0)
-
-            if current not in self.nodes:
-                continue
-
-            for child_name in self.nodes[current].output_edges:
-                if child_name not in descendants:
-                    descendants.add(child_name)
-                    queue.append(child_name)
-
-        return descendants
+        return _find_descendants(self.nodes, node_name)
 
     def _check_cycle(self, node_name, new_edges):
         descendants = self._find_descendants(node_name)
@@ -799,35 +1124,15 @@ class Pipeline:
         self._db_write(_do)
 
     def _get_affected_nodes(self, nodes):
-        priorities = {}
-        queue = []
-
-        for node_name in nodes:
-            priorities[node_name] = 1
-            queue.append((node_name, 1))
-
-        while queue:
-            current_node, current_priority = queue.pop(0)
-
-            descendants = self._find_descendants(current_node)
-
-            for desc_node in descendants:
-                new_priority = current_priority + 1
-                if desc_node not in priorities or priorities[desc_node] < new_priority:
-                    priorities[desc_node] = new_priority
-                    queue.append((desc_node, new_priority))
-
-        sorted_nodes = sorted(priorities.items(), key=lambda x: x[1])
-        return [i[0] for i in sorted_nodes if i[0] is not None]
+        return _affected_nodes(self.nodes, nodes)
 
     def set_grp(
-            self, name, role=None, processor=None, edges=None, method=None, parent=None, adapter=None, params=None, desc=None, exist='diff'
+            self, name, processor=None, edges=None, method=None, parent=None, adapter=None, params=None, desc=None, exist='diff'
         ):
         """Create or update a group.
 
         Args:
             name (str): Group name. Cannot contain ``__`` or path-invalid chars.
-            role (str): ``'stage'`` or ``'head'``. Inherited from parent if omitted.
             processor: ``"module.ClassName"`` string reference — not a class.
                 Stored as-is; resolved to the actual class only at point of
                 use (``_node_processor.py``), never here.
@@ -848,37 +1153,31 @@ class Pipeline:
             ``'new'``, ``'skip'``, or ``'update'``.
 
         Raises:
-            ValueError: If name is invalid, role conflicts, or edges form a cycle.
+            ValueError: If name is invalid or edges form a cycle.
         """
         self._validate_name(name)
         if name in self.nodes:
             raise ValueError(f"Name '{name}' already exists as a node")
-        # processor and adapter are stored as-is (str / {'__ref__':...} dict /
-        # class-or-instance / None) — never eagerly resolved here. Resolution
-        # happens only at point of use (_node_processor.py / resolve_node_adapter).
+        # processor/adapter/params are validated as *specs* here but never
+        # resolved — resolution happens only at point of use
+        # (_node_processor.py / resolve_node_adapter).
+        _validate_processor(processor, f"set_grp({name!r})")
+        _validate_adapter(adapter, f"set_grp({name!r})")
+        _validate_params(params, f"set_grp({name!r})")
         if edges is None:
             edges = {}
         if params is None:
             params = {}
-        # params is stored as-is too — {'__ref__':...}/{'__callable__':...}
-        # entries inside it are resolved lazily in _node_processor.py.
 
-        if parent is not None:
-            if parent not in self.grps:
-                raise ValueError(f"Parent group '{parent}' not found")
-            if role is None:
-                role = self.grps[parent].role
-        if role is None and name in self.grps:
-            role = self.grps[name].role
-        if role not in ['stage', 'head']:
-            raise ValueError(f"Role must be 'stage' or 'head', got '{role}'")
+        if parent is not None and parent not in self.grps:
+            raise ValueError(f"Parent group '{parent}' not found")
 
         parent_edges = self.grps[parent].get_attrs(self.grps)['edges'] if parent is not None else None
 
         if name not in self.grps:
             self._check_edges(edges, parent_edges)
-            grp = PipelineGroup(
-                name, role, processor=processor, edges=edges, method=method, parent=parent, adapter=adapter, params=params, desc=desc
+            grp = _PipelineGroup(
+                name, processor=processor, edges=edges, method=method, parent=parent, adapter=adapter, params=params, desc=desc
             )
 
             if parent is not None:
@@ -905,8 +1204,6 @@ class Pipeline:
 
         self._check_edges(edges, parent_edges)
         old_grp = self.grps[name]
-        if old_grp.role != role:
-            raise ValueError(f"Cannot change role of group '{name}': existing '{old_grp.role}', requested '{role}'")
         grp = old_grp.copy()
 
         parent_changed = False
@@ -1031,16 +1328,7 @@ class Pipeline:
             list[str]: Matching node names (DataSource ``None`` excluded for
             str/list queries).
         """
-        if query is None:
-            node_names = list(self.nodes.keys())
-        elif isinstance(query, list):
-            node_names = [n for n in query if n in self.nodes]
-        elif isinstance(query, str):
-            pat = re.compile(query)
-            node_names = [k for k in self.nodes.keys() if k is not None and pat.search(k)]
-        else:
-            raise ValueError(f"query must be None, list, or str, got {type(query)}")
-        return node_names
+        return _select_node_names(self.nodes, query)
 
     def remove_node(self, name):
         if name not in self.nodes:
@@ -1098,12 +1386,13 @@ class Pipeline:
             edges (dict): Edge definitions ``{key: dsl_string}`` (see ``_edge_dsl``),
                 merged on top of the group.
             method (str): Method name override.
-            adapter: ModelAdapter instance override, a ``"module.ClassName"`` string
-                (instantiated with defaults), or ``{"__ref__": ..., "__params__": {...}}``.
-            params (dict): Constructor parameter overrides. A value of the form
-                ``{"__ref__": "mod.Cls", "__params__": {...}}`` is instantiated
-                (e.g. a ``ColSelector``); ``{"__callable__": "mod.fn"}`` resolves to
-                the object itself (not called); plain strings/scalars pass through.
+            adapter: ``"module.ClassName"`` string (instantiated with defaults)
+                or ``{"__ref__": ..., "__params__": {...}}`` — not an instance.
+            params (dict): Constructor parameter overrides. Plain data only; a
+                value of the form ``{"__ref__": "mod.Cls", "__params__": {...}}``
+                is instantiated (e.g. a ``ColSelector``) and
+                ``{"__callable__": "mod.fn"}`` resolves to the object itself
+                (not called) — both lazily, at point of use.
             exist (str): Conflict resolution — ``'diff'`` (default), ``'skip'``,
                 ``'error'``, or ``'replace'``.
 
@@ -1111,9 +1400,14 @@ class Pipeline:
             dict: ``{result, obj, old_obj, affected_nodes}``.
 
         Raises:
+            TypeError: If processor/adapter/params hold live objects instead of
+                string refs or ref specs.
             ValueError: If the resolved processor or method is missing, edges are
                 invalid, or a cycle would be created.
         """
+        _validate_processor(processor, f"set_node({name!r})")
+        _validate_adapter(adapter, f"set_node({name!r})")
+        _validate_params(params, f"set_node({name!r})")
         self._validate_name(name)
 
         if name in self.grps:
@@ -1160,7 +1454,7 @@ class Pipeline:
             old_edges = old_node.get_attrs(self.grps)['edges']
             old_output_edges = old_node.output_edges
 
-        node = PipelineNode(
+        node = _PipelineNode(
             name, grp, processor, edges, method=method, adapter=adapter, params=params, desc=desc, tag=tag
         )
 

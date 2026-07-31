@@ -13,16 +13,18 @@ class Inferencer:
     no dependency on Experimenter or Trainer at serve time.
 
     Attributes:
-        pipeline (Pipeline): Minimal pipeline (selected nodes only).
-        selected_stages (list[str]): Stage node names.
-        selected_heads (list[str]): Head node names.
+        node_attrs (dict): ``{name: resolved_attrs}`` for every selected Stage
+            and Trial. Only ``edges`` is actually needed at serve time, so the
+            Inferencer carries plain data rather than a Pipeline.
+        selected_stages (list[str]): Stage node names, in topological order.
+        selected_heads (list[str]): Trial names producing the output.
         n_splits (int): Number of cross-validation splits.
-        node_objs (dict): ``{node_name: [processor_split0, ...]}``.
-        v: Output column filter applied to Head outputs.
+        node_objs (dict): ``{name: [processor_split0, ...]}``.
+        v: Output column filter applied to Trial outputs.
     """
 
-    def __init__(self, pipeline, selected_stages, selected_heads, n_splits, node_objs, v=None):
-        self.pipeline = pipeline
+    def __init__(self, node_attrs, selected_stages, selected_heads, n_splits, node_objs, v=None):
+        self.node_attrs = node_attrs
         self.selected_stages = selected_stages
         self.selected_heads = selected_heads
         self.n_splits = n_splits
@@ -32,8 +34,8 @@ class Inferencer:
     def _make_flow(self, split_idx):
         flow = InferenceDataFlow()
         for name in self.selected_stages + self.selected_heads:
-            node_attrs = self.pipeline.get_node_attrs(name)
-            flow.add_node(name, self.node_objs[name][split_idx], node_attrs['edges'])
+            flow.add_node(name, self.node_objs[name][split_idx],
+                          self.node_attrs[name]['edges'])
         return flow
 
     def _resolve_heads(self, nodes):
@@ -111,7 +113,7 @@ class Inferencer:
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         save_data = {
-            'pipeline': self.pipeline,
+            'node_attrs': self.node_attrs,
             'selected_stages': self.selected_stages,
             'selected_heads': self.selected_heads,
             'n_splits': self.n_splits,
@@ -135,7 +137,7 @@ class Inferencer:
         with open(path / '__inferencer.pkl', 'rb') as f:
             save_data = pkl.load(f)
         return cls(
-            save_data['pipeline'],
+            save_data['node_attrs'],
             save_data['selected_stages'],
             save_data['selected_heads'],
             save_data['n_splits'],

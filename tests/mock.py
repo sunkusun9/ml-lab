@@ -1,25 +1,27 @@
 """Shared dummy processor classes for tests.
 
-Referenced by tests as ``processor='mock.ClassName'`` string refs (Pipeline
+Referenced by tests as ``processor='mock.ClassName'`` string refs (PipelineBuilder
 stores/passes processor as a string only — see mllabs/_pipeline.py), so they
 need a real importable module path. Centralized here instead of duplicated
 per test file.
 """
 import numpy as np
 
+from mllabs.experiment import BaseExperiment
+
 
 class DummyStage:
-    """Structural-only placeholder (Pipeline graph tests never build/fit it)."""
+    """Structural-only placeholder (PipelineBuilder graph tests never build/fit it)."""
     __name__ = 'DummyStage'
 
 
 class DummyHead:
-    """Structural-only placeholder (Pipeline graph tests never build/fit it)."""
+    """Structural-only placeholder (PipelineBuilder graph tests never build/fit it)."""
     __name__ = 'DummyHead'
 
 
 class AnotherProcessor:
-    """Structural-only placeholder (Pipeline graph tests never build/fit it)."""
+    """Structural-only placeholder (PipelineBuilder graph tests never build/fit it)."""
     __name__ = 'AnotherProcessor'
 
 
@@ -107,3 +109,28 @@ class WarnPredictor:
         import warnings
         warnings.warn("PREDICT_WARN_XYZ")
         return np.zeros(len(X), dtype=int)
+
+
+class TrialListExperiment(BaseExperiment):
+    """Experiment over a fixed list of Trials.
+
+    SimpleExperiment sweeps one processor; tests often need a handful of
+    unrelated Trials (a good one and a deliberately broken one, say), which is
+    also the smallest useful exercise of the BaseExperiment contract.
+    """
+
+    def __init__(self, name, trials, tags=None):
+        super().__init__(name, tags=tags)
+        self._trials = list(trials)
+        self._cursor = 0
+
+    def get_trial_nums(self):
+        return len(self._trials)
+
+    def reset(self):
+        self._cursor = 0
+
+    def get_next_trial(self):
+        trial = self._trials[self._cursor]
+        self._cursor += 1
+        return trial
