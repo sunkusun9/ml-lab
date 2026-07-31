@@ -1,4 +1,16 @@
-"""Shared helpers between Experimenter and Trainer (serial tracking, tag filtering, status)."""
+"""Shared helpers between Experimenter and Trainer (name matching, serial tracking, status)."""
+import re
+
+
+def name_matches(name, query):
+    """``None`` matches everything, a list is exact membership, a str is a regex."""
+    if query is None:
+        return True
+    if isinstance(query, list):
+        return name in query
+    if isinstance(query, str):
+        return re.search(query, name) is not None
+    raise ValueError(f"query must be None, list, or str, got {type(query)}")
 
 
 def require_built_pipeline(pipeline):
@@ -53,12 +65,3 @@ def find_stale_nodes(current_serials, node_names, stores_for_name):
                 stale.append(name)
                 break
     return stale
-
-
-def filter_node_names_by_tags(pipeline, tags):
-    """Return DataSource-excluded node names whose ``tag`` intersects *tags*."""
-    tag_set = set(tags)
-    return {
-        n for n in pipeline.get_node_names(None)
-        if n is not None and set(pipeline.nodes[n].tag) & tag_set
-    }

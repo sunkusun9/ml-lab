@@ -45,9 +45,6 @@ class Collector:
     def has_node(self, node):
         return False
 
-    def has(self, node):
-        return self.has_node(node)
-
     def abort_node(self, node):
         self._buf.pop(node, None)
 

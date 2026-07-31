@@ -3,7 +3,6 @@ import re
 import sys
 import uuid
 import pickle as pkl
-import shutil
 import traceback
 import warnings
 import contextlib
@@ -70,22 +69,8 @@ def _stop_native_redirect(state):
     sys.stdout = state['orig_stdout']
     sys.stderr = state['orig_stderr']
     state['log_f'].close()
-from ._connector import Connector
-from ._run_common import resolve_common_status, find_stale_nodes, filter_node_names_by_tags, require_built_pipeline
+from ._run_common import resolve_common_status, find_stale_nodes, require_built_pipeline, name_matches
 from ._experimenter_store import ExperimenterStore
-from ._serialize import resolve_processor, resolve_instance, resolve_ref_values
-from .collector import Collector
-
-
-def _name_matches(name, query):
-    """``None`` matches everything, a list is exact membership, a str is a regex."""
-    if query is None:
-        return True
-    if isinstance(query, list):
-        return name in query
-    if isinstance(query, str):
-        return re.search(query, name) is not None
-    raise ValueError(f"query must be None, list, or str, got {type(query)}")
 
 
 class OuterFold:
@@ -112,11 +97,6 @@ class OuterFold:
             )
             for j, (train_idx, valid_idx) in enumerate(train_idx_list)
         ]
-        self.artifact_stores = [
-            NodeStore(path=self.path / str(j))
-            for j in range(len(train_idx_list))
-        ]
-
     def set_data(self, data, cache=None, aug_data=None):
         self.data = data
         for flow in self.train_data_flows:
@@ -152,14 +132,11 @@ class Experimenter():
         data_key (str, optional): Identifier verified on :meth:`load` to prevent
             data mismatch.
         cache_maxsize (int): Stage output cache size in bytes. Default 4 GB.
-        tags (list[str], optional): When set, ``exp()`` without an
-            explicit ``nodes`` targets only Head nodes whose ``tag`` intersects it.
         pipeline (Pipeline, optional): Pipeline this experimenter targets.
             Equivalent to calling :meth:`set_pipeline` after construction.
 
     Attributes:
         cache (DataCache): Shared LRU cache.
-        collectors (dict): Registered :class:`~mllabs.collector.Collector` instances.
         status (str): ``'open'`` or ``'closed'``.
         pipeline (Pipeline): Pipeline set via the constructor or
             :meth:`set_pipeline`, persisted to ``{path}/pipeline.pkl``.
@@ -173,10 +150,9 @@ class Experimenter():
     def __init__(
             self, data, path, data_names = None, sp = ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
             splitter_params=None, title=None, data_key=None, cache_maxsize=4 * 1024 ** 3,
-            aug_data=None, tags=None, pipeline=None, _save=True
+            aug_data=None, pipeline=None, _save=True
         ):
         self.cache_maxsize = cache_maxsize
-        self.tags = list(tags) if tags is not None else []
         self.path = Path(path)
         if not os.path.exists(path):
             self.path.mkdir(parents=True, exist_ok=True)
@@ -354,49 +330,20 @@ class Experimenter():
     def get_n_splits_inner(self):
         return len(self.outer_folds[0].train_data_flows)
 
-    def get_collect_status(self, experiment, collectors, collector, trials=None):
-        """``{trial_name: status}`` for the Trials *collector* targets.
-
-        Status is ``'collected'``, ``'not_collected'``, ``'finalized'``, or
-        ``'error'``.
-        """
-        if isinstance(collector, str):
-            collector = collectors.resolve([collector])[0]
-        result = {}
-        for trial in experiment.get_trials():
-            if not _name_matches(trial.name, trials):
-                continue
-            if not collector.connector.match(trial.get_attrs()):
-                continue
-            if collector.has_node(trial.name):
-                result[trial.name] = 'collected'
-                continue
-            status = self.get_status(trial.name)
-            if status == 'finalized':
-                result[trial.name] = 'finalized'
-            elif status == 'error':
-                result[trial.name] = 'error'
-            else:
-                result[trial.name] = 'not_collected'
-        return result
-
-
     def _all_stores(self):
         """Flatten every store (both Stage and Head, all folds) into one list."""
         return [
             store
             for outer_fold in self.outer_folds
-            for store in outer_fold.train_data_flows + outer_fold.artifact_stores
+            for store in outer_fold.train_data_flows
         ]
 
     def get_status(self, node_name):
         """Return the disk status of a node across all folds.
 
-        Checks both Stage (``train_data_flows``) and Head (``artifact_stores``)
-        storage — a node only ever has a real status in the store type that
-        matches its role, so ``None`` entries from the other store type are
-        ignored. Returns the common status if all folds agree, or
-        ``'inconsistent'`` if they differ.
+        One :class:`NodeStore` per fold now covers both Stages and Trials —
+        they always shared the directory. Returns the common status if all
+        folds agree, or ``'inconsistent'`` if they differ.
 
         Returns:
             ``'built'``, ``'finalized'``, ``'error'``, ``None`` (init),
@@ -423,7 +370,7 @@ class Experimenter():
                 continue
             finalized_list.append(i)
             for outer_fold in self.outer_folds:
-                for store in outer_fold.artifact_stores:
+                for store in outer_fold.train_data_flows:
                     if store.status(i) == 'built':
                         store.finalize(i)
         return finalized_list
@@ -454,14 +401,11 @@ class Experimenter():
         if self.status != "open":
             raise RuntimeError("")
         for outer_fold in self.outer_folds:
-            for train_flow, artifact_store in zip(outer_fold.train_data_flows, outer_fold.artifact_stores):
-                # train_flow and artifact_store share the same on-disk directory
-                names = train_flow.list_nodes()
-                for store in (train_flow, artifact_store):
-                    for name in names:
-                        if store.status(name) == 'built':
-                            finalized_list.append(name)
-                            store.finalize(name)
+            for store in outer_fold.train_data_flows:
+                for name in store.list_nodes():
+                    if store.status(name) == 'built':
+                        finalized_list.append(name)
+                        store.finalize(name)
         self.set_status("closed")
         return finalized_list
 
@@ -485,8 +429,7 @@ class Experimenter():
     def reset_nodes(self, nodes):
         """Reset nodes to ``init`` state.
 
-        Removes node objects, clears cache entries, and resets Collector and
-        Trainer data for the affected nodes.
+        Removes node objects and clears cache entries for the affected nodes.
 
         Args:
             nodes (list[str]): Node names to reset.
@@ -518,7 +461,7 @@ class Experimenter():
         """
         def stores_for_name(name):
             for outer_fold in self.outer_folds:
-                yield from outer_fold.artifact_stores
+                yield from outer_fold.train_data_flows
 
         current = {name: attrs['serial'] for name, attrs in attrs_map.items()}
         stale = find_stale_nodes(current, list(attrs_map), stores_for_name)
@@ -535,8 +478,6 @@ class Experimenter():
         """
         stores = self._all_stores()
         if nodes is None:
-            # train_data_flows and artifact_stores share their fold directory,
-            # so listing one side per fold covers every known node name.
             node_names = {
                 name
                 for outer_fold in self.outer_folds
@@ -654,7 +595,7 @@ class Experimenter():
         attrs_map = {
             t.name: {**t.get_attrs(), 'serial': t.trial_id(pipeline)}
             for t in experiment.get_trials()
-            if _name_matches(t.name, trials)
+            if name_matches(t.name, trials)
         }
         self._reset_stale_trials(attrs_map)
         target_nodes = [
@@ -697,104 +638,6 @@ class Experimenter():
         else:
             logger.info(f"Exp complete: {len(target_nodes)} trial(s)")
 
-    def collect(self, experiment, collector, trials=None, exist='skip', logger=None):
-        """Run a Collector ad-hoc over already-run Trials.
-
-        Args:
-            experiment (BaseExperiment): Source of the Trials to collect from.
-            collector (Collector): Collector instance to run.
-            trials: Trial-name filter — ``None`` (all), ``list``, or regex ``str``.
-            exist (str): ``'skip'`` (default) skips trials already collected.
-            logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
-
-        Returns:
-            Collector: The same collector after collection.
-        """
-        from ._executor import _run_collectors
-        from ._node_processor import ProgressMonitor
-        logger = resolve_logger(logger)
-
-        attrs_map = {
-            t.name: t.get_attrs() for t in experiment.get_trials()
-            if _name_matches(t.name, trials)
-        }
-        target_nodes = [
-            name for name, attrs in attrs_map.items()
-            if not (exist == 'skip' and collector.has(name))
-            and self.get_status(name) == 'built'
-            and collector.connector.match(attrs)
-        ]
-
-        if not target_nodes:
-            return collector
-
-        collector.on_attach(self)
-        collector._setup(len(self.outer_folds), len(self.outer_folds[0].train_data_flows))
-        monitor = ProgressMonitor()
-        n_total = self.get_n_splits() * len(target_nodes)
-        try:
-            logger.create_session(0)
-            logger.create_session(1)
-            logger.start_progress(0, 'Collect', n_total)
-            n_done = 0
-            for name in target_nodes:
-                node_attrs = attrs_map[name]
-                edges = node_attrs['edges']
-                logger.start_progress(1, name)
-                for outer_idx, outer_fold in enumerate(self.outer_folds):
-                    for inner_idx, (train_flow, artifact_store) in enumerate(
-                        zip(outer_fold.train_data_flows, outer_fold.artifact_stores)
-                    ):
-                        if artifact_store.status(name) != 'built':
-                            continue
-                        obj, result, info = artifact_store.get_objs(name)
-                        train_data = train_flow.get_train(edges)
-                        valid_data = train_flow.get_valid(edges)
-                        test_data = outer_fold.get_test_data(edges)
-                        ext_data = {}
-                        if collector.get_properties().get('need_process_data', False):
-                            ext_data[collector.name] = train_flow.get_data(collector.get_ext_data(), node_attrs['edges'])
-                        _run_collectors(
-                            [collector], node_attrs, obj, result, info,
-                            train_data, valid_data, test_data, ext_data,
-                            outer_idx, inner_idx, monitor
-                        )
-                    n_done += 1
-                    logger.update_progress(0, n_done)
-                logger.end_progress(1)
-            logger.end_progress(0, n_total)
-        finally:
-            logger.remove_session(1)
-            logger.remove_session(0)
-        return collector
-
-    def collect_missing(self, experiment, collectors, collector=None, trials=None, logger=None):
-        """Run collect() only for Trials still at ``'not_collected'``.
-
-        Args:
-            experiment (BaseExperiment): Source of Trials and Collectors.
-            collector: Collector instance, its registered name, or ``None``
-                (every Collector registered on *experiment*).
-            trials: Trial-name filter passed through to
-                ``get_collect_status``/``collect``.
-            logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
-
-        Returns:
-            dict: ``{collector_name: [trial_names targeted]}``
-        """
-        targets = (
-            collectors.resolve(experiment.collector_names) if collector is None
-            else [collectors.resolve([collector])[0] if isinstance(collector, str) else collector]
-        )
-        result = {}
-        for c in targets:
-            status = self.get_collect_status(experiment, collectors, c, trials)
-            missing = [n for n, s in status.items() if s == 'not_collected']
-            if missing:
-                self.collect(experiment, c, trials=missing, exist='skip', logger=logger)
-            result[c.name] = missing
-        return result
-
     def get_train_data(self, edges, o_idx=0, i_idx=0):
         return self.outer_folds[o_idx].train_data_flows[i_idx].get_train(edges)
 
@@ -831,11 +674,7 @@ class Experimenter():
         return "\n".join(lines)
 
     def get_objs(self, node_name, outer_idx = 0, inner_idx = 0):
-        fold = self.outer_folds[outer_idx]
-        artifact_store = fold.artifact_stores[inner_idx]
-        if artifact_store.status(node_name) is not None:
-            return artifact_store.get_objs(node_name)
-        return fold.train_data_flows[inner_idx].get_objs(node_name)
+        return self.outer_folds[outer_idx].train_data_flows[inner_idx].get_objs(node_name)
 
     def get_worker_logs(self, worker=None):
         """Native (OS-level stdout/stderr) output captured while OS log
@@ -879,7 +718,6 @@ class Experimenter():
             'title': self.title,
             'cache_maxsize': self.cache_maxsize,
             'exp_id': self.exp_id,
-            'tags': self.tags,
             'status': self.status,
         })
         self._save_splitters()
@@ -936,7 +774,6 @@ class Experimenter():
             _save=False
         )
         exp.exp_id = meta['exp_id']
-        exp.tags = meta.get('tags', [])
         exp.status = meta['status']
 
         pipeline_path = filepath / 'pipeline.pkl'

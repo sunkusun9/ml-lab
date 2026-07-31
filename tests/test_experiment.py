@@ -154,9 +154,14 @@ class TestSimpleExperimentValidation:
 
 class TestTrialIdentity:
     def test_get_attrs_shape_matches_node_attrs(self, pipeline, simple):
+        """A Trial must look like a node to Connector/executor/Collector.
+
+        It carries ``tag`` (selection lives on the Experiment side now) and no
+        ``serial`` — its identity is ``trial_id(pipeline)`` instead.
+        """
         trial_attrs = simple.get_next_trial().get_attrs()
         node_attrs = pipeline.build().get_node_attrs('scaler')
-        assert set(trial_attrs) == set(node_attrs) - {'serial'}
+        assert set(trial_attrs) - {'tag'} == set(node_attrs) - {'serial'}
 
     def test_role_is_head(self, simple):
         assert simple.get_next_trial().get_attrs()['role'] == 'head'

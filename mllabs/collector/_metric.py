@@ -134,9 +134,6 @@ class MetricCollector(Collector):
             ).fetchone()
         return row is not None
 
-    def has(self, node):
-        return self.has_node(node)
-
     def reset_nodes(self, nodes):
         super().reset_nodes(nodes)
         if self.path is not None and self._db_path.exists():

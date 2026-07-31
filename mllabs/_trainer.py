@@ -8,7 +8,7 @@ from ._flow import TrainDataFlow
 from ._store import NodeStore
 from ._edge_dsl import parse, eval_expr, referenced_nodes
 from ._logger import resolve_logger
-from ._run_common import resolve_common_status, find_stale_nodes, require_built_pipeline
+from ._run_common import resolve_common_status, find_stale_nodes, require_built_pipeline, name_matches
 
 
 class TrainFold:
@@ -33,7 +33,6 @@ class TrainFold:
                 inner_idx=0,
             )
         ]
-        self.artifact_stores = [NodeStore(path=fold_path)]
 
     def set_data(self, data, cache=None, aug_data=None):
         self.train_data_flows[0].data_source.set_data(data, aug_data)
@@ -48,14 +47,11 @@ class Trainer:
     """Runs cross-validation training on a subset of Pipeline nodes.
 
     Uses ``self.pipeline`` — set via the constructor or :meth:`set_pipeline`.
-    Selected nodes (Head nodes whose ``tag`` intersects ``self.tags``, all
-    heads if ``tags`` is empty, plus their upstream Stage dependencies) are
-    recomputed whenever the pipeline is set.
+    Trains the Trials supplied via :meth:`set_experiment` plus the Stages they
+    depend on; the Stage selection is recomputed whenever either is set.
 
     Attributes:
         name (str): Trainer name.
-        tags (list[str]): Restricts training to Head nodes whose ``tag``
-            intersects it (all heads if empty).
         pipeline (Pipeline): Pipeline set via the constructor or
             :meth:`set_pipeline`, persisted to ``{path}/pipeline.pkl``.
         selected_stages (list[str]): Stage nodes included in training.
@@ -63,14 +59,13 @@ class Trainer:
         train_folds (list[TrainFold]): Per-split data flows and artifact stores.
     """
 
-    def __init__(self, name, data, path, splitter, splitter_params, cache, tags=None, aug_data=None, pipeline=None):
+    def __init__(self, name, data, path, splitter, splitter_params, cache, aug_data=None, pipeline=None):
         self.name = name
         self.data = data
         self.path = Path(path)
         self.splitter = splitter
         self.splitter_params = splitter_params
         self.cache = cache
-        self.tags = list(tags) if tags is not None else []
         self.aug_data = wrap(aug_data) if aug_data is not None else None
 
         self.selected_stages = []
@@ -148,8 +143,7 @@ class Trainer:
             experiment (BaseExperiment): Source of Trials.
             trials: Trial-name filter — ``None`` (all), ``list``, or regex ``str``.
         """
-        from ._experimenter import _name_matches
-        self.trials = [t for t in experiment.get_trials() if _name_matches(t.name, trials)]
+        self.trials = [t for t in experiment.get_trials() if name_matches(t.name, trials)]
         self._recompute_selection()
         self._reset_stale(self.selected_stages + self.trial_names())
         self.save()
@@ -192,7 +186,7 @@ class Trainer:
         current.update({n: a['serial'] for n, a in self.trial_attrs().items()})
         stale = find_stale_nodes(
             current, [n for n in names if n in current],
-            lambda name: (fold.artifact_stores[0] for fold in self.train_folds)
+            lambda name: (fold.train_data_flows[0] for fold in self.train_folds)
         )
         if stale:
             self.reset_nodes(stale)
@@ -226,14 +220,14 @@ class Trainer:
         or ``'inconsistent'`` if folds differ.
         """
         return resolve_common_status(
-            fold.artifact_stores[0].status(node_name)
+            fold.train_data_flows[0].status(node_name)
             for fold in self.train_folds
         )
 
     def get_node_error(self, node_name):
         """Return error dict for a node in error state, or None."""
         for fold in self.train_folds:
-            info = fold.artifact_stores[0].get_info(node_name)
+            info = fold.train_data_flows[0].get_info(node_name)
             if info is not None and info.get('status') == 'error':
                 return info.get('error')
         return None
@@ -243,19 +237,29 @@ class Trainer:
         selected_set = set(self.selected_stages + self.trial_names())
         affected = set(n for n in nodes if n in selected_set)
 
-        queue = list(affected)
+        # Only Stages have downstream nodes to cascade into; a Trial is a leaf
+        # and is not part of the pipeline graph at all.
+        queue = [n for n in affected if n in pipeline.nodes]
         while queue:
             n = queue.pop(0)
-            node = pipeline.get_node(n)
-            for downstream in node.output_edges:
+            for downstream in pipeline.nodes[n].output_edges:
                 if downstream in selected_set and downstream not in affected:
                     affected.add(downstream)
-                    queue.append(downstream)
+                    if downstream in pipeline.nodes:
+                        queue.append(downstream)
+
+        # A Trial reading a reset Stage must be retrained too.
+        stage_reset = affected & set(self.selected_stages)
+        if stage_reset:
+            for trial in self.trials:
+                if trial.name in affected:
+                    continue
+                if set(trial.upstream_serials(pipeline)) & stage_reset:
+                    affected.add(trial.name)
 
         for name in affected:
             for fold in self.train_folds:
                 fold.train_data_flows[0].reset_node(name)
-                fold.artifact_stores[0].reset_node(name)
 
         if self.cache is not None:
             self.cache.clear_nodes(affected)
@@ -269,7 +273,7 @@ class Trainer:
     def _reset_serial_stale_nodes(self, current_serials, logger):
         stale = find_stale_nodes(
             current_serials, list(current_serials),
-            lambda name: (fold.artifact_stores[0] for fold in self.train_folds)
+            lambda name: (fold.train_data_flows[0] for fold in self.train_folds)
         )
         if stale:
             self.reset_nodes(stale)
@@ -378,7 +382,11 @@ class Trainer:
             head_outputs = []
             for name in self.trial_names():
                 if name not in flow.node_objs:
-                    continue
+                    # Trial models are not loaded with the flow (they are leaves
+                    # and would only bloat it) — pull this one in on demand.
+                    if flow.status(name) != 'built':
+                        continue
+                    flow.load_objs(name)
                 output = flow._resolve(data, name)
                 if output is None:
                     continue
@@ -424,7 +432,7 @@ class Trainer:
         for name in all_selected:
             objs = []
             for fold in self.train_folds:
-                objs.append(fold.artifact_stores[0].get_obj(name))
+                objs.append(fold.train_data_flows[0].get_obj(name))
             node_objs[name] = objs
 
         node_attrs = {n: pipeline.get_node_attrs(n) for n in self.selected_stages}
@@ -452,7 +460,6 @@ class Trainer:
             'name': self.name,
             'splitter': self.splitter,
             'splitter_params': self.splitter_params,
-            'tags': self.tags,
             'split_indices': split_indices,
         }
         with open(self.path / '__trainer.pkl', 'wb') as f:
@@ -471,7 +478,6 @@ class Trainer:
         trainer.splitter = save_data['splitter']
         trainer.splitter_params = save_data['splitter_params']
         trainer.cache = cache
-        trainer.tags = save_data.get('tags', [])
         trainer.aug_data = wrap(aug_data) if aug_data is not None else None
         trainer.pipeline = None
         trainer.selected_stages = []

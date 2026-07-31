@@ -60,9 +60,6 @@ class ModelAttrCollector(Collector):
             return False
         return (self.path / f'{node}.pkl').exists()
 
-    def has(self, node):
-        return self.has_node(node)
-
     def reset_nodes(self, nodes):
         super().reset_nodes(nodes)
         for node in nodes:

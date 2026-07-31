@@ -144,7 +144,7 @@ class TestMetricCollector:
     def test_collect_basic(self, built_exp):
         mc = built_exp.e.set_collector('acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
         built_exp.e.collect(mc)
-        assert mc.has('dt')
+        assert mc.has_node('dt')
 
     def test_get_metric(self, built_exp):
         mc = built_exp.e.set_collector('acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
@@ -223,21 +223,21 @@ class TestMetricCollector:
     def test_connector_filter(self, multi_head_exp):
         mc = multi_head_exp.e.set_collector('acc', MetricCollector, Connector(node_query=['dt1']), params={'output_var': None, 'metric_func': accuracy_metric})
         multi_head_exp.e.collect(mc)
-        assert mc.has('dt1')
-        assert not mc.has('dt2')
+        assert mc.has_node('dt1')
+        assert not mc.has_node('dt2')
 
     def test_reset_nodes(self, built_exp):
         mc = built_exp.e.set_collector('acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
         built_exp.e.collect(mc)
-        assert mc.has('dt')
+        assert mc.has_node('dt')
         mc.reset_nodes(['dt'])
-        assert not mc.has('dt')
+        assert not mc.has_node('dt')
 
     def test_save_load(self, built_exp):
         mc = built_exp.e.set_collector('acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
         built_exp.e.collect(mc)
         loaded = MetricCollector.load(mc.path)
-        assert loaded.has('dt')
+        assert loaded.has_node('dt')
         result_orig = mc.get_metric('dt')
         result_loaded = loaded.get_metric('dt')
         pd.testing.assert_series_equal(result_orig, result_loaded)
@@ -247,7 +247,7 @@ class TestMetricCollector:
         built_exp.e.collect(mc)
         mc2 = built_exp.e.set_collector('acc2', MetricCollector, Connector(), params={'output_var': None, 'metric_func': dummy_metric})
         built_exp.e.collect(mc2)
-        assert mc2.has('dt')
+        assert mc2.has_node('dt')
         result = mc2.get_metric('dt')
         assert all(v == 0.5 for v in result.values)
 
@@ -354,7 +354,7 @@ class TestModelAttrCollector:
         from mllabs.adapter import DecisionTreeAdapter
         mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
-        assert mac.has('dt')
+        assert mac.has_node('dt')
 
     def test_get_attr(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
@@ -412,14 +412,14 @@ class TestModelAttrCollector:
         mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
         mac.reset_nodes(['dt'])
-        assert not mac.has('dt')
+        assert not mac.has_node('dt')
 
     def test_save_load(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
         mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
         loaded = ModelAttrCollector.load(mac.path)
-        assert loaded.has('dt')
+        assert loaded.has_node('dt')
 
     def test_auto_adapter(self):
         mac = ModelAttrCollector('fi', Connector(processor='sklearn.tree.DecisionTreeClassifier'),
@@ -524,7 +524,7 @@ class TestCollectorWithExperimenter:
         loaded = Experimenter.load(path, sample_data)
         assert loaded.get_collector('acc') is not None
         loaded_mc = loaded.get_collector('acc')
-        assert loaded_mc.has('dt')
+        assert loaded_mc.has_node('dt')
         result_orig = mc.get_metric('dt')
         result_loaded = loaded_mc.get_metric('dt')
         pd.testing.assert_series_equal(result_orig, result_loaded)
@@ -532,9 +532,9 @@ class TestCollectorWithExperimenter:
     def test_reset_nodes_clears_collectors(self, built_exp):
         mc = built_exp.e.set_collector('acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
         built_exp.e.collect(mc)
-        assert mc.has('dt')
+        assert mc.has_node('dt')
         built_exp.e.reset_nodes(['dt'])
-        assert not mc.has('dt')
+        assert not mc.has_node('dt')
 
     def test_multiple_collectors(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
@@ -544,9 +544,9 @@ class TestCollectorWithExperimenter:
         built_exp.e.collect(oc)
         mac = built_exp.e.set_collector('fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'), params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         built_exp.e.collect(mac)
-        assert mc.has('dt')
+        assert mc.has_node('dt')
         assert oc.has_node('dt')
-        assert mac.has('dt')
+        assert mac.has_node('dt')
 
 
 class TestSHAPCollector:
@@ -690,7 +690,7 @@ class TestCollectorErrorHandling:
         bc = pre_exp.e.set_collector('broken', self._make_broken_collector(), Connector())
         mc = pre_exp.e.set_collector('acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
         pre_exp.e.exp()
-        assert mc.has('dt')
+        assert mc.has_node('dt')
         assert len(bc.warnings) > 0
 
 class TestProcessCollector:

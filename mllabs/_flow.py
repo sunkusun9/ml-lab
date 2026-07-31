@@ -37,13 +37,25 @@ class DataFlow(NodeStore):
         return obj, result, info
 
     def load(self):
+        """Load the Stage processors stored under ``path``.
+
+        Trial artifacts live in the same fold directory but are deliberately
+        skipped: a Trial is a leaf, so its fitted model is never needed to move
+        data through the Stage graph, and loading them here would pull every
+        trained model into memory just to construct the flow. Artifacts written
+        before ``role`` was recorded are treated as Stages.
+        """
         if not self.path.is_dir():
             return
         for node_dir in sorted(self.path.iterdir()):
             if not node_dir.is_dir():
                 continue
-            if (node_dir / 'obj.pkl').exists():
-                self.load_objs(node_dir.name)
+            if not (node_dir / 'obj.pkl').exists():
+                continue
+            info = self.get_info(node_dir.name)
+            if info is not None and info.get('role') == 'head':
+                continue
+            self.load_objs(node_dir.name)
 
     def get_data(self, source_data, edges):
         """Transform source_data through stage nodes per edges.

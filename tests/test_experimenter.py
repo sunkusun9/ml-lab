@@ -87,7 +87,7 @@ def _flow(exp, outer=0, inner=0):
     return exp.outer_folds[outer].train_data_flows[inner]
 
 def _store(exp, outer=0, inner=0):
-    return exp.outer_folds[outer].artifact_stores[inner]
+    return exp.outer_folds[outer].train_data_flows[inner]
 
 
 class TestDataCache:
@@ -269,7 +269,7 @@ class TestExp:
             params={'output_var': None, 'metric_func': accuracy_metric},
         )
         exp.exp()
-        assert mc.has('dt')
+        assert mc.has_node('dt')
 
     def test_set_collector_resolves_callable_metric(self, exp, pipeline):
         from sklearn.metrics import balanced_accuracy_score
@@ -282,7 +282,7 @@ class TestExp:
         )
         assert mc.metric_func is balanced_accuracy_score
         exp.exp()
-        assert mc.has('dt')
+        assert mc.has_node('dt')
 
 
 class TestCollectorManagement:
@@ -393,20 +393,20 @@ class TestRebuild:
         _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
-        old_build_id = exp.outer_folds[0].artifact_stores[0].get_info('dt')['build_id']
+        old_build_id = exp.outer_folds[0].train_data_flows[0].get_info('dt')['build_id']
         pipeline._bump_serials(['dt'])
         _publish(pipeline, exp)
         exp.exp()
-        new_build_id = exp.outer_folds[0].artifact_stores[0].get_info('dt')['build_id']
+        new_build_id = exp.outer_folds[0].train_data_flows[0].get_info('dt')['build_id']
         assert new_build_id != old_build_id
 
     def test_exp_skips_when_serial_matches_head(self, exp, pipeline):
         _setup_full(pipeline, exp)
         exp.build()
         exp.exp()
-        build_id = exp.outer_folds[0].artifact_stores[0].get_info('dt')['build_id']
+        build_id = exp.outer_folds[0].train_data_flows[0].get_info('dt')['build_id']
         exp.exp()  # serial unchanged, already built — should skip
-        assert exp.outer_folds[0].artifact_stores[0].get_info('dt')['build_id'] == build_id
+        assert exp.outer_folds[0].train_data_flows[0].get_info('dt')['build_id'] == build_id
 
 
 class TestStateManagement:
@@ -446,14 +446,14 @@ class TestStateManagement:
         mc = exp.set_collector('acc', MetricCollector, Connector(edges={'y': '{target}'}),
                                params={'output_var': None, 'metric_func': accuracy_metric})
         exp.exp()
-        assert mc.has('dt')
+        assert mc.has_node('dt')
         first_result = mc.get_metrics_agg(None)[0]
 
         exp.close_exp()
         exp.reopen_exp()
         exp.exp()
 
-        assert mc.has('dt')
+        assert mc.has_node('dt')
         second_result = mc.get_metrics_agg(None)[0]
         assert second_result.shape == first_result.shape
 
@@ -494,7 +494,7 @@ class TestStateManagement:
         loaded.exp()
 
         mc2 = loaded.get_collector('acc')
-        assert mc2.has('dt')
+        assert mc2.has_node('dt')
         second_result = mc2.get_metrics_agg(None)[0]
         assert second_result.shape == first_result.shape
 
@@ -583,7 +583,7 @@ class TestSaveLoad:
     def test_meta_table_holds_only_simple_values(self, exp):
         meta = exp._store.fetch_meta()
         assert meta['status'] == 'open'
-        assert 'exp_id' in meta and 'tags' in meta
+        assert 'exp_id' in meta and 'status' in meta
         assert 'sp' not in meta and 'splitter_params' not in meta
 
     def test_load_restores_collector_via_ref(self, exp, pipeline, sample_data):
@@ -596,7 +596,7 @@ class TestSaveLoad:
         loaded = Experimenter.load(exp.path, sample_data)
         restored = loaded.get_collector('acc')
         assert type(restored) is MetricCollector
-        assert restored.has('dt')
+        assert restored.has_node('dt')
 
     def test_collectors_table_stores_class_ref(self, exp, pipeline):
         exp.set_collector('acc', MetricCollector, Connector(),

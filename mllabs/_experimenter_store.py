@@ -5,7 +5,7 @@ Python values (meta) and Collector instances; it does not know column names
 or table structure.
 
 - ``meta``: key → JSON-serialized value. Holds only simple, ref-serializable
-  values (data_key, title, cache_maxsize, exp_id, tags, status). Arbitrary
+  values (data_key, title, cache_maxsize, exp_id, status). Arbitrary
   runtime objects (splitters, splitter_params) stay in ``__splitters.pkl``.
 - ``collectors``: name → ``module.QualName`` class reference, so restoration
   needs no hardcoded type map.

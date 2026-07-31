@@ -203,35 +203,6 @@ class TestSetNode:
         p.set_node('n1', grp='g1', params={'b': 2})
         assert p.nodes['n1'].params == {'b': 2}
 
-    def test_tag_default_empty(self, p):
-        p.set_grp('g1', processor=DummyStage, method='transform',
-                  edges={'X': '{x1}'})
-        p.set_node('n1', grp='g1')
-        assert p.nodes['n1'].tag == []
-
-    def test_tag_set_on_creation(self, p):
-        p.set_grp('g1', processor=DummyStage, method='transform',
-                  edges={'X': '{x1}'})
-        p.set_node('n1', grp='g1', tag=['cv', 'holdout'])
-        assert p.nodes['n1'].tag == ['cv', 'holdout']
-
-    def test_tag_change_alone_no_serial_bump(self, p):
-        p.set_grp('g1', processor=DummyStage, method='transform',
-                  edges={'X': '{x1}'})
-        p.set_node('n1', grp='g1')
-        serial_before = p.nodes['n1'].serial
-        r = p.set_node('n1', grp='g1', tag=['new_tag'])
-        assert r['result'] == 'skip'
-        assert p.nodes['n1'].serial == serial_before
-
-    def test_tag_updated_in_diff_skip_path(self, p):
-        p.set_grp('g1', processor=DummyStage, method='transform',
-                  edges={'X': '{x1}'})
-        p.set_node('n1', grp='g1', tag=['old'])
-        p.set_node('n1', grp='g1', tag=['new'])
-        assert p.nodes['n1'].tag == ['new']
-
-
 class TestProcessorStringRef:
     """processor is always passed/stored as a "module.ClassName" string —
     PipelineBuilder never resolves it (see resolve_processor in _node_processor.py,
@@ -476,71 +447,6 @@ class TestParamsRefDict:
         assert params['criterion'] == 'gini'
 
 
-class TestAddRemoveTag:
-    def test_add_tag_basic(self, sp):
-        sp.add_tag('h1', 'cv')
-        assert 'cv' in sp.nodes['h1'].tag
-
-    def test_add_multiple_tags(self, sp):
-        sp.add_tag('h1', 'cv', 'holdout')
-        assert sp.nodes['h1'].tag == ['cv', 'holdout']
-
-    def test_add_tag_no_duplicate(self, sp):
-        sp.add_tag('h1', 'cv')
-        sp.add_tag('h1', 'cv')
-        assert sp.nodes['h1'].tag.count('cv') == 1
-
-    def test_add_tag_no_serial_bump(self, sp):
-        serial_before = sp.nodes['h1'].serial
-        sp.add_tag('h1', 'cv')
-        assert sp.nodes['h1'].serial == serial_before
-
-    def test_add_tag_invalidates_attrs_cache(self, sp):
-        sp.nodes['h1'].get_attrs(sp.grps)
-        sp.add_tag('h1', 'cv')
-        assert sp.nodes['h1'].attrs is None
-
-    def test_add_tag_node_not_found(self, sp):
-        with pytest.raises(ValueError):
-            sp.add_tag('no_exist', 'cv')
-
-    def test_remove_tag_basic(self, sp):
-        sp.add_tag('h1', 'cv', 'holdout')
-        sp.remove_tag('h1', 'cv')
-        assert 'cv' not in sp.nodes['h1'].tag
-        assert 'holdout' in sp.nodes['h1'].tag
-
-    def test_remove_multiple_tags(self, sp):
-        sp.add_tag('h1', 'cv', 'holdout')
-        sp.remove_tag('h1', 'cv', 'holdout')
-        assert sp.nodes['h1'].tag == []
-
-    def test_remove_tag_nonexistent_ignored(self, sp):
-        sp.remove_tag('h1', 'no_such_tag')
-        assert sp.nodes['h1'].tag == []
-
-    def test_remove_tag_no_serial_bump(self, sp):
-        sp.add_tag('h1', 'cv')
-        serial_before = sp.nodes['h1'].serial
-        sp.remove_tag('h1', 'cv')
-        assert sp.nodes['h1'].serial == serial_before
-
-    def test_remove_tag_node_not_found(self, sp):
-        with pytest.raises(ValueError):
-            sp.remove_tag('no_exist', 'cv')
-
-    def test_add_remove_tag_persists(self, tmp_path):
-        from sklearn.preprocessing import StandardScaler
-        p = PipelineBuilder(path=tmp_path, name='test')
-        p.set_grp('g1', processor='sklearn.preprocessing.StandardScaler', method='transform',
-                  edges={'X': '{x1}'})
-        p.set_node('n1', grp='g1')
-        p.add_tag('n1', 'cv', 'holdout')
-        p.remove_tag('n1', 'holdout')
-        p2 = PipelineBuilder(path=tmp_path, name='test')
-        assert p2.nodes['n1'].tag == ['cv']
-
-
 class TestGroupHierarchy:
     def test_edges_full_override_by_default(self, p):
         p.set_grp('parent', edges={'X': '{a}'})
@@ -710,22 +616,6 @@ class TestNodeAttrs:
         p._bump_serials(['n1'])
         new_serial = p.get_node_attrs('n1')['serial']
         assert new_serial != old_serial
-
-    def test_attrs_includes_tag(self, p):
-        p.set_grp('g1', processor=DummyStage, method='transform',
-                  edges={'X': '{x1}'})
-        p.set_node('n1', grp='g1', tag=['cv'])
-        attrs = p.get_node_attrs('n1')
-        assert attrs['tag'] == ['cv']
-
-    def test_attrs_tag_is_copy(self, p):
-        p.set_grp('g1', processor=DummyStage, method='transform',
-                  edges={'X': '{x1}'})
-        p.set_node('n1', grp='g1', tag=['cv'])
-        attrs = p.get_node_attrs('n1')
-        attrs['tag'].append('mutated')
-        assert p.nodes['n1'].tag == ['cv']
-
 
 class TestNameValidation:
     @pytest.mark.parametrize('name', [
@@ -1649,24 +1539,6 @@ class TestPipelineSQLite:
         p2 = PipelineBuilder(path=tmp_path, name='test')
         assert p2.grps['g1'].params == {'with_std': False}
 
-    def test_node_tag_persists(self, tmp_path):
-        from sklearn.preprocessing import StandardScaler
-        p = PipelineBuilder(path=tmp_path, name='test')
-        p.set_grp('g1', processor='sklearn.preprocessing.StandardScaler', method='transform',
-                  edges={'X': '{x1}'})
-        p.set_node('n1', grp='g1', tag=['cv', 'holdout'])
-        p2 = PipelineBuilder(path=tmp_path, name='test')
-        assert p2.nodes['n1'].tag == ['cv', 'holdout']
-
-    def test_node_tag_default_empty_persists(self, tmp_path):
-        from sklearn.preprocessing import StandardScaler
-        p = PipelineBuilder(path=tmp_path, name='test')
-        p.set_grp('g1', processor='sklearn.preprocessing.StandardScaler', method='transform',
-                  edges={'X': '{x1}'})
-        p.set_node('n1', grp='g1')
-        p2 = PipelineBuilder(path=tmp_path, name='test')
-        assert p2.nodes['n1'].tag == []
-
     def test_set_grp_update_serial_persists(self, tmp_path):
         from sklearn.preprocessing import StandardScaler
         p = PipelineBuilder(path=tmp_path, name='test')
@@ -1831,93 +1703,6 @@ class TestPipelineSync:
         p.sync()
         assert 'n2' in p.grps['g1'].nodes
 
-    def test_sync_node_added_with_tag(self, tmp_path):
-        from sklearn.preprocessing import StandardScaler
-        p = self._make(tmp_path)
-        p2 = PipelineBuilder(path=tmp_path, name='test')
-        p2.set_node('n2', grp='g1', tag=['cv'])
-        p.sync()
-        assert p.nodes['n2'].tag == ['cv']
-
-    def test_sync_node_updated_tag_applied(self, tmp_path):
-        from sklearn.preprocessing import StandardScaler
-        p = self._make(tmp_path)
-        p2 = PipelineBuilder(path=tmp_path, name='test')
-        p2.set_grp('g1', processor='sklearn.preprocessing.StandardScaler', method='transform',
-                   edges={'X': '{x1}'}, params={'with_std': False}, exist='replace')
-        p2.nodes['n1'].tag = ['cv']
-        p2._db_write(lambda conn: conn.execute(
-            "UPDATE nodes SET tag = ? WHERE name = ?", ('["cv"]', 'n1')
-        ))
-        p.sync()
-        assert p.nodes['n1'].tag == ['cv']
-
-
-class TestExperimenterTags:
-    @pytest.fixture
-    def sample_data(self):
-        import numpy as np
-        np.random.seed(0)
-        n = 60
-        return pd.DataFrame({
-            'f1': np.random.randn(n),
-            'f2': np.random.randn(n),
-            'target': np.random.randint(0, 2, n),
-        })
-
-    @pytest.fixture
-    def pipeline(self, tmp_path):
-        from sklearn.tree import DecisionTreeClassifier
-        p = PipelineBuilder(path=tmp_path / 'pipeline')
-        p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
-                  method='predict',
-                  edges={'X': '{f1, f2}', 'y': '{target}'},
-                  params={'max_depth': 3, 'random_state': 0})
-        p.set_node('dt', grp='model', tag=['cv', 'final'])
-        p.set_node('dt2', grp='model', tag=['final'])
-        return p
-
-    def _make_exp(self, sample_data, tmp_path, pipeline, tags=None):
-        from mllabs._experimenter import Experimenter
-        return Experimenter(data=sample_data, path=tmp_path / 'exp1', tags=tags, pipeline=pipeline.build())
-
-class TestTrainerTags:
-    @pytest.fixture
-    def sample_data(self):
-        import numpy as np
-        np.random.seed(0)
-        n = 60
-        return pd.DataFrame({
-            'f1': np.random.randn(n),
-            'f2': np.random.randn(n),
-            'target': np.random.randint(0, 2, n),
-        })
-
-    @pytest.fixture
-    def pipeline(self, tmp_path):
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.tree import DecisionTreeClassifier
-        p = PipelineBuilder(path=tmp_path / 'pipeline')
-        p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
-                  method='transform', edges={'X': '{f1, f2}'})
-        p.set_node('scaler', grp='scale')
-        p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
-                  method='predict',
-                  edges={'X': 'scaler:(*)', 'y': '{target}'},
-                  params={'max_depth': 3, 'random_state': 0})
-        p.set_node('dt', grp='model', tag=['cv', 'final'])
-        p.set_node('dt2', grp='model', tag=['final'])
-        return p
-
-    def _make_trainer(self, sample_data, tmp_path, tags=None, name='t1'):
-        from sklearn.model_selection import KFold
-        from mllabs._trainer import Trainer
-        from mllabs._cache import DataCache
-        from mllabs._data_wrapper import wrap
-        return Trainer(name=name, data=wrap(sample_data),
-                       path=tmp_path / name, splitter=KFold(n_splits=3),
-                       splitter_params={}, cache=DataCache(), tags=tags)
-
 class TestBuild:
     """PipelineBuilder.build() -> immutable Pipeline structure."""
 
@@ -1951,7 +1736,7 @@ class TestBuild:
         built = sp.build().get_node_attrs('h1')
         from_builder = sp.get_node_attrs('h1')
         for key in ('name', 'role', 'edges', 'processor', 'adapter', 'params',
-                    'method', 'serial', 'tag'):
+                    'method', 'serial'):
             assert built[key] == from_builder[key]
 
     def test_serial_is_carried_over(self, sp):
@@ -1967,13 +1752,6 @@ class TestBuild:
     def test_datasource_is_none_key(self, sp):
         built = sp.build()
         assert built.nodes[None] is built.datasource
-
-    def test_tag_is_copied(self, sp):
-        sp.add_tag('h1', 'final')
-        built = sp.build()
-        sp.add_tag('h1', 'extra')
-        assert built.nodes['h1'].tag == ['final']
-
 
 class TestBuildIsolation:
     """A built Pipeline is a snapshot — later builder edits must not reach it."""

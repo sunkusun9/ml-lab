@@ -338,7 +338,7 @@ class _PipelineNode:
     """
 
     def __init__(
-        self, name, grp, processor=None, edges=None, method=None, adapter=None, params=None, desc=None, tag=None
+        self, name, grp, processor=None, edges=None, method=None, adapter=None, params=None, desc=None
     ):
         self.name = name
         self.grp = grp  # group name (str)
@@ -348,7 +348,6 @@ class _PipelineNode:
         self.adapter = adapter
         self.params = params if params is not None else {}
         self.desc = desc
-        self.tag = tag if tag is not None else []
         self.serial = str(uuid.uuid4())
 
         self.output_edges = []  # 이 노드를 입력으로 사용하는 노드들의 이름
@@ -357,7 +356,7 @@ class _PipelineNode:
     def copy(self):
         ret = _PipelineNode(
             self.name, self.grp, self.processor, self.edges.copy(),
-            self.method, self.adapter, self.params.copy(), self.desc, list(self.tag)
+            self.method, self.adapter, self.params.copy(), self.desc
         )
         ret.serial = self.serial
         ret.output_edges = self.output_edges.copy()
@@ -391,7 +390,6 @@ class _PipelineNode:
             'method': grp_attrs.get('method') if self.method is None else self.method,
             'role': 'stage',
             'serial': self.serial,
-            'tag': list(self.tag),
         }
 
         return self.attrs
@@ -464,12 +462,12 @@ class _BuiltNode:
     """
 
     __slots__ = ('name', 'label', 'processor', 'edges', 'method',
-                 'adapter', 'params', 'serial', 'tag', 'desc', 'output_edges')
+                 'adapter', 'params', 'serial', 'desc', 'output_edges')
 
     role = 'stage'
 
     def __init__(self, name, label, processor, edges, method, adapter,
-                 params, serial, tag, desc, output_edges):
+                 params, serial, desc, output_edges):
         self.name = name
         self.label = label
         self.processor = processor
@@ -478,7 +476,6 @@ class _BuiltNode:
         self.adapter = adapter
         self.params = params
         self.serial = serial
-        self.tag = tag
         self.desc = desc
         self.output_edges = output_edges
 
@@ -493,14 +490,13 @@ class _BuiltNode:
             'params': self.params,
             'method': self.method,
             'serial': self.serial,
-            'tag': self.tag,
         }
 
     def copy(self, output_edges=None):
         return _BuiltNode(
             self.name, self.label, self.processor, dict(self.edges),
             self.method, self.adapter, dict(self.params), self.serial,
-            list(self.tag), self.desc,
+            self.desc,
             list(self.output_edges if output_edges is None else output_edges),
         )
 
@@ -704,7 +700,7 @@ class PipelineBuilder:
             node = _PipelineNode(
                 name=name, grp=d['grp'], processor=d['processor'],
                 edges=d['edges'], method=d['method'], adapter=d['adapter'],
-                params=d['params'], desc=d['desc'], tag=d['tag'],
+                params=d['params'], desc=d['desc'],
             )
             node.serial = d['serial']
             self.nodes[name] = node
@@ -837,7 +833,7 @@ class PipelineBuilder:
             node = _PipelineNode(
                 name=name, grp=d['grp'], processor=d['processor'],
                 edges=d['edges'], method=d['method'], adapter=d['adapter'],
-                params=d['params'], desc=d['desc'], tag=d['tag'],
+                params=d['params'], desc=d['desc'],
             )
             node.serial = d['serial']
             self.nodes[name] = node
@@ -854,7 +850,6 @@ class PipelineBuilder:
                 node.adapter = d['adapter']
                 node.params = d['params']
                 node.desc = d['desc']
-                node.tag = d['tag']
                 node.serial = d['serial']
                 node.update_attrs()
                 changes['nodes']['updated'].append(name)
@@ -943,7 +938,6 @@ class PipelineBuilder:
                 adapter=attrs['adapter'],
                 params=dict(attrs['params']),
                 serial=attrs['serial'],
-                tag=list(attrs['tag']),
                 desc=node.desc,
                 output_edges=list(node.output_edges),
             )
@@ -1373,7 +1367,7 @@ class PipelineBuilder:
                             parent_node.output_edges.append(node_name)
 
     def set_node(
-        self, name, grp, processor=None, edges=None, method=None, adapter=None, params=None, desc=None, tag=None, exist='diff'
+        self, name, grp, processor=None, edges=None, method=None, adapter=None, params=None, desc=None, exist='diff'
     ):
         """Create or update a node.
 
@@ -1439,10 +1433,9 @@ class PipelineBuilder:
                 old_node = self.nodes[name]
                 if not old_node.diff(grp, processor, edges, method, adapter, params):
                     old_node.desc = desc
-                    old_node.tag = tag if tag is not None else []
                     self._db_write(lambda conn: conn.execute(
-                        "UPDATE nodes SET desc = ?, tag = ? WHERE name = ?",
-                        (desc, json.dumps(old_node.tag), name)
+                        "UPDATE nodes SET desc = ? WHERE name = ?",
+                        (desc, name)
                     ))
                     return {'result': 'skip', 'affected_nodes': [], 'old_obj': old_node, 'obj': old_node}
 
@@ -1455,7 +1448,7 @@ class PipelineBuilder:
             old_output_edges = old_node.output_edges
 
         node = _PipelineNode(
-            name, grp, processor, edges, method=method, adapter=adapter, params=params, desc=desc, tag=tag
+            name, grp, processor, edges, method=method, adapter=adapter, params=params, desc=desc
         )
 
         grp_obj = self.grps[grp]
@@ -1509,36 +1502,6 @@ class PipelineBuilder:
 
     def get_node(self, name):
         return self.nodes.get(name, None)
-
-    def add_tag(self, name, *tags):
-        if name not in self.nodes or name is None:
-            raise ValueError(f"Node '{name}' not found")
-        node = self.nodes[name]
-        changed = False
-        for tag in tags:
-            if tag not in node.tag:
-                node.tag.append(tag)
-                changed = True
-        if changed:
-            node.update_attrs()
-            self._db_write(lambda conn: conn.execute(
-                "UPDATE nodes SET tag = ? WHERE name = ?", (json.dumps(node.tag), name)
-            ))
-
-    def remove_tag(self, name, *tags):
-        if name not in self.nodes or name is None:
-            raise ValueError(f"Node '{name}' not found")
-        node = self.nodes[name]
-        changed = False
-        for tag in tags:
-            if tag in node.tag:
-                node.tag.remove(tag)
-                changed = True
-        if changed:
-            node.update_attrs()
-            self._db_write(lambda conn: conn.execute(
-                "UPDATE nodes SET tag = ? WHERE name = ?", (json.dumps(node.tag), name)
-            ))
 
     def get_node_attrs(self, name):
         """Return fully resolved attributes for a node (group hierarchy merged).

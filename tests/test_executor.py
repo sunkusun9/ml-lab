@@ -350,7 +350,7 @@ class TestDataPrepErrors:
         assert exp.get_status('dt') == 'built'
         assert exp.get_status('bad_dt') == 'error'
         for outer_fold in exp.outer_folds:
-            for store in outer_fold.artifact_stores:
+            for store in outer_fold.train_data_flows:
                 assert store.status('dt') == 'built'
 
 
@@ -366,7 +366,7 @@ class TestExperimentMulti:
         assert exp.get_status('dt') == 'built'
         assert exp.get_status('bad_dt') == 'error'
         for outer_fold in exp.outer_folds:
-            for store in outer_fold.artifact_stores:
+            for store in outer_fold.train_data_flows:
                 assert store.status('dt') == 'built'
 
 

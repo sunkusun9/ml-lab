@@ -14,9 +14,9 @@ from mllabs._cache import DataCache
 from mllabs._data_wrapper import unwrap, wrap
 
 
-def _make_trainer(pipeline, name, data, path, splitter=None, tags=None):
+def _make_trainer(pipeline, name, data, path, splitter=None):
     return Trainer(name=name, data=wrap(data), path=path,
-                   splitter=splitter, splitter_params={}, cache=DataCache(), tags=tags)
+                   splitter=splitter, splitter_params={}, cache=DataCache())
 
 
 @pytest.fixture
@@ -127,7 +127,7 @@ class TestProcess:
         pipeline.set_node('dt_proba', grp='model_proba', tag=['proba'])
         exp.build()
         exp.exp()
-        trainer = _make_trainer(pipeline, 't_proba', sample_data, tmp_path / 'trainer_t_proba', tags=['proba'])
+        trainer = _make_trainer(pipeline, 't_proba', sample_data, tmp_path / 'trainer_t_proba')
         trainer.set_pipeline(pipeline.build())
         trainer.train()
         inf = trainer.to_inferencer(v='-1:')

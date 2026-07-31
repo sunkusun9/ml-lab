@@ -54,9 +54,6 @@ class OutputCollector(Collector):
         p = self.path / node
         return p.is_dir() and any(p.glob('*.pkl'))
 
-    def has(self, node):
-        return self.has_node(node)
-
     def reset_nodes(self, nodes):
         super().reset_nodes(nodes)
         for node in nodes:

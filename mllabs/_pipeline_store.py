@@ -32,8 +32,7 @@ _SCHEMA_SQL = """
         adapter TEXT,
         params TEXT,
         desc TEXT,
-        serial TEXT NOT NULL,
-        tag TEXT DEFAULT '[]' NOT NULL
+        serial TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS datasource (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -112,7 +111,6 @@ class PipelineStore:
                     'params': deserialize_from_json(row['params']) or {},
                     'desc': row['desc'],
                     'serial': row['serial'],
-                    'tag': json.loads(row['tag']) if row['tag'] else [],
                 }
 
         return {'pipeline_id': pipeline_id, 'datasource': datasource, 'grps': grps, 'nodes': nodes}
@@ -143,8 +141,8 @@ class PipelineStore:
         from ._serialize import serialize_to_json
         conn.execute(
             "INSERT OR REPLACE INTO nodes "
-            "(name, grp, processor, edges, method, adapter, params, desc, serial, tag) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(name, grp, processor, edges, method, adapter, params, desc, serial) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (node.name, node.grp,
              serialize_to_json(node.processor) if node.processor is not None else None,
              serialize_to_json(node.edges),
@@ -152,8 +150,7 @@ class PipelineStore:
              serialize_to_json(node.adapter) if node.adapter is not None else None,
              serialize_to_json(node.params),
              node.desc,
-             node.serial,
-             json.dumps(node.tag))
+             node.serial)
         )
 
     def write_datasource(self, conn, ds):

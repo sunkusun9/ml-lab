@@ -25,6 +25,7 @@ def _write_prep_error(node_path, node_attrs, edges, exc):
     info = {
         'build_id': str(uuid.uuid4()),
         'node_serial': node_attrs.get('serial'),
+        'role': node_attrs.get('role'),
         'fit_time': 0.0,
         'train_shape': None,
         'edges': edges,
@@ -57,6 +58,7 @@ def _process(node_attrs, train_data, valid_data, fit_process, monitor, gpu_id_li
             info = {
                 'build_id': str(uuid.uuid4()),
                 'node_serial': node_attrs.get('serial'),
+                'role': node_attrs.get('role'),
                 'fit_time': time.time() - start_time,
                 'train_shape': None,
                 'edges': node_attrs.get('edges'),
@@ -77,6 +79,7 @@ def _process(node_attrs, train_data, valid_data, fit_process, monitor, gpu_id_li
     info = {
         'build_id': str(uuid.uuid4()),
         'node_serial': node_attrs.get('serial'),
+        'role': node_attrs.get('role'),
         'fit_time': elapsed_time,
         'train_shape': ref_data.get_shape() if ref_data is not None else None,
         'edges': node_attrs.get('edges'),
@@ -525,9 +528,8 @@ def _experiment_single(outer_folds, attrs_map, nodes,
         edges = node_attrs['edges']
 
         for outer_idx, outer_fold in enumerate(outer_folds):
-            for inner_idx, (train_flow, artifact_store) in enumerate(
-                zip(outer_fold.train_data_flows, outer_fold.artifact_stores)
-            ):
+            for inner_idx, train_flow in enumerate(outer_fold.train_data_flows):
+                artifact_store = train_flow
                 if (outer_idx, node_name) in errors:
                     continue
                 status = artifact_store.status(node_name)
@@ -634,9 +636,8 @@ def _experiment_multi(outer_folds, attrs_map, nodes, n_jobs,
     def _make_jobs():
         gpu_jobs, cpu_jobs = [], []
         for outer_idx, outer_fold in enumerate(outer_folds):
-            for inner_idx, (train_flow, artifact_store) in enumerate(
-                zip(outer_fold.train_data_flows, outer_fold.artifact_stores)
-            ):
+            for inner_idx, train_flow in enumerate(outer_fold.train_data_flows):
+                artifact_store = train_flow
                 for node_name in nodes:
                     if (outer_idx, node_name) in errors:
                         continue
@@ -651,9 +652,7 @@ def _experiment_multi(outer_folds, attrs_map, nodes, n_jobs,
 
     if tracker:
         for outer_idx, outer_fold in enumerate(outer_folds):
-            for inner_idx, (_, artifact_store) in enumerate(
-                zip(outer_fold.train_data_flows, outer_fold.artifact_stores)
-            ):
+            for inner_idx, artifact_store in enumerate(outer_fold.train_data_flows):
                 for node_name in nodes:
                     if artifact_store.status(node_name) in ('built', 'finalized'):
                         tracker.done(0, node_name, outer_idx, inner_idx, None)
