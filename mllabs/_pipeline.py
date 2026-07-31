@@ -143,6 +143,19 @@ def _validate_params(params, where):
         _validate_param_value(value, where, f"[{key!r}]")
 
 
+_DEFINITION_KEYS = ('processor', 'method', 'adapter', 'params', 'edges')
+
+
+def _definition_of(attrs):
+    """The part of a node's attrs that determines its output.
+
+    ``serial`` is excluded on purpose: it is a fresh UUID after any edit, so it
+    reports *that* something changed, never *whether* the result would differ.
+    ``label``/``tag`` are display only.
+    """
+    return {k: attrs.get(k) for k in _DEFINITION_KEYS}
+
+
 def _find_descendants(nodes, node_name):
     """Names of every node reachable downstream of *node_name*.
 
@@ -618,6 +631,44 @@ class Pipeline:
     def descendants(self, name):
         """Names of every node downstream of *name*."""
         return _find_descendants(self.nodes, name)
+
+    def diff_from(self, old):
+        """Names whose output would differ from *old* — i.e. what is now stale.
+
+        Walks this Pipeline from the DataSource downwards. A node is unchanged
+        only if it exists in *old* under the same name, its definition matches,
+        and every node it reads is itself unchanged; otherwise it is stale, and
+        so is everything downstream of it (which falls out of the walk, since
+        the walk is in topological order).
+
+        Names that existed in *old* but are gone here are reported too, so their
+        artifacts can be cleaned up rather than left orphaned.
+
+        A DataSource whose schema or targets changed makes every node stale.
+
+        Args:
+            old (Pipeline): The previously adopted Pipeline.
+
+        Returns:
+            set[str]: Node names to reset.
+        """
+        stale = set(old.nodes) - set(self.nodes) - {None}
+
+        ds_changed = (old.datasource.schema != self.datasource.schema
+                      or old.datasource.targets != self.datasource.targets)
+
+        for name in self.topo_order():
+            if ds_changed or name not in old.nodes:
+                stale.add(name)
+                continue
+            if _definition_of(old.get_node_attrs(name)) != _definition_of(self.get_node_attrs(name)):
+                stale.add(name)
+                continue
+            for dsl_string in self.nodes[name].edges.values():
+                if stale & referenced_nodes(dsl_string):
+                    stale.add(name)
+                    break
+        return stale
 
     def check_data_compatibility(self, data):
         """Verify *data* contains every column declared in the DataSource schema.

@@ -7,19 +7,19 @@ Two tables:
     of the definition itself. A natural key, not a minted one.
 
 ``experiment_hist``
-    One row per (trial name, experimenter, outer fold, inner fold) — what ran,
-    against which Pipeline, and whether it succeeded.
+    One row per (trial name, experimenter name, outer fold, inner fold) — what
+    ran, against which Pipeline, and whether it succeeded.
 
-History is keyed by trial *name* because that is what the artifact directory is
-keyed by (``__folds/{outer}/{inner}/{trial_name}/``). Keeping the two aligned
-means a hist row is readable on its own, and that redefining a name overwrites
-the row exactly as it overwrites the artifact. ``content_key`` rides along as a
-plain column, so which definition a given run used stays recoverable.
+Both parts of the key are names, matching what is on disk: a trial's artifacts
+live at ``{exp}/__folds/{outer}/{inner}/{trial_name}/`` and an Experimenter's
+at ``{project}/exp/{name}``. Keeping the keys aligned with the layout means a
+hist row is readable on its own, and that redefining a name overwrites the row
+exactly as it overwrites the artifact. ``content_key`` rides along as a plain
+column, so which definition a given run used stays recoverable.
 
-Note ``content_key`` is not ``Trial.trial_id``: that hash also folds in the
-serials of the Stages the Trial reads, so it moves when preprocessing changes
-even though the Trial did not. That is what staleness detection needs and the
-opposite of what a definition registry needs.
+``content_key`` covers the definition only. Whether an artifact is still valid
+also depends on the preprocessing it read, but that is judged per fold against
+the fold itself — it is not part of a Trial's identity here.
 """
 import json
 import sqlite3
@@ -39,16 +39,16 @@ _SCHEMA_SQL = """
     );
     CREATE TABLE IF NOT EXISTS experiment_hist (
         trial_name       TEXT NOT NULL,
-        experimenter_id  TEXT NOT NULL,
+        experimenter  TEXT NOT NULL,
         outer_idx        INTEGER NOT NULL,
         inner_idx        INTEGER NOT NULL,
         content_key      TEXT,
         pipeline_version TEXT,
         status           TEXT,
-        PRIMARY KEY (trial_name, experimenter_id, outer_idx, inner_idx)
+        PRIMARY KEY (trial_name, experimenter, outer_idx, inner_idx)
     );
     CREATE INDEX IF NOT EXISTS idx_hist_experimenter
-        ON experiment_hist (experimenter_id);
+        ON experiment_hist (experimenter);
 """
 
 
@@ -127,13 +127,13 @@ class TrialStore:
     # history
     # ------------------------------------------------------------------
 
-    def record(self, trial_name, experimenter_id, outer_idx, inner_idx,
+    def record(self, trial_name, experimenter, outer_idx, inner_idx,
                content_key=None, pipeline_version=None, status=None):
         """Upsert one fold's outcome.
 
         Args:
             trial_name (str): Trial name — also its artifact directory.
-            experimenter_id (str): The Experimenter's ``exp_id``.
+            experimenter (str): The Experimenter's name.
             outer_idx (int), inner_idx (int): Fold coordinates.
             content_key (str, optional): Which definition this name held at the
                 time, so a later redefinition stays distinguishable.
@@ -145,17 +145,17 @@ class TrialStore:
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO experiment_hist "
-                "(trial_name, experimenter_id, outer_idx, inner_idx, content_key, "
+                "(trial_name, experimenter, outer_idx, inner_idx, content_key, "
                 "pipeline_version, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (trial_name, experimenter_id, outer_idx, inner_idx, content_key,
+                (trial_name, experimenter, outer_idx, inner_idx, content_key,
                  pipeline_version, status),
             )
 
-    def get_hist(self, trial_name=None, experimenter_id=None, pipeline_version=None):
+    def get_hist(self, trial_name=None, experimenter=None, pipeline_version=None):
         """History rows matching whichever filters are given."""
         where, params = [], []
         for column, value in (('trial_name', trial_name),
-                              ('experimenter_id', experimenter_id),
+                              ('experimenter', experimenter),
                               ('pipeline_version', pipeline_version)):
             if value is not None:
                 where.append(f"{column} = ?")
@@ -163,22 +163,22 @@ class TrialStore:
         sql = "SELECT * FROM experiment_hist"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY trial_name, experimenter_id, outer_idx, inner_idx"
+        sql += " ORDER BY trial_name, experimenter, outer_idx, inner_idx"
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
-    def get_status(self, trial_name, experimenter_id):
+    def get_status(self, trial_name, experimenter):
         """``{(outer_idx, inner_idx): status}`` for one trial in one experimenter."""
         return {
             (r['outer_idx'], r['inner_idx']): r['status']
-            for r in self.get_hist(trial_name=trial_name, experimenter_id=experimenter_id)
+            for r in self.get_hist(trial_name=trial_name, experimenter=experimenter)
         }
 
-    def remove_hist(self, trial_name=None, experimenter_id=None):
+    def remove_hist(self, trial_name=None, experimenter=None):
         where, params = [], []
-        for column, value in (('trial_name', trial_name), ('experimenter_id', experimenter_id)):
+        for column, value in (('trial_name', trial_name), ('experimenter', experimenter)):
             if value is not None:
                 where.append(f"{column} = ?")
                 params.append(value)

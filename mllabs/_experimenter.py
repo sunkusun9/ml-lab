@@ -1,23 +1,17 @@
 import os
-import re
 import sys
-import uuid
 import pickle as pkl
 import traceback
-import warnings
 import contextlib
 from pathlib import Path
 
-import pandas as pd
 
 from sklearn.model_selection import ShuffleSplit
 
 from ._data_wrapper import wrap, unwrap, DataWrapperProvider
 from ._flow import TrainDataFlow
-from ._store import NodeStore
 from ._describer import desc_spec
 from ._logger import resolve_logger
-from ._cache import DataCache
 
 
 def _start_native_redirect(log_path):
@@ -69,8 +63,9 @@ def _stop_native_redirect(state):
     sys.stdout = state['orig_stdout']
     sys.stderr = state['orig_stderr']
     state['log_f'].close()
-from ._run_common import resolve_common_status, find_stale_nodes, require_built_pipeline
-from ._experimenter_store import ExperimenterStore
+from ._edge_dsl import referenced_nodes
+from ._pipeline import _definition_of
+from ._run_common import resolve_common_status, require_built_pipeline
 
 
 def _resolve_collectors(collectors):
@@ -99,7 +94,8 @@ class OuterFold:
         self.train_data_flows = [
             TrainDataFlow(
                 path=self.path / str(j),
-                data_source=DataWrapperProvider(data, train_idx, valid_idx=valid_idx, aug_data=aug_data),
+                data_source=DataWrapperProvider(data, train_idx, valid_idx=valid_idx,
+                                                test_idx=test_idx, aug_data=aug_data),
                 cache=cache,
                 outer_idx=outer_idx,
                 inner_idx=j,
@@ -129,8 +125,11 @@ class Experimenter():
     Stage builds and Head experiments fold-by-fold.
 
     Args:
+        project (Project): Owning project. Supplies the path and the Pipeline
+            versions this Experimenter runs against.
+        name (str): Experimenter name. This is its identity — the directory
+            ``{project}/exp/{name}`` and the key used in TrialStore history.
         data: Input dataset (pandas DataFrame, polars DataFrame, or numpy array).
-        path (str | Path): Directory for persisting experiment artifacts.
         data_names (list[str], optional): Column names override.
         sp: Outer splitter (sklearn splitter API). Default
             ``ShuffleSplit(n_splits=1, random_state=1)``.
@@ -140,31 +139,33 @@ class Experimenter():
         title (str, optional): Human-readable experiment title.
         data_key (str, optional): Identifier verified on :meth:`load` to prevent
             data mismatch.
-        cache_maxsize (int): Stage output cache size in bytes. Default 4 GB.
-        pipeline (Pipeline, optional): Pipeline this experimenter targets.
-            Equivalent to calling :meth:`set_pipeline` after construction.
+        pipeline_name (str): Which Pipeline in the project to run against.
+            Default ``'pipeline'``.
+        pipeline_version (int, optional): Version to adopt immediately;
+            equivalent to :meth:`set_pipeline_version` after construction.
 
     Attributes:
         cache (DataCache): Shared LRU cache.
         status (str): ``'open'`` or ``'closed'``.
-        pipeline (Pipeline): Pipeline set via the constructor or
-            :meth:`set_pipeline`, persisted to ``{path}/pipeline.pkl``.
+        pipeline (Pipeline): The loaded Pipeline. Not stored here — only the
+            ``(pipeline_name, pipeline_version)`` pointer is, so the Pipeline
+            itself lives once, under the Project.
 
     Note:
-        ``build``, ``exp``, ``collect``, and other node-graph-aware methods
-        use ``self.pipeline`` — call :meth:`set_pipeline` first (or pass
-        ``pipeline`` to the constructor).
+        ``build``, ``exp`` and other node-graph-aware methods use
+        ``self.pipeline`` — call :meth:`set_pipeline_version` first (or pass
+        ``pipeline_version`` to the constructor).
     """
 
     def __init__(
-            self, data, path, data_names = None, sp = ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
-            splitter_params=None, title=None, data_key=None, cache_maxsize=4 * 1024 ** 3,
-            aug_data=None, pipeline=None, _save=True
+            self, project, name, data, data_names = None,
+            sp = ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
+            splitter_params=None, title=None, data_key=None,
+            aug_data=None, pipeline_name='pipeline', pipeline_version=None, _save=True
         ):
-        self.cache_maxsize = cache_maxsize
-        self.path = Path(path)
-        if not os.path.exists(path):
-            self.path.mkdir(parents=True, exist_ok=True)
+        self.project = project
+        self.name = name
+        self.path = project.exp_path(name)
         data_native = data
         self.data = wrap(data)
         self.aug_data = wrap(aug_data) if aug_data is not None else None
@@ -173,7 +174,6 @@ class Experimenter():
         self.sp = sp
         self.sp_v = sp_v
         self.splitter_params = splitter_params if splitter_params is not None else {}
-        self.exp_id = str(uuid.uuid4())
 
         split_params = {}
         if data_names is None:
@@ -197,7 +197,7 @@ class Experimenter():
                 inner_folds = [(outer_train_idx, None)]
             raw_splits.append((test_idx, inner_folds))
 
-        self.cache = DataCache(maxsize=cache_maxsize)
+        self.cache = project.cache
 
         self.outer_folds = [
             OuterFold(
@@ -213,11 +213,12 @@ class Experimenter():
         ]
         self.status = "open"
         self.pipeline = None
+        self.pipeline_name = pipeline_name
+        self.pipeline_version = None
         self._os_log_state = None
-        self._store = ExperimenterStore(self.path)
-        self._store.initialize()
-        if pipeline is not None:
-            self.set_pipeline(pipeline)
+        self._store = project.experimenters
+        if pipeline_version is not None:
+            self.set_pipeline_version(pipeline_version)
         if _save:
             self._save()
 
@@ -229,7 +230,7 @@ class Experimenter():
     def set_status(self, status):
         """Set status and persist only the status meta row."""
         self.status = status
-        self._store.set_meta('status', status)
+        self._store.set(self.name, 'status', status)
 
     def open(self):
         """Experimenter를 open 상태로 변경"""
@@ -291,47 +292,42 @@ class Experimenter():
         finally:
             self.close_os_log()
 
-    @staticmethod
-    def create(data, path, data_names=None, sp=ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
-            splitter_params=None, title=None, data_key=None, cache_maxsize=4 * 1024 ** 3, aug_data=None):
+    def set_pipeline_version(self, version, pipeline_name=None):
+        """Point this Experimenter at a Pipeline version from its Project.
 
-        if os.path.exists(path):
-            raise RuntimeError(f"Exists: {path}")
-        return Experimenter(
-            data, path, data_names, sp=sp, sp_v=sp_v, splitter_params=splitter_params,
-            title=title, data_key=data_key, cache_maxsize=cache_maxsize,aug_data=aug_data
-        )
+        The Pipeline is loaded from the Project rather than handed in, so an
+        Experimenter records *which version* it ran against instead of keeping
+        its own copy.
 
-    def set_pipeline(self, pipeline):
-        """Set (or replace) the Pipeline this experimenter targets.
-
-        If a Pipeline was already set, resets any node whose ``serial`` no
-        longer matches the artifacts already on disk before adopting the
-        new pipeline.
-
-        Takes a built :class:`Pipeline`, not a :class:`PipelineBuilder` — the
-        snapshot is what makes later builder edits unable to change a run that
-        is already under way. Re-publish definitions with
-        ``e.set_pipeline(p.build())``.
+        Moving between versions diffs the two Pipelines (:meth:`Pipeline.diff_from`)
+        and drops exactly the artifacts the change invalidates: the Stages whose
+        definition or inputs differ, everything downstream of them, Stages that
+        no longer exist, and any Trial that read one of those Stages.
 
         Args:
-            pipeline (Pipeline): Built pipeline defining the node graph.
+            version (int): Pipeline version number (see ``Project.save_pipeline``).
+            pipeline_name (str, optional): Pipeline name within the Project.
+                Defaults to the one this Experimenter was created with.
+
+        Returns:
+            Pipeline: The loaded, built Pipeline.
         """
+        if pipeline_name is not None:
+            self.pipeline_name = pipeline_name
+        pipeline = self.project.load_pipeline(self.pipeline_name, version)
         require_built_pipeline(pipeline)
         if self.pipeline is not None:
-            all_node_names = [n for n in pipeline.nodes if n is not None]
-            self._reset_serial_stale_nodes(pipeline, all_node_names)
+            self._drop_stale(pipeline.diff_from(self.pipeline))
         self.pipeline = pipeline
-        self._save_pipeline()
+        self.pipeline_version = version
+        self._store.set(self.name, 'pipeline_name', self.pipeline_name)
+        self._store.set(self.name, 'pipeline_version', version)
+        return pipeline
 
     def _require_pipeline(self):
         if self.pipeline is None:
-            raise RuntimeError("No pipeline set. Call set_pipeline(pipeline) first.")
+            raise RuntimeError("No pipeline set. Call set_pipeline_version(version) first.")
         return self.pipeline
-
-    def _save_pipeline(self):
-        with open(self.path / 'pipeline.pkl', 'wb') as f:
-            pkl.dump(self.pipeline, f)
 
     def get_n_splits(self):
         return len(self.outer_folds)
@@ -450,32 +446,30 @@ class Experimenter():
         self.cache.clear_nodes(nodes)
 
 
-    def _reset_serial_stale_nodes(self, pipeline, node_names):
-        """Reset Stage nodes whose stored serial no longer matches the pipeline."""
-        def stores_for_name(name):
-            for outer_fold in self.outer_folds:
-                yield from outer_fold.train_data_flows
+    def _drop_stale(self, stale_stages):
+        """Remove the artifacts a set of stale Stages invalidates.
 
-        current = {n: pipeline.nodes[n].serial for n in node_names}
-        stale = find_stale_nodes(current, node_names, stores_for_name)
-        if stale:
-            self.reset_nodes(stale)
-
-    def _reset_stale_trials(self, attrs_map):
-        """Reset Trials whose stored id no longer matches their current definition.
-
-        A Trial's id folds in the serials of every Stage it reads, so editing a
-        Stage lands here as a mismatch — the replacement for the ``_bump_serials``
-        cascade that used to reach Head nodes through ``output_edges``.
+        Trials live outside the Pipeline, so the diff cannot name them. It does
+        not have to: each artifact records the ``edges`` it was built from, so a
+        Trial that read a stale Stage is found by looking at what is on disk.
         """
-        def stores_for_name(name):
-            for outer_fold in self.outer_folds:
-                yield from outer_fold.train_data_flows
-
-        current = {name: attrs['serial'] for name, attrs in attrs_map.items()}
-        stale = find_stale_nodes(current, list(attrs_map), stores_for_name)
-        if stale:
-            self.reset_nodes(stale)
+        if not stale_stages:
+            return
+        doomed = set(stale_stages)
+        for outer_fold in self.outer_folds:
+            for flow in outer_fold.train_data_flows:
+                for name in flow.list_nodes():
+                    if name in doomed:
+                        continue
+                    info = flow.get_info(name)
+                    if info is None or info.get('role') != 'head':
+                        continue
+                    for dsl_string in (info.get('edges') or {}).values():
+                        if doomed & referenced_nodes(dsl_string):
+                            doomed.add(name)
+                            break
+        self.reset_nodes(sorted(doomed))
+        return doomed
 
     def show_error_nodes(self, nodes=None, traceback=False):
         """Print nodes in ``error`` state.
@@ -529,14 +523,14 @@ class Experimenter():
         logger = resolve_logger(logger)
         self._check_open()
         pipeline = self._require_pipeline()
-        self._save_pipeline()
         pipeline.check_data_compatibility(self.data)
         node_names = set(pipeline.get_node_names(nodes))
         target_nodes = [i for i in pipeline.topo_order() if i in node_names]
         if rebuild:
             self.reset_nodes(target_nodes)
         else:
-            self._reset_serial_stale_nodes(pipeline, target_nodes)
+            # Staleness is settled when a version is adopted
+            # (set_pipeline_version), so anything still on disk here is current.
             target_nodes = [
                 i for i in target_nodes
                 if self.get_status(i) not in ['built', 'finalized']
@@ -571,73 +565,104 @@ class Experimenter():
         else:
             logger.info(f"Build complete: {len(target_nodes)} node(s)")
 
-    def exp(self, trials, collectors=None, finalize=False,
-            n_jobs=1, gpu_id_list=None, logger=None):
+    def exp(self, trials, collectors=None, n_jobs=1, gpu_id_list=None, logger=None):
         """Run *trials* against the Stage graph and invoke matching Collectors.
 
-        Each Trial's id folds in the serials of the Stages it reads, so a Trial
-        whose definition — or whose upstream preprocessing — changed is reset
-        and rerun automatically.
-
         Args:
-            trials (list[Trial]): Trials to run.
+            trials: ``[(Trial, outer_idx, inner_idx), ...]`` — each entry names
+                exactly which fold a Trial runs on. Expanding folds here rather
+                than in the executor keeps fold policy in one place and lets the
+                dispatcher take its target list literally.
             collectors: :class:`~mllabs.Collectors` registry, a list of
                 Collector instances, or ``None`` to collect nothing.
-            finalize (bool): If ``True``, finalize after all folds complete.
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
-            gpu_id_list (list, optional): GPU IDs to use for GPU-enabled nodes.
+            gpu_id_list (list, optional): GPU IDs to use for GPU-enabled trials.
             logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
+
+        Trial definitions are registered in the project's
+        :class:`~mllabs.TrialStore`, and every fold that actually runs records
+        its outcome there as it finishes (see
+        :class:`~mllabs._tracker.TrialHistTracker`). Folds skipped as already
+        built produce no new row — their result was recorded when they ran.
         """
         from ._executor import _experiment_single, _experiment_multi
-        from ._tracker import LoggerExecuteTracker
+        from ._tracker import LoggerExecuteTracker, TrialHistTracker
         logger = resolve_logger(logger)
         self._check_open()
         pipeline = self._require_pipeline()
-        self._save_pipeline()
         pipeline.check_data_compatibility(self.data)
 
-        attrs_map = {
-            t.name: {**t.get_attrs(), 'serial': t.trial_id(pipeline)}
-            for t in trials
-        }
-        self._reset_stale_trials(attrs_map)
-        target_nodes = [
-            name for name in attrs_map
-            if self.get_status(name) not in ['built', 'finalized']
-        ]
-        if not target_nodes:
+        collectors = _resolve_collectors(collectors)
+        jobs = self._make_jobs(trials)
+        if not jobs:
             logger.info("No trials to run")
             return
 
-        logger.info(f"Experimenting {len(target_nodes)} trial(s)")
-        collectors = _resolve_collectors(collectors)
+        logger.info(f"Experimenting {len(jobs)} job(s)")
         for c in collectors:
             c.on_attach(self)
             c._setup(len(self.outer_folds), len(self.outer_folds[0].train_data_flows))
-        total = sum(len(of.train_data_flows) for of in self.outer_folds) * len(target_nodes)
-        n_jobs = min(n_jobs, total)
-        tracker = LoggerExecuteTracker(total, n_jobs, logger)
+        n_jobs = min(n_jobs, len(jobs))
+        tracker = TrialHistTracker(
+            LoggerExecuteTracker(len(jobs), n_jobs, logger),
+            self.project.trials, self.name, pipeline.content_key(),
+            content_keys={t.name: self.project.trials.register(t)
+                          for t, _, _ in trials},
+        )
 
         try:
             if n_jobs > 1:
                 log_dir = self.path / '__worker_logs' if self._os_log_state is not None else None
-                errors = _experiment_multi(self.outer_folds, attrs_map, target_nodes, n_jobs,
-                                           gpu_id_list=gpu_id_list, collectors=collectors,
-                                           tracker=tracker, finalize=finalize,
+                errors = _experiment_multi(jobs, n_jobs, gpu_id_list=gpu_id_list,
+                                           collectors=collectors, tracker=tracker,
                                            log_dir=log_dir)
             else:
-                errors = _experiment_single(self.outer_folds, attrs_map, target_nodes,
-                                            gpu_id_list=gpu_id_list, collectors=collectors,
-                                            tracker=tracker, finalize=finalize)
+                errors = _experiment_single(jobs, gpu_id_list=gpu_id_list,
+                                            collectors=collectors, tracker=tracker)
         finally:
             tracker.close()
 
-        error_nodes = list({n for _, n in errors})
-        n_ok = len(target_nodes) - len(error_nodes)
-        if error_nodes:
-            logger.info(f"Exp complete: {n_ok}/{len(target_nodes)} trial(s), {len(error_nodes)} error(s): {error_nodes}")
+        error_names = list({n for _, n in errors})
+        n_ok = len(jobs) - len(error_names)
+        if error_names:
+            logger.info(f"Exp complete: {n_ok}/{len(jobs)} job(s), "
+                        f"{len(error_names)} error(s): {error_names}")
         else:
-            logger.info(f"Exp complete: {len(target_nodes)} trial(s)")
+            logger.info(f"Exp complete: {len(jobs)} job(s)")
+
+    def _make_jobs(self, trials):
+        """Expand ``(Trial, outer, inner)`` entries into runnable TrialJobs.
+
+        A Trial reruns when its own definition differs from the one its artifact
+        was built with — compared value by value, since params are plain data by
+        construction. Stage changes are already handled when a Pipeline version
+        is adopted, which drops the Trials that read them.
+        """
+        from ._executor import TrialJob
+        from .adapter import resolve_node_adapter
+        from .adapter._base import GPU_NO
+
+        gpu_cache = {}
+        jobs = []
+        for trial, outer_idx, inner_idx in trials:
+            flow = self.outer_folds[outer_idx].train_data_flows[inner_idx]
+            attrs = trial.get_attrs()
+
+            info = flow.get_info(trial.name)
+            if info is not None and info.get('definition') != _definition_of(attrs):
+                flow.reset_node(trial.name)
+                self.cache.clear_nodes([trial.name])
+                info = None
+            if info is not None and info.get('status') in ('built', 'finalized'):
+                continue
+
+            if trial.name not in gpu_cache:
+                adapter = resolve_node_adapter(attrs.get('processor'), attrs.get('adapter'))
+                gpu_cache[trial.name] = adapter.get_gpu_usage(attrs.get('params')) != GPU_NO
+
+            jobs.append(TrialJob(trial, attrs, (outer_idx, inner_idx), flow,
+                                 need_gpu=gpu_cache[trial.name]))
+        return jobs
 
     def get_train_data(self, edges, o_idx=0, i_idx=0):
         return self.outer_folds[o_idx].train_data_flows[i_idx].get_train(edges)
@@ -714,12 +739,13 @@ class Experimenter():
         return logs
 
     def _save(self):
-        self._store.save_meta({
+        self._store.save({
+            'name': self.name,
             'data_key': self.data_key,
             'title': self.title,
-            'cache_maxsize': self.cache_maxsize,
-            'exp_id': self.exp_id,
             'status': self.status,
+            'pipeline_name': self.pipeline_name,
+            'pipeline_version': self.pipeline_version,
         })
         self._save_splitters()
 
@@ -732,26 +758,27 @@ class Experimenter():
             }, f)
 
     @staticmethod
-    def load(filepath, data, data_key=None, aug_data=None):
-        """Load a saved Experimenter from disk.
+    def load(project, name, data, data_key=None, aug_data=None):
+        """Reopen a saved Experimenter by name.
 
         Args:
-            filepath (str | Path): Path to the experiment directory
-                (contains ``__exp.db``).
+            project (Project): Owning project.
+            name (str): Experimenter name — its directory under ``exp/``.
             data: Dataset to attach. Must match the original data shape.
             data_key (str, optional): If the saved experiment has a ``data_key``,
                 this must match.
 
         Returns:
-            Experimenter: Restored experimenter with all nodes, collectors, and
-            trainers reloaded.
+            Experimenter: Restored experimenter, with its Pipeline version
+            reloaded from the project.
 
         Raises:
             ValueError: If ``data_key`` does not match the saved value.
         """
-        filepath = Path(filepath)
-        store = ExperimenterStore(filepath)
-        meta = store.fetch_meta()
+        path = project.exp_path(name)
+        meta = project.experimenters.fetch(name)
+        if meta is None:
+            raise KeyError(f"No experimenter named {name!r} in this project")
 
         saved_data_key = meta.get('data_key')
         if saved_data_key is not None and saved_data_key != data_key:
@@ -759,29 +786,26 @@ class Experimenter():
                 f"data_key mismatch: saved='{saved_data_key}', provided='{data_key}'"
             )
 
-        with open(filepath / '__splitters.pkl', 'rb') as f:
+        with open(path / '__splitters.pkl', 'rb') as f:
             splitters = pkl.load(f)
 
         exp = Experimenter(
+            project=project,
+            name=name,
             data=data,
-            path=filepath,
             sp=splitters['sp'],
             sp_v=splitters['sp_v'],
             splitter_params=splitters['splitter_params'],
-            title=meta['title'],
+            title=meta.get('title'),
             data_key=saved_data_key,
-            cache_maxsize=meta.get('cache_maxsize', 4 * 1024 ** 3),
             aug_data=aug_data,
+            pipeline_name=meta.get('pipeline_name', 'pipeline'),
             _save=False
         )
-        exp.exp_id = meta['exp_id']
         exp.status = meta['status']
-
-        pipeline_path = filepath / 'pipeline.pkl'
-        if pipeline_path.exists():
-            with open(pipeline_path, 'rb') as f:
-                exp.pipeline = pkl.load(f)
-
+        version = meta.get('pipeline_version')
+        if version is not None:
+            exp.set_pipeline_version(version)
         return exp
 
     def desc_spec(self):

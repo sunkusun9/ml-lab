@@ -819,11 +819,12 @@ class DataWrapperProvider(DataSourceProvider):
     Call set_data(data) to re-inject DataWrapper after deserialization.
     """
 
-    def __init__(self, data, train_idx, valid_idx=None, aug_data=None):
+    def __init__(self, data, train_idx, valid_idx=None, test_idx=None, aug_data=None):
         self._data = data
         self._aug_data = aug_data
         self.train_idx = train_idx
         self.valid_idx = valid_idx
+        self.test_idx = test_idx
 
     def set_data(self, data, aug_data=None):
         self._data = data
@@ -840,11 +841,18 @@ class DataWrapperProvider(DataSourceProvider):
             return None
         return self._data.iloc(self.valid_idx)
 
+    def get_test(self):
+        if self.test_idx is None:
+            return None
+        return self._data.iloc(self.test_idx)
+
     def __getstate__(self):
-        return {'train_idx': self.train_idx, 'valid_idx': self.valid_idx}
+        return {'train_idx': self.train_idx, 'valid_idx': self.valid_idx,
+                'test_idx': self.test_idx}
 
     def __setstate__(self, state):
         self.train_idx = state['train_idx']
         self.valid_idx = state['valid_idx']
+        self.test_idx = state.get('test_idx')
         self._data = None
         self._aug_data = None

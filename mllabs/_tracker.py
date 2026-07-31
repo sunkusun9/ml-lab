@@ -120,3 +120,68 @@ class LoggerExecuteTracker(ExecuteTracker):
         for session in range(self.n_workers):
             self.logger.remove_session(session + 1)
             
+
+
+class TrialHistTracker(ExecuteTracker):
+    """Records Trial run history while delegating display to another tracker.
+
+    Wrapping the tracker puts the recording where the outcome actually is:
+    ``done``/``error`` fire once per (trial, fold) with the real result, in the
+    parent process, so multi-worker runs are covered without the executor
+    knowing anything about history. The alternative — re-reading status off
+    disk after the run — cannot tell a fold that just ran from one that was
+    already built, and duplicates work the tracker has done anyway.
+
+    Args:
+        tracker (ExecuteTracker): The display/logging tracker to delegate to.
+        store (TrialStore): Where history is written.
+        experimenter (str): Experimenter name — half of the history key.
+        pipeline_version (str): ``Pipeline.content_key()`` of the run.
+        content_keys (dict, optional): ``{trial_name: content_key}``, so a row
+            records which definition the name held at the time.
+    """
+
+    def __init__(self, tracker, store, experimenter, pipeline_version, content_keys=None):
+        super().__init__(tracker.total, len(tracker.workers))
+        self._tracker = tracker
+        self._store = store
+        self._experimenter = experimenter
+        self._pipeline_version = pipeline_version
+        self._content_keys = content_keys or {}
+
+    def _record(self, node_name, outer_idx, inner_idx, status):
+        self._store.record(
+            node_name, self._experimenter, outer_idx, inner_idx,
+            content_key=self._content_keys.get(node_name),
+            pipeline_version=self._pipeline_version,
+            status=status,
+        )
+
+    def start(self, worker_idx, node_name, outer_idx, inner_idx):
+        super().start(worker_idx, node_name, outer_idx, inner_idx)
+        self._tracker.start(worker_idx, node_name, outer_idx, inner_idx)
+
+    def progress(self, worker_idx, current, total, metrics=None):
+        super().progress(worker_idx, current, total, metrics)
+        self._tracker.progress(worker_idx, current, total, metrics)
+
+    def done(self, worker_idx, node_name, outer_idx, inner_idx, info):
+        super().done(worker_idx, node_name, outer_idx, inner_idx, info)
+        self._record(node_name, outer_idx, inner_idx, 'built')
+        self._tracker.done(worker_idx, node_name, outer_idx, inner_idx, info)
+
+    def error(self, worker_idx, node_name, outer_idx, inner_idx, error_info):
+        super().error(worker_idx, node_name, outer_idx, inner_idx, error_info)
+        self._record(node_name, outer_idx, inner_idx, 'error')
+        self._tracker.error(worker_idx, node_name, outer_idx, inner_idx, error_info)
+
+    def message(self, worker_idx, msg, typ='info'):
+        super().message(worker_idx, msg, typ)
+        self._tracker.message(worker_idx, msg, typ)
+
+    def block(self, node_name, outer_idx, inner_idx):
+        super().block(node_name, outer_idx, inner_idx)
+        self._tracker.block(node_name, outer_idx, inner_idx)
+
+    def close(self):
+        self._tracker.close()

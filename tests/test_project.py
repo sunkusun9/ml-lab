@@ -1,4 +1,7 @@
 import pytest
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import ShuffleSplit
 
 from mllabs import Project, TrialStore, Trial, PipelineBuilder, make_trials
 
@@ -41,14 +44,20 @@ class TestProjectLayout:
     def test_trial_store_created(self, project):
         assert (project.path / 'trials.db').exists()
 
+    def test_experimenter_store_created(self, project):
+        assert (project.path / 'experimenters.db').exists()
+
     def test_paths_are_under_root(self, project):
-        for p in (project.pipeline_path('a'), project.run_path('b'),
+        for p in (project.pipeline_path('a'), project.exp_path('b'),
                   project.trainer_path('c'), project.inferencer_path('d'),
                   project.collectors_path()):
             assert project.path in p.parents or p.parent == project.path
 
     def test_paths_are_created(self, project):
-        assert project.run_path('r1').is_dir()
+        assert project.exp_path('r1').is_dir()
+
+    def test_exp_path_is_under_exp_folder(self, project):
+        assert project.exp_path('run_a') == project.path / 'exp' / 'run_a'
 
     def test_pipeline_builder_stored_under_project(self, project):
         p = project.pipeline_builder('main')
@@ -212,7 +221,7 @@ class TestExperimentHist:
     def test_filter_by_experimenter(self, store):
         store.record('dt', 'exp-1', 0, 0, status='built')
         store.record('dt', 'exp-2', 0, 0, status='built')
-        assert len(store.get_hist(experimenter_id='exp-2')) == 1
+        assert len(store.get_hist(experimenter='exp-2')) == 1
 
     def test_filter_by_pipeline_version(self, store):
         store.record('dt', 'exp-1', 0, 0, pipeline_version='pk1', status='built')
@@ -227,7 +236,7 @@ class TestExperimentHist:
     def test_remove_hist_by_experimenter(self, store):
         store.record('dt', 'exp-1', 0, 0, status='built')
         store.record('dt', 'exp-2', 0, 0, status='built')
-        store.remove_hist(experimenter_id='exp-1')
+        store.remove_hist(experimenter='exp-1')
         assert len(store.get_hist(trial_name='dt')) == 1
 
     def test_remove_hist_keeps_the_definition(self, store):
@@ -248,3 +257,118 @@ class TestProjectEndToEnd:
         row = project.trials.get_hist(trial_name='dt')[0]
         assert project.resolve_version(row['pipeline_version'], 'main') == version
         assert project.trials.get_definition(row['content_key'])['processor'] == TREE
+
+
+@pytest.fixture
+def sample_data():
+    np.random.seed(0)
+    n = 60
+    return pd.DataFrame({'f1': np.random.randn(n),
+                         'target': np.random.randint(0, 2, n)})
+
+
+class TestExperimenterUnderProject:
+    def _exp(self, project, builder, sample_data, name='run_a', version=None):
+        if version is None:
+            version = project.save_pipeline(builder.build(), 'main')
+        return project.experimenter(
+            name, sample_data,
+            sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=0),
+            pipeline_name='main', pipeline_version=version,
+        )
+
+    def test_name_is_the_directory(self, project, builder, sample_data):
+        e = self._exp(project, builder, sample_data)
+        assert e.path == project.path / 'exp' / 'run_a'
+        assert e.name == 'run_a'
+
+    def test_pipeline_comes_from_the_version(self, project, builder, sample_data):
+        version = project.save_pipeline(builder.build(), 'main')
+        e = self._exp(project, builder, sample_data, version=version)
+        assert e.pipeline_version == version
+        assert e.pipeline.content_key() == builder.build().content_key()
+
+    def test_pipeline_is_not_copied_into_the_run(self, project, builder, sample_data):
+        """Only the pointer is stored — the Pipeline lives once, under Project."""
+        e = self._exp(project, builder, sample_data)
+        assert not (e.path / 'pipeline.pkl').exists()
+
+    def test_no_pipeline_until_a_version_is_set(self, project, sample_data):
+        e = project.experimenter('bare', sample_data)
+        with pytest.raises(RuntimeError, match='set_pipeline_version'):
+            e.build()
+
+    def test_switching_version_resets_stale_nodes(self, project, builder, sample_data):
+        e = self._exp(project, builder, sample_data)
+        e.build()
+        assert e.get_status('scaler') == 'built'
+
+        builder.set_node('scaler', grp='scale', exist='replace')
+        v2 = project.save_pipeline(builder.build(), 'main')
+        e.set_pipeline_version(v2)
+        assert e.get_status('scaler') is None
+
+    def test_multiple_experimenters_per_project(self, project, builder, sample_data):
+        version = project.save_pipeline(builder.build(), 'main')
+        self._exp(project, builder, sample_data, name='a', version=version)
+        self._exp(project, builder, sample_data, name='b', version=version)
+        assert project.list_experimenters() == ['a', 'b']
+
+    def test_meta_lives_in_one_project_table(self, project, builder, sample_data):
+        """Listing runs is a query, not a directory scan — and no per-run db."""
+        e = self._exp(project, builder, sample_data)
+        assert not (e.path / '__exp.db').exists()
+        rows = project.experimenters.list_all()
+        assert [r['name'] for r in rows] == ['run_a']
+        assert rows[0]['pipeline_version'] == e.pipeline_version
+
+    def test_status_change_is_persisted(self, project, builder, sample_data):
+        e = self._exp(project, builder, sample_data)
+        e.close()
+        assert project.experimenters.fetch('run_a')['status'] == 'close'
+
+    def test_load_unknown_name_raises(self, project, sample_data):
+        with pytest.raises(KeyError, match='No experimenter'):
+            project.load_experimenter('nope', sample_data)
+
+    def test_unknown_meta_column_rejected(self, project):
+        with pytest.raises(ValueError, match='Unknown experimenter meta column'):
+            project.experimenters.save({'name': 'x', 'bogus': 1})
+
+    def test_remove_experimenter_row(self, project, builder, sample_data):
+        self._exp(project, builder, sample_data)
+        project.experimenters.remove('run_a')
+        assert project.list_experimenters() == []
+
+    def test_reload_restores_name_and_version(self, project, builder, sample_data):
+        e = self._exp(project, builder, sample_data)
+        e.build()
+        loaded = project.load_experimenter('run_a', sample_data)
+        assert loaded.name == 'run_a'
+        assert loaded.pipeline_version == e.pipeline_version
+        assert loaded.get_status('scaler') == 'built'
+
+    def test_reload_checks_data_key(self, project, builder, sample_data):
+        project.save_pipeline(builder.build(), 'main')
+        project.experimenter('keyed', sample_data, data_key='k1')
+        with pytest.raises(ValueError, match='data_key mismatch'):
+            project.load_experimenter('keyed', sample_data, data_key='wrong')
+
+    def test_trials_run_and_land_in_hist(self, project, builder, sample_data):
+        e = self._exp(project, builder, sample_data)
+        e.build()
+        trials = make_trials('dt', processor=TREE,
+                             edges={'X': 'scaler:(*)', 'y': '{target}'},
+                             params={'max_depth': 3, 'random_state': 0})
+        e.exp(trials)
+        assert e.get_status('dt') == 'built'
+
+        # history is keyed by the two names, matching the layout on disk
+        project.trials.register(trials[0])
+        project.trials.record(trials[0].name, e.name, 0, 0,
+                              content_key=trials[0].content_key(),
+                              pipeline_version=e.pipeline.content_key(),
+                              status=e.get_status('dt'))
+        row = project.trials.get_hist(experimenter='run_a')[0]
+        assert row['trial_name'] == 'dt'
+        assert project.resolve_version(row['pipeline_version'], 'main') == e.pipeline_version

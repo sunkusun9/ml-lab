@@ -132,6 +132,18 @@ class TrainDataFlow(DataFlow):
     def get_valid(self, edges):
         """{key: data} valid (train-time monitoring) output resolved via edges."""
         return self._get_data_typ(edges, 'valid')
+
+    def get_test(self, edges):
+        """{key: data} held-out test output resolved via edges, or ``{}``.
+
+        Kept here rather than on the fold so a TrainDataFlow is self-sufficient:
+        a dispatched job then needs nothing but the flow to produce every input
+        its Trial reads.
+        """
+        test_source = self.data_source.get_test()
+        if test_source is None:
+            return {}
+        return self.get_data(test_source, edges)
     
     def _get_data_typ(self, edges, typ):
         result = {}

@@ -1,90 +1,97 @@
-"""SQLite persistence for an Experimenter's meta and collector registry.
+"""Project-level registry of Experimenter metadata, keyed by name.
 
-All table/schema knowledge lives here. Experimenter deals only with plain
-Python values (meta) and Collector instances; it does not know column names
-or table structure.
+One table for the whole project rather than an ``__exp.db`` per run directory:
+an Experimenter's name is its identity now, so listing or comparing runs should
+be a query, not a directory scan.
 
-- ``meta``: key → JSON-serialized value. Holds only simple, ref-serializable
-  values (data_key, title, cache_maxsize, exp_id, status). Arbitrary
-  runtime objects (splitters, splitter_params) stay in ``__splitters.pkl``.
-- ``collectors``: name → ``module.QualName`` class reference, so restoration
-  needs no hardcoded type map.
+The columns are typed rather than the key/value JSON the per-run store used —
+that shape existed because the value set was open-ended, and it no longer is.
+
+Two things deliberately stay outside this table:
+
+- the splitters, which are not ref-serializable and remain in each run's
+  ``__splitters.pkl``
+- the Pipeline, which lives once under the Project as a version. Only the
+  ``(pipeline_name, pipeline_version)`` pointer is stored here.
 """
 import sqlite3
 from pathlib import Path
 
-from ._serialize import (
-    serialize_to_json, deserialize_from_json, _obj_to_ref, _ref_to_obj,
-)
-
 _SCHEMA_SQL = """
-    CREATE TABLE IF NOT EXISTS meta (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    );
-    CREATE TABLE IF NOT EXISTS collectors (
-        name TEXT PRIMARY KEY,
-        cls TEXT NOT NULL
+    CREATE TABLE IF NOT EXISTS experimenters (
+        name             TEXT PRIMARY KEY,
+        data_key         TEXT,
+        title            TEXT,
+        status           TEXT,
+        pipeline_name    TEXT,
+        pipeline_version INTEGER
     );
 """
 
+_COLUMNS = ('name', 'data_key', 'title', 'status',
+            'pipeline_name', 'pipeline_version')
+
 
 class ExperimenterStore:
-    """SQLite-backed persistence for a single Experimenter's ``__exp.db``."""
+    """SQLite-backed registry of every Experimenter in one project."""
 
-    def __init__(self, path, name='__exp'):
+    def __init__(self, path, name='experimenters'):
         self.db_path = Path(path) / f'{name}.db'
-
-    def exists(self):
-        return self.db_path.exists()
-
-    def initialize(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.executescript(_SCHEMA_SQL)
 
-    def save_meta(self, meta):
-        """Write ``{key: python_value}`` into the meta table (values serialized)."""
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.executescript(_SCHEMA_SQL)
-            conn.executemany(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                [(k, serialize_to_json(v)) for k, v in meta.items()],
-            )
-
-    def set_meta(self, key, value):
-        """Write a single meta key (value serialized) without touching others."""
+    def save(self, meta):
+        """Insert or replace one Experimenter's row from a ``{column: value}`` dict."""
+        unknown = set(meta) - set(_COLUMNS)
+        if unknown:
+            raise ValueError(f"Unknown experimenter meta column(s): {sorted(unknown)}")
+        if 'name' not in meta:
+            raise ValueError("experimenter meta requires 'name'")
+        columns = [c for c in _COLUMNS if c in meta]
+        placeholders = ', '.join('?' for _ in columns)
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                (key, serialize_to_json(value)),
+                f"INSERT OR REPLACE INTO experimenters ({', '.join(columns)}) "
+                f"VALUES ({placeholders})",
+                [meta[c] for c in columns],
             )
 
-    def fetch_meta(self):
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            return {
-                row['key']: deserialize_from_json(row['value'])
-                for row in conn.execute("SELECT key, value FROM meta").fetchall()
-            }
-
-    def write_collector(self, collector):
-        """Register a collector by name + ``module.QualName`` class reference."""
+    def set(self, name, column, value):
+        """Update a single column without touching the rest of the row."""
+        if column not in _COLUMNS or column == 'name':
+            raise ValueError(f"Cannot set experimenter column {column!r}")
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO collectors (name, cls) VALUES (?, ?)",
-                (collector.name, _obj_to_ref(type(collector))),
+                f"UPDATE experimenters SET {column} = ? WHERE name = ?", (value, name)
             )
 
-    def remove_collector(self, name):
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("DELETE FROM collectors WHERE name = ?", (name,))
-
-    def fetch_collectors(self):
-        """Return ``{name: collector_class}`` — classes resolved from refs."""
+    def fetch(self, name):
+        """One Experimenter's row as a dict, or ``None``."""
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            return {
-                row['name']: _ref_to_obj(row['cls'])
-                for row in conn.execute("SELECT name, cls FROM collectors").fetchall()
-            }
+            row = conn.execute(
+                "SELECT * FROM experimenters WHERE name = ?", (name,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def exists(self, name):
+        return self.fetch(name) is not None
+
+    def list_names(self):
+        with sqlite3.connect(str(self.db_path)) as conn:
+            return [r[0] for r in conn.execute(
+                "SELECT name FROM experimenters ORDER BY name").fetchall()]
+
+    def list_all(self):
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(r) for r in conn.execute(
+                "SELECT * FROM experimenters ORDER BY name").fetchall()]
+
+    def remove(self, name):
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute("DELETE FROM experimenters WHERE name = ?", (name,))
+
+    def __repr__(self):
+        return f"<ExperimenterStore {self.db_path}>"

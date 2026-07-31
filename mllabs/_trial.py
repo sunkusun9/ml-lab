@@ -20,13 +20,15 @@ class Trial:
     ``name``
         Human-readable, stable, and used as the on-disk artifact directory —
         the same role the Head node name played.
-    ``trial_id(pipeline)``
-        Content hash of the definition **plus the serials of every Stage node
-        the edges reference**. Because Heads no longer live in the pipeline,
-        ``_bump_serials`` can no longer cascade a Stage change into them; the
-        upstream serials being part of this hash is what replaces that cascade.
-        Without it, editing a Stage would silently leave dependent Trials
-        looking up-to-date.
+    ``content_key()``
+        Hash of the definition itself.
+
+    A Trial's own key says nothing about the preprocessing it read, and Heads no
+    longer live in the pipeline, so ``_bump_serials`` cannot cascade a Stage
+    change into them. That gap is closed separately: a run records the serials
+    of the Stages it actually consumed (:meth:`stage_names`), and those are
+    compared against the fold's current Stages before reusing an artifact. The
+    check therefore needs the fold, not a Pipeline.
 
     Attributes:
         name (str): Identifier, also the artifact directory name.
@@ -89,26 +91,19 @@ class Trial:
             sort_keys=True, ensure_ascii=False, separators=(',', ':'),
         )
 
-    def upstream_serials(self, pipeline):
-        """``{stage_name: serial}`` for every Stage node this Trial reads.
+    def stage_names(self):
+        """Names of the Stage nodes this Trial's edges read.
 
         Only direct references are needed: a Stage's own serial is already
         bumped when anything upstream of it changes (``_bump_serials`` walks
         ``output_edges``), so the chain is covered transitively.
         """
-        serials = {}
+        names = set()
         for dsl_string in self.edges.values():
             for name in referenced_nodes(dsl_string):
-                if name is None or name not in pipeline.nodes:
-                    continue
-                serials[name] = pipeline.nodes[name].serial
-        return serials
-
-    def trial_id(self, pipeline):
-        """Content hash used the way Head nodes used ``node_serial``."""
-        serials = self.upstream_serials(pipeline)
-        payload = self.content_key() + '|' + json.dumps(serials, sort_keys=True)
-        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+                if name is not None:
+                    names.add(name)
+        return names
 
     def __repr__(self):
         return f"<Trial {self.name!r} processor={self.processor!r}>"

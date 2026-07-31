@@ -66,7 +66,7 @@ def exp(tmp_path, sample_data, pipeline):
 
 def _setup_full(pipeline, exp=None):
     pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
-                      method='transform', edges={'X': '{f1, f2, f3}'})
+                     method='transform', edges={'X': '{f1, f2, f3}'})
     pipeline.set_node('scaler', grp='scale')
     if exp is not None:
         exp.set_pipeline(pipeline.build())
@@ -102,10 +102,10 @@ class TestBuildFlowMulti:
 
     def test_builds_across_folds_and_reports_errors(self, exp, pipeline):
         pipeline.set_grp('good', processor='sklearn.preprocessing.StandardScaler',
-                          method='transform', edges={'X': '{f1}'})
+                         method='transform', edges={'X': '{f1}'})
         pipeline.set_node('good_node', grp='good')
         pipeline.set_grp('bad', processor='mock.BadProcessor',
-                          method='transform', edges={'X': '{f2}'})
+                         method='transform', edges={'X': '{f2}'})
         pipeline.set_node('bad_node', grp='bad')
 
         exp.set_pipeline(pipeline.build())
@@ -133,7 +133,7 @@ class TestNJobsCap:
     def test_build_caps_worker_sessions_to_total(self, exp, pipeline):
         # 2 folds x 1 stage node = 2 tasks; request far more workers
         pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
-                          method='transform', edges={'X': '{f1}'})
+                         method='transform', edges={'X': '{f1}'})
         pipeline.set_node('scaler', grp='scale')
 
         logger = RecordingLogger()
@@ -165,7 +165,7 @@ class TestWorkerLogCapture:
 
     def test_native_output_captured_to_worker_logs_when_open(self, exp, pipeline, capfd):
         pipeline.set_grp('nc', processor='mock.NativeChatterStage',
-                          method='transform', edges={'X': '{f1}'})
+                         method='transform', edges={'X': '{f1}'})
         pipeline.set_node('nc_node', grp='nc')
 
         with exp.os_log():
@@ -187,7 +187,7 @@ class TestWorkerLogCapture:
 
     def test_native_output_not_captured_when_closed(self, exp, pipeline, capfd):
         pipeline.set_grp('nc', processor='mock.NativeChatterStage',
-                          method='transform', edges={'X': '{f1}'})
+                         method='transform', edges={'X': '{f1}'})
         pipeline.set_node('nc_node', grp='nc')
 
         exp.set_pipeline(pipeline.build())
@@ -205,7 +205,7 @@ class TestWorkerLogCapture:
 
     def test_single_worker_captured_by_master_log_when_open(self, exp, pipeline, capfd):
         pipeline.set_grp('nc', processor='mock.NativeChatterStage',
-                          method='transform', edges={'X': '{f1}'})
+                         method='transform', edges={'X': '{f1}'})
         pipeline.set_node('nc_node', grp='nc')
 
         with exp.os_log():
@@ -239,7 +239,7 @@ class TestWorkerWarningVerbosity:
     def test_warnings_collected_and_silenced_when_level_excludes_warning(self, exp, pipeline, capfd):
         from mllabs._logger import ProgressSessionLogger
         pipeline.set_grp('wn', processor='mock.WarnStage',
-                          method='transform', edges={'X': '{f1}'})
+                         method='transform', edges={'X': '{f1}'})
         pipeline.set_node('wn_node', grp='wn')
 
         logger = ProgressSessionLogger(level=['info', 'progress'])  # no 'warning'
@@ -254,7 +254,7 @@ class TestWorkerWarningVerbosity:
     def test_warnings_printed_when_level_includes_warning(self, exp, pipeline, capfd):
         from mllabs._logger import ProgressSessionLogger
         pipeline.set_grp('wn', processor='mock.WarnStage',
-                          method='transform', edges={'X': '{f1}'})
+                         method='transform', edges={'X': '{f1}'})
         pipeline.set_node('wn_node', grp='wn')
 
         logger = ProgressSessionLogger(level=['info', 'warning', 'progress'])
@@ -295,13 +295,13 @@ class TestDataPrepErrors:
 
     def test_build_single_reports_error_and_continues(self, exp, pipeline):
         pipeline.set_grp('good', processor='sklearn.preprocessing.StandardScaler',
-                          method='transform', edges={'X': '{f1}'})
+                         method='transform', edges={'X': '{f1}'})
         pipeline.set_node('good_node', grp='good')
         pipeline.set_grp('src', processor='sklearn.preprocessing.StandardScaler',
-                          method='transform', edges={'X': '{f2}'})
+                         method='transform', edges={'X': '{f2}'})
         pipeline.set_node('src_node', grp='src')
         pipeline.set_grp('bad', processor='sklearn.preprocessing.StandardScaler',
-                          method='transform', edges={'X': self._BAD_X})
+                         method='transform', edges={'X': self._BAD_X})
         pipeline.set_node('bad_node', grp='bad')
 
         exp.set_pipeline(pipeline.build())
@@ -313,13 +313,13 @@ class TestDataPrepErrors:
 
     def test_build_multi_reports_error_and_continues(self, exp, pipeline):
         pipeline.set_grp('good', processor='sklearn.preprocessing.StandardScaler',
-                          method='transform', edges={'X': '{f1}'})
+                         method='transform', edges={'X': '{f1}'})
         pipeline.set_node('good_node', grp='good')
         pipeline.set_grp('src', processor='sklearn.preprocessing.StandardScaler',
-                          method='transform', edges={'X': '{f2}'})
+                         method='transform', edges={'X': '{f2}'})
         pipeline.set_node('src_node', grp='src')
         pipeline.set_grp('bad', processor='sklearn.preprocessing.StandardScaler',
-                          method='transform', edges={'X': self._BAD_X})
+                         method='transform', edges={'X': self._BAD_X})
         pipeline.set_node('bad_node', grp='bad')
 
         exp.set_pipeline(pipeline.build())

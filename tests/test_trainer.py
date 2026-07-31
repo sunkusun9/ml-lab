@@ -30,7 +30,7 @@ def pipeline(tmp_path):
     p = PipelineBuilder(path=tmp_path / 'pipeline')
     p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
     p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
-               method='transform', edges={'X': '{f1, f2, f3}'})
+              method='transform', edges={'X': '{f1, f2, f3}'})
     p.set_node('scaler', grp='scale')
     return p
 

@@ -8,12 +8,13 @@ and the Trial store.
 Components still work standalone — a Project is a convenience over them, not a
 requirement.
 """
-import json
 import sqlite3
 import pickle as pkl
 from pathlib import Path
 
+from ._cache import DataCache
 from ._trial_store import TrialStore
+from ._experimenter_store import ExperimenterStore
 from .collector import Collectors
 
 _SCHEMA_SQL = """
@@ -37,24 +38,30 @@ class Project:
 
         {path}/
           project.db          pipeline version index
+          experimenters.db    Experimenter registry, keyed by name
           trials.db           TrialStore (definitions + run history)
           pipelines/{name}/   PipelineBuilder db, and v{n}.pkl per built version
           collectors/         Collectors registry
-          runs/{name}/        Experimenter artifacts
+          exp/{name}/         Experimenter artifacts, keyed by its name
           trainers/{name}/    Trainer artifacts
           inferencers/{name}/ saved Inferencers
 
     Args:
         path (str | Path): Project root. Created if missing.
+        cache_maxsize (int): Stage-output cache size in bytes, shared by every
+            Experimenter in the project. Default 4 GB.
     """
 
-    def __init__(self, path):
+    def __init__(self, path, cache_maxsize=4 * 1024 ** 3):
         self.path = Path(path)
+        self.cache_maxsize = cache_maxsize
+        self.cache = DataCache(maxsize=cache_maxsize)
         self.path.mkdir(parents=True, exist_ok=True)
         self.db_path = self.path / 'project.db'
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.executescript(_SCHEMA_SQL)
         self.trials = TrialStore(self.path)
+        self.experimenters = ExperimenterStore(self.path)
 
     # ------------------------------------------------------------------
     # paths
@@ -63,8 +70,8 @@ class Project:
     def pipeline_path(self, name='pipeline'):
         return self._sub('pipelines', name)
 
-    def run_path(self, name):
-        return self._sub('runs', name)
+    def exp_path(self, name):
+        return self._sub('exp', name)
 
     def trainer_path(self, name):
         return self._sub('trainers', name)
@@ -94,6 +101,34 @@ class Project:
     def collectors(self):
         """The project's :class:`~mllabs.Collectors` registry, restored if saved."""
         return Collectors.load(self.collectors_path())
+
+    def experimenter(self, name, data, **kwargs):
+        """Create an Experimenter named *name* under ``{project}/exp/{name}``.
+
+        Its name is its identity: it is both the directory and the key used in
+        :class:`~mllabs.TrialStore` history.
+        """
+        from ._experimenter import Experimenter
+        return Experimenter(self, name, data, **kwargs)
+
+    def load_experimenter(self, name, data, **kwargs):
+        """Reopen a previously created Experimenter by name."""
+        from ._experimenter import Experimenter
+        return Experimenter.load(self, name, data, **kwargs)
+
+    def trainer(self, name, data, **kwargs):
+        """Create a Trainer named *name* under ``{project}/trainers/{name}``."""
+        from ._trainer import Trainer
+        return Trainer(self, name, data, **kwargs)
+
+    def load_trainer(self, name, data, **kwargs):
+        """Reopen a previously created Trainer by name."""
+        from ._trainer import Trainer
+        return Trainer.load(self, name, data, **kwargs)
+
+    def list_experimenters(self):
+        """Names of every Experimenter registered in this project."""
+        return self.experimenters.list_names()
 
     # ------------------------------------------------------------------
     # pipeline versions
