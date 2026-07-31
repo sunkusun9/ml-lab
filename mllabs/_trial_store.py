@@ -3,23 +3,27 @@
 Two tables:
 
 ``trials``
-    One row per distinct Trial *definition*, keyed by ``content_key`` — a hash
-    of the definition itself. A natural key, not a minted one.
+    One row per Trial *name* — the same identity its on-disk artifacts use.
+    Redefining a name overwrites its row exactly as it overwrites the
+    artifact.
 
 ``experiment_hist``
     One row per (trial name, experimenter name, outer fold, inner fold) — what
     ran, against which Pipeline, and whether it succeeded.
 
-Both parts of the key are names, matching what is on disk: a trial's artifacts
-live at ``{exp}/__folds/{outer}/{inner}/{trial_name}/`` and an Experimenter's
-at ``{project}/exp/{name}``. Keeping the keys aligned with the layout means a
-hist row is readable on its own, and that redefining a name overwrites the row
-exactly as it overwrites the artifact. ``content_key`` rides along as a plain
-column, so which definition a given run used stays recoverable.
+Both tables key on names, matching what is on disk: a trial's artifacts live
+at ``{exp}/__folds/{outer}/{inner}/{trial_name}/`` and an Experimenter's at
+``{project}/exp/{name}``. Keeping the keys aligned with the layout means a
+hist row is readable on its own, and that redefining a name overwrites its
+row exactly as it overwrites the artifact — true in both tables.
 
-``content_key`` covers the definition only. Whether an artifact is still valid
-also depends on the preprocessing it read, but that is judged per fold against
-the fold itself — it is not part of a Trial's identity here.
+Neither table stores a content hash. Whether a stored definition still
+matches a given Trial is a plain value comparison (``has``), and whether an
+artifact needs rebuilding is decided the same way, against the artifact's own
+``info['definition']`` on disk (see ``Experimenter._make_jobs``) — a hash
+would only restate what these already compare directly. ``experiment_hist``
+is a run log, not the source of truth for a definition: it does not attempt
+to recover what a name's definition used to be before it was redefined.
 """
 import json
 import sqlite3
@@ -27,8 +31,7 @@ from pathlib import Path
 
 _SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS trials (
-        content_key TEXT PRIMARY KEY,
-        name        TEXT NOT NULL,
+        name        TEXT PRIMARY KEY,
         label       TEXT,
         processor   TEXT NOT NULL,
         method      TEXT,
@@ -42,8 +45,7 @@ _SCHEMA_SQL = """
         experimenter  TEXT NOT NULL,
         outer_idx        INTEGER NOT NULL,
         inner_idx        INTEGER NOT NULL,
-        content_key      TEXT,
-        pipeline_version TEXT,
+        pipeline_version INTEGER,
         status           TEXT,
         PRIMARY KEY (trial_name, experimenter, outer_idx, inner_idx)
     );
@@ -66,40 +68,45 @@ class TrialStore:
     # ------------------------------------------------------------------
 
     def register(self, trial):
-        """Store *trial*'s definition if new; return its ``content_key``.
+        """Store *trial*'s definition under its name.
+
+        ``name`` is the row's identity, so redefining a name overwrites its
+        row exactly as it overwrites the artifact on disk.
 
         Args:
             trial (Trial): Trial to register.
-
-        Returns:
-            str: Content key identifying this definition.
         """
-        content_key = trial.content_key()
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO trials "
-                "(content_key, name, label, processor, method, adapter, params, edges, tag) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (content_key, trial.name, trial.label, trial.processor,
+                "INSERT OR REPLACE INTO trials "
+                "(name, label, processor, method, adapter, params, edges, tag) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (trial.name, trial.label, trial.processor,
                  trial.method, json.dumps(trial.adapter), json.dumps(trial.params),
                  json.dumps(trial.edges), json.dumps(trial.tag)),
             )
-        return content_key
 
     def register_all(self, trials):
-        """``{trial.name: content_key}`` for *trials*."""
-        return {t.name: self.register(t) for t in trials}
+        """Register every Trial in *trials*."""
+        for t in trials:
+            self.register(t)
 
     def has(self, trial):
-        """Whether *trial*'s definition is already stored."""
-        return self.get_definition(trial.content_key()) is not None
+        """Whether *trial*'s exact definition is the one stored under its name."""
+        row = self.get_by_name(trial.name)
+        return (row is not None
+                and row['processor'] == trial.processor
+                and row['method'] == trial.method
+                and row['adapter'] == trial.adapter
+                and row['params'] == trial.params
+                and row['edges'] == trial.edges)
 
-    def get_definition(self, content_key):
-        """Stored definition as a dict, or ``None``."""
+    def get_by_name(self, name):
+        """Stored definition for *name*, or ``None``."""
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT * FROM trials WHERE content_key = ?", (content_key,)
+                "SELECT * FROM trials WHERE name = ?", (name,)
             ).fetchone()
         return self._row_to_trial(row) if row else None
 
@@ -112,7 +119,6 @@ class TrialStore:
     @staticmethod
     def _row_to_trial(row):
         return {
-            'content_key': row['content_key'],
             'name': row['name'],
             'label': row['label'],
             'processor': row['processor'],
@@ -128,26 +134,23 @@ class TrialStore:
     # ------------------------------------------------------------------
 
     def record(self, trial_name, experimenter, outer_idx, inner_idx,
-               content_key=None, pipeline_version=None, status=None):
+               pipeline_version=None, status=None):
         """Upsert one fold's outcome.
 
         Args:
             trial_name (str): Trial name — also its artifact directory.
             experimenter (str): The Experimenter's name.
             outer_idx (int), inner_idx (int): Fold coordinates.
-            content_key (str, optional): Which definition this name held at the
-                time, so a later redefinition stays distinguishable.
-            pipeline_version (str, optional): ``Pipeline.content_key()`` — the
-                Pipeline this ran against. A Project maps it to a readable
-                version number; on its own it is still a stable identity.
+            pipeline_version (int, optional): The Pipeline version this ran
+                against (the Experimenter's ``pipeline_version``).
             status (str, optional): ``'built'``, ``'finalized'``, ``'error'``, ...
         """
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO experiment_hist "
-                "(trial_name, experimenter, outer_idx, inner_idx, content_key, "
-                "pipeline_version, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (trial_name, experimenter, outer_idx, inner_idx, content_key,
+                "(trial_name, experimenter, outer_idx, inner_idx, "
+                "pipeline_version, status) VALUES (?, ?, ?, ?, ?, ?)",
+                (trial_name, experimenter, outer_idx, inner_idx,
                  pipeline_version, status),
             )
 

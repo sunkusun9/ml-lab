@@ -2,33 +2,19 @@
 
 The components (PipelineBuilder, Experimenter, Trainer, Collectors, TrialStore)
 each take a path and know nothing about each other. A Project hands out those
-paths from one root and keeps the registries that span them: Pipeline versions
-and the Trial store.
+paths from one root and keeps the registry that spans them: the Trial store.
+Pipeline versions are *not* a project-wide registry — each pipeline tracks its
+own version counter in its own db (see :meth:`build_pipeline`).
 
 Components still work standalone — a Project is a convenience over them, not a
 requirement.
 """
-import sqlite3
-import pickle as pkl
 from pathlib import Path
 
 from ._cache import DataCache
 from ._trial_store import TrialStore
 from ._experimenter_store import ExperimenterStore
 from .collector import Collectors
-
-_SCHEMA_SQL = """
-    CREATE TABLE IF NOT EXISTS pipeline_versions (
-        name        TEXT NOT NULL,
-        version     INTEGER NOT NULL,
-        content_key TEXT NOT NULL,
-        pipeline_id TEXT,
-        path        TEXT NOT NULL,
-        PRIMARY KEY (name, version)
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_content
-        ON pipeline_versions (name, content_key);
-"""
 
 
 class Project:
@@ -37,10 +23,10 @@ class Project:
     Layout::
 
         {path}/
-          project.db          pipeline version index
           experimenters.db    Experimenter registry, keyed by name
           trials.db           TrialStore (definitions + run history)
-          pipelines/{name}/   PipelineBuilder db, and v{n}.pkl per built version
+          pipelines/{name}/   PipelineBuilder db (incl. its own version counter),
+                               and v{n}.pkl per built version
           collectors/         Collectors registry
           exp/{name}/         Experimenter artifacts, keyed by its name
           trainers/{name}/    Trainer artifacts
@@ -57,9 +43,6 @@ class Project:
         self.cache_maxsize = cache_maxsize
         self.cache = DataCache(maxsize=cache_maxsize)
         self.path.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.path / 'project.db'
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.executescript(_SCHEMA_SQL)
         self.trials = TrialStore(self.path)
         self.experimenters = ExperimenterStore(self.path)
 
@@ -134,82 +117,36 @@ class Project:
     # pipeline versions
     # ------------------------------------------------------------------
 
-    def save_pipeline(self, pipeline, name='pipeline'):
-        """Record *pipeline* as a version of *name* and return the version number.
+    def build_pipeline(self, builder):
+        """Build *builder* and persist the result as its next version.
 
-        Versions are keyed by ``Pipeline.content_key()``, so re-saving an
-        unchanged Pipeline returns the existing number instead of minting a new
-        one — rebuilding is not a version bump.
+        Every call mints a new version — there is no content dedup, so
+        rebuilding an unchanged builder still bumps the version. The counter
+        lives in the builder's own db (wherever it was created — see
+        :meth:`pipeline_builder`), not in a project-wide registry.
 
-        Stored as a pickle for now; the format is deliberately behind this
-        method so it can change without touching callers.
+        Returns:
+            Pipeline: The built Pipeline, with ``.version`` set.
+
+        Raises:
+            ValueError: If *builder* has no db (created without a path).
         """
-        content_key = pipeline.content_key()
-        with sqlite3.connect(str(self.db_path)) as conn:
-            row = conn.execute(
-                "SELECT version FROM pipeline_versions WHERE name = ? AND content_key = ?",
-                (name, content_key),
-            ).fetchone()
-            if row:
-                return row[0]
-            row = conn.execute(
-                "SELECT COALESCE(MAX(version), 0) FROM pipeline_versions WHERE name = ?",
-                (name,),
-            ).fetchone()
-            version = row[0] + 1
-            version_path = self.pipeline_path(name) / f'v{version}.pkl'
-            with open(version_path, 'wb') as f:
-                pkl.dump(pipeline, f)
-            conn.execute(
-                "INSERT INTO pipeline_versions (name, version, content_key, pipeline_id, path) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (name, version, content_key, pipeline.pipeline_id, str(version_path)),
+        if builder._store is None:
+            raise ValueError(
+                "builder has no db path; create it via project.pipeline_builder(name)"
             )
-            return version
+        pipeline = builder.build()
+        builder._store.save_version(pipeline)
+        return pipeline
 
     def load_pipeline(self, name='pipeline', version=None):
         """Load a saved Pipeline version (latest if *version* is omitted)."""
-        with sqlite3.connect(str(self.db_path)) as conn:
-            if version is None:
-                row = conn.execute(
-                    "SELECT path FROM pipeline_versions WHERE name = ? "
-                    "ORDER BY version DESC LIMIT 1", (name,),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT path FROM pipeline_versions WHERE name = ? AND version = ?",
-                    (name, version),
-                ).fetchone()
-        if not row:
-            raise KeyError(f"No saved pipeline {name!r} version {version!r}")
-        with open(row[0], 'rb') as f:
-            return pkl.load(f)
-
-    def get_pipeline_version(self, pipeline, name='pipeline'):
-        """Version number recorded for *pipeline*'s content, or ``None``."""
-        with sqlite3.connect(str(self.db_path)) as conn:
-            row = conn.execute(
-                "SELECT version FROM pipeline_versions WHERE name = ? AND content_key = ?",
-                (name, pipeline.content_key()),
-            ).fetchone()
-        return row[0] if row else None
+        from ._pipeline_store import PipelineStore
+        return PipelineStore(self.pipeline_path(name), name).load_version(version)
 
     def list_pipeline_versions(self, name='pipeline'):
-        with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM pipeline_versions WHERE name = ? ORDER BY version", (name,),
-            ).fetchall()
-        return [dict(r) for r in rows]
-
-    def resolve_version(self, content_key, name='pipeline'):
-        """Version number for a ``content_key`` as stored in run history."""
-        with sqlite3.connect(str(self.db_path)) as conn:
-            row = conn.execute(
-                "SELECT version FROM pipeline_versions WHERE name = ? AND content_key = ?",
-                (name, content_key),
-            ).fetchone()
-        return row[0] if row else None
+        from ._pipeline_store import PipelineStore
+        return PipelineStore(self.pipeline_path(name), name).list_versions()
 
     def __repr__(self):
         return f"<Project {self.path}>"

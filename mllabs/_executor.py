@@ -25,7 +25,6 @@ def _write_prep_error(node_path, node_attrs, edges, exc):
     }
     info = {
         'build_id': str(uuid.uuid4()),
-        'node_serial': node_attrs.get('serial'),
         'fit_time': 0.0,
         'train_shape': None,
         'edges': edges,
@@ -57,7 +56,6 @@ def _process(node_attrs, train_data, valid_data, fit_process, monitor, gpu_id_li
             warn_msgs = [f"{w.category.__name__}: {w.message}" for w in caught]
             info = {
                 'build_id': str(uuid.uuid4()),
-                'node_serial': node_attrs.get('serial'),
                 'role': node_attrs.get('role'),
                 'definition': _definition_of(node_attrs),
                 'fit_time': time.time() - start_time,
@@ -79,7 +77,6 @@ def _process(node_attrs, train_data, valid_data, fit_process, monitor, gpu_id_li
     ref_data = train_data[_ref_key]
     info = {
         'build_id': str(uuid.uuid4()),
-        'node_serial': node_attrs.get('serial'),
         'role': node_attrs.get('role'),
         'definition': _definition_of(node_attrs),
         'fit_time': elapsed_time,
@@ -521,8 +518,7 @@ class TrialJob:
 
     Attributes:
         trial (Trial): What to fit.
-        attrs (dict): Resolved node attributes, with ``serial`` set to the
-            Trial id.
+        attrs (dict): Resolved node attributes (``trial.get_attrs()``).
         cache_key (tuple[int, int]): ``(outer_idx, inner_idx)`` — also the
             fold coordinates used for artifacts, collectors and history.
         flow (TrainDataFlow): Supplies train/valid/test inputs and owns the

@@ -1,7 +1,5 @@
 import re
 import uuid
-import json
-import hashlib
 from pathlib import Path
 from ._describer import desc_pipeline, desc_node, compare_nodes
 from ._pipeline_store import PipelineStore
@@ -149,9 +147,7 @@ _DEFINITION_KEYS = ('processor', 'method', 'adapter', 'params', 'edges')
 def _definition_of(attrs):
     """The part of a node's attrs that determines its output.
 
-    ``serial`` is excluded on purpose: it is a fresh UUID after any edit, so it
-    reports *that* something changed, never *whether* the result would differ.
-    ``label``/``tag`` are display only.
+    ``name``/``label``/``tag`` are excluded — display/identity only.
     """
     return {k: attrs.get(k) for k in _DEFINITION_KEYS}
 
@@ -362,7 +358,6 @@ class _PipelineNode:
         self.adapter = adapter
         self.params = params if params is not None else {}
         self.desc = desc
-        self.serial = str(uuid.uuid4())
 
         self.output_edges = []  # 이 노드를 입력으로 사용하는 노드들의 이름
         self.attrs = None
@@ -372,7 +367,6 @@ class _PipelineNode:
             self.name, self.grp, self.processor, self.edges.copy(),
             self.method, self.adapter, self.params.copy(), self.desc
         )
-        ret.serial = self.serial
         ret.output_edges = self.output_edges.copy()
         return ret
 
@@ -403,7 +397,6 @@ class _PipelineNode:
             'params': params,
             'method': grp_attrs.get('method') if self.method is None else self.method,
             'role': 'stage',
-            'serial': self.serial,
         }
 
         return self.attrs
@@ -448,7 +441,6 @@ class _DataSourceNode(_PipelineNode):
             'name': self.name,
             'grp': self.grp,
             'role': 'datasource',
-            'serial': self.serial,
             'schema': self.schema.copy(),
             'targets': list(self.targets),
         }
@@ -456,7 +448,6 @@ class _DataSourceNode(_PipelineNode):
 
     def copy(self):
         ret = _DataSourceNode()
-        ret.serial = self.serial
         ret.schema = self.schema.copy()
         ret.targets = list(self.targets)
         ret.output_edges = self.output_edges.copy()
@@ -476,12 +467,12 @@ class _BuiltNode:
     """
 
     __slots__ = ('name', 'label', 'processor', 'edges', 'method',
-                 'adapter', 'params', 'serial', 'desc', 'output_edges')
+                 'adapter', 'params', 'desc', 'output_edges')
 
     role = 'stage'
 
     def __init__(self, name, label, processor, edges, method, adapter,
-                 params, serial, desc, output_edges):
+                 params, desc, output_edges):
         self.name = name
         self.label = label
         self.processor = processor
@@ -489,7 +480,6 @@ class _BuiltNode:
         self.method = method
         self.adapter = adapter
         self.params = params
-        self.serial = serial
         self.desc = desc
         self.output_edges = output_edges
 
@@ -503,13 +493,12 @@ class _BuiltNode:
             'adapter': self.adapter,
             'params': self.params,
             'method': self.method,
-            'serial': self.serial,
         }
 
     def copy(self, output_edges=None):
         return _BuiltNode(
             self.name, self.label, self.processor, dict(self.edges),
-            self.method, self.adapter, dict(self.params), self.serial,
+            self.method, self.adapter, dict(self.params),
             self.desc,
             list(self.output_edges if output_edges is None else output_edges),
         )
@@ -521,28 +510,26 @@ class _BuiltNode:
 class _BuiltDataSource:
     """DataSource entry of a built :class:`Pipeline` (``nodes[None]``)."""
 
-    __slots__ = ('name', 'role', 'schema', 'targets', 'serial', 'output_edges')
+    __slots__ = ('name', 'role', 'schema', 'targets', 'output_edges')
 
-    def __init__(self, name, schema, targets, serial, output_edges):
+    def __init__(self, name, schema, targets, output_edges):
         self.name = name
         self.role = 'datasource'
         self.schema = schema
         self.targets = targets
-        self.serial = serial
         self.output_edges = output_edges
 
     def get_attrs(self):
         return {
             'name': self.name,
             'role': 'datasource',
-            'serial': self.serial,
             'schema': self.schema,
             'targets': self.targets,
         }
 
     def copy(self, output_edges=None):
         return _BuiltDataSource(
-            self.name, dict(self.schema), list(self.targets), self.serial,
+            self.name, dict(self.schema), list(self.targets),
             list(self.output_edges if output_edges is None else output_edges),
         )
 
@@ -568,6 +555,9 @@ class Pipeline:
             the DataSource (a :class:`_BuiltDataSource`).
         pipeline_id (str): Identity of the builder this was built from.
         build_id (str): Identity of this particular build.
+        version (int | None): Set by :meth:`Project.build_pipeline` once this
+            Pipeline is persisted as a version; ``None`` for an unsaved,
+            in-memory build.
     """
 
     def __init__(self, nodes, datasource, pipeline_id, build_id=None):
@@ -575,31 +565,13 @@ class Pipeline:
         self.nodes.update(nodes)
         self.pipeline_id = pipeline_id
         self.build_id = build_id if build_id is not None else str(uuid.uuid4())
+        self.version = None
         self._topo_order = _affected_nodes(self.nodes, [None])
         self._attrs = {name: node.get_attrs() for name, node in self.nodes.items()}
 
     @property
     def datasource(self):
         return self.nodes[None]
-
-    def content_key(self):
-        """Stable hash of what this Pipeline *is*, for versioning.
-
-        ``build_id`` is minted fresh on every :meth:`PipelineBuilder.build`
-        call, so it identifies the call, not the content — rebuilding an
-        unchanged builder would otherwise look like a new version. Node serials
-        already change whenever a definition (or anything upstream of it) does,
-        so hashing them plus the DataSource serial is enough.
-        """
-        payload = json.dumps(
-            {
-                'datasource': self.datasource.serial,
-                'nodes': {name: node.serial
-                          for name, node in self.nodes.items() if name is not None},
-            },
-            sort_keys=True,
-        )
-        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
     def get_node(self, name):
         return self.nodes[name]
@@ -755,7 +727,6 @@ class PipelineBuilder:
             ds = _DataSourceNode()
             ds.schema = data['datasource']['schema']
             ds.targets = data['datasource']['targets']
-            ds.serial = data['datasource']['serial']
             self.nodes[None] = ds
 
         self.grps = {'__datasource__': _PipelineGroup('__datasource__')}
@@ -773,7 +744,6 @@ class PipelineBuilder:
                 edges=d['edges'], method=d['method'], adapter=d['adapter'],
                 params=d['params'], desc=d['desc'],
             )
-            node.serial = d['serial']
             self.nodes[name] = node
 
         self._rebuild_derived_state()
@@ -848,11 +818,10 @@ class PipelineBuilder:
 
         # datasource
         db_ds = data['datasource']
-        if db_ds and db_ds['serial'] != self.nodes[None].serial:
-            ds = self.nodes[None]
+        ds = self.nodes[None]
+        if db_ds and (db_ds['schema'] != ds.schema or db_ds['targets'] != ds.targets):
             ds.schema = db_ds['schema']
             ds.targets = db_ds['targets']
-            ds.serial = db_ds['serial']
             ds.update_attrs()
             changes['datasource'] = 'updated'
 
@@ -890,6 +859,14 @@ class PipelineBuilder:
                 grp.update_attrs()
                 changes['grps']['updated'].append(name)
 
+        # A grp's own field change doesn't touch its member nodes' db rows, so
+        # their attrs cache (which embeds the grp's inherited values) needs
+        # invalidating here explicitly — the node loop below only catches
+        # changes to a node's *own* row.
+        affected_by_grp = set()
+        for name in changes['grps']['updated']:
+            affected_by_grp.update(self._get_all_nodes_in_grp(self.grps[name]))
+
         # nodes
         db_nodes = data['nodes']
         mem_node_names = set(self.nodes.keys()) - {None}
@@ -906,14 +883,15 @@ class PipelineBuilder:
                 edges=d['edges'], method=d['method'], adapter=d['adapter'],
                 params=d['params'], desc=d['desc'],
             )
-            node.serial = d['serial']
             self.nodes[name] = node
             changes['nodes']['added'].append(name)
 
         for name in mem_node_names & db_node_names:
             d = db_nodes[name]
             node = self.nodes[name]
-            if node.serial != d['serial']:
+            changed = node.diff(d['grp'], d['processor'], d['edges'],
+                                d['method'], d['adapter'], d['params'])
+            if changed or node.desc != d['desc'] or name in affected_by_grp:
                 node.grp = d['grp']
                 node.processor = d['processor']
                 node.edges = d['edges']
@@ -921,7 +899,6 @@ class PipelineBuilder:
                 node.adapter = d['adapter']
                 node.params = d['params']
                 node.desc = d['desc']
-                node.serial = d['serial']
                 node.update_attrs()
                 changes['nodes']['updated'].append(name)
 
@@ -932,25 +909,6 @@ class PipelineBuilder:
     @property
     def datasource(self):
         return self.nodes[None]
-
-    def content_key(self):
-        """Stable hash of what this Pipeline *is*, for versioning.
-
-        ``build_id`` is minted fresh on every :meth:`PipelineBuilder.build`
-        call, so it identifies the call, not the content — rebuilding an
-        unchanged builder would otherwise look like a new version. Node serials
-        already change whenever a definition (or anything upstream of it) does,
-        so hashing them plus the DataSource serial is enough.
-        """
-        payload = json.dumps(
-            {
-                'datasource': self.datasource.serial,
-                'nodes': {name: node.serial
-                          for name, node in self.nodes.items() if name is not None},
-            },
-            sort_keys=True,
-        )
-        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
     def set_datasource(self, schema, targets=None):
         """Define the input data schema and target columns.
@@ -985,10 +943,8 @@ class PipelineBuilder:
 
         ds.schema = dict(schema)
         ds.targets = targets
-        ds.serial = str(uuid.uuid4())
         ds.update_attrs()
 
-        self._bump_serials(self._get_affected_nodes([None]))
         self._db_write(lambda conn: self._store.write_datasource(conn, self.nodes[None]))
         return 'update'
 
@@ -1027,7 +983,6 @@ class PipelineBuilder:
                 method=attrs['method'],
                 adapter=attrs['adapter'],
                 params=dict(attrs['params']),
-                serial=attrs['serial'],
                 desc=node.desc,
                 output_edges=list(node.output_edges),
             )
@@ -1037,7 +992,6 @@ class PipelineBuilder:
             name=ds.name,
             schema=dict(ds.schema),
             targets=list(ds.targets),
-            serial=ds.serial,
             output_edges=list(ds.output_edges),
         )
         return Pipeline(nodes, datasource, self.pipeline_id)
@@ -1192,24 +1146,6 @@ class PipelineBuilder:
             self.grps[child_name].update_attrs()
             self._cascade_clear_attrs(child_name)
 
-    def _bump_serials(self, node_names):
-        for name in node_names:
-            if name is not None and name in self.nodes:
-                self.nodes[name].serial = str(uuid.uuid4())
-                self.nodes[name].update_attrs()
-
-        def _do(conn):
-            for name in node_names:
-                if name is not None and name in self.nodes:
-                    conn.execute(
-                        "UPDATE nodes SET serial = ? WHERE name = ?",
-                        (self.nodes[name].serial, name)
-                    )
-        self._db_write(_do)
-
-    def _get_affected_nodes(self, nodes):
-        return _affected_nodes(self.nodes, nodes)
-
     def set_grp(
             self, name, processor=None, edges=None, method=None, parent=None, adapter=None, params=None, desc=None, exist='diff'
         ):
@@ -1323,7 +1259,6 @@ class PipelineBuilder:
                 if node_name in self.nodes:
                     self.nodes[node_name].update_attrs()
 
-        self._bump_serials(self._get_affected_nodes(affected_nodes))
         self._db_write(lambda conn: self._store.write_grp(conn, grp))
 
         return {
@@ -1577,9 +1512,6 @@ class PipelineBuilder:
             affected_nodes = list()
 
         self.nodes[name] = node
-
-        if is_update:
-            self._bump_serials(affected_nodes)
 
         self._db_write(lambda conn: self._store.write_node(conn, node))
 

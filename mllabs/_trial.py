@@ -1,5 +1,4 @@
 import json
-import hashlib
 
 from itertools import product
 
@@ -15,20 +14,19 @@ class Trial:
     adapter, params, edges) but is handed straight to ``Experimenter.exp``
     rather than declared on a :class:`~mllabs.PipelineBuilder`.
 
-    Identity is two-part:
+    ``name`` is the identity: human-readable, stable, and used as the on-disk
+    artifact directory and the :class:`~mllabs.TrialStore` key — the same role
+    the Head node name played. Redefining a name overwrites both the artifact
+    and its ``TrialStore`` row; ``content_key()`` is a plain-value comparison
+    utility (is this the same definition as that one?), not a stored key.
 
-    ``name``
-        Human-readable, stable, and used as the on-disk artifact directory —
-        the same role the Head node name played.
-    ``content_key()``
-        Hash of the definition itself.
-
-    A Trial's own key says nothing about the preprocessing it read, and Heads no
-    longer live in the pipeline, so ``_bump_serials`` cannot cascade a Stage
-    change into them. That gap is closed separately: a run records the serials
-    of the Stages it actually consumed (:meth:`stage_names`), and those are
-    compared against the fold's current Stages before reusing an artifact. The
-    check therefore needs the fold, not a Pipeline.
+    A Trial's own definition says nothing about the preprocessing it read, and
+    Heads no longer live in the pipeline, so a Stage change cannot cascade into
+    them through the Pipeline graph. That gap is closed separately: each
+    caller that resets stale/changed Stages also finds the Trials whose
+    ``edges`` reference one of them (:meth:`stage_names` for
+    ``Trainer.reset_nodes``, or the artifact's own recorded ``edges`` for
+    ``Experimenter._drop_stale``) and resets those too.
 
     Attributes:
         name (str): Identifier, also the artifact directory name.
@@ -78,7 +76,9 @@ class Trial:
 
         ``name``/``label`` are excluded — renaming a Trial does not change what
         it computes. Params are plain data by construction (``_validate_params``
-        rejects live objects), which is what makes a stable hash possible at all.
+        rejects live objects), which is what makes a stable, comparable
+        rendering possible at all. Not stored anywhere; use it to compare two
+        Trial definitions for equality without listing every field by hand.
         """
         return json.dumps(
             serialize_value({
@@ -94,9 +94,11 @@ class Trial:
     def stage_names(self):
         """Names of the Stage nodes this Trial's edges read.
 
-        Only direct references are needed: a Stage's own serial is already
-        bumped when anything upstream of it changes (``_bump_serials`` walks
-        ``output_edges``), so the chain is covered transitively.
+        Only direct references are needed: callers intersect this against a
+        set of reset/stale Stage names that is already transitively closed
+        (``Pipeline.diff_from`` and ``Trainer.reset_nodes`` both cascade
+        through ``output_edges`` before checking Trials), so the chain is
+        covered without this method walking it itself.
         """
         names = set()
         for dsl_string in self.edges.values():

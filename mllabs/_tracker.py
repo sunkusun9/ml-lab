@@ -136,23 +136,19 @@ class TrialHistTracker(ExecuteTracker):
         tracker (ExecuteTracker): The display/logging tracker to delegate to.
         store (TrialStore): Where history is written.
         experimenter (str): Experimenter name — half of the history key.
-        pipeline_version (str): ``Pipeline.content_key()`` of the run.
-        content_keys (dict, optional): ``{trial_name: content_key}``, so a row
-            records which definition the name held at the time.
+        pipeline_version (int): The Experimenter's ``pipeline_version`` for the run.
     """
 
-    def __init__(self, tracker, store, experimenter, pipeline_version, content_keys=None):
+    def __init__(self, tracker, store, experimenter, pipeline_version):
         super().__init__(tracker.total, len(tracker.workers))
         self._tracker = tracker
         self._store = store
         self._experimenter = experimenter
         self._pipeline_version = pipeline_version
-        self._content_keys = content_keys or {}
 
     def _record(self, node_name, outer_idx, inner_idx, status):
         self._store.record(
             node_name, self._experimenter, outer_idx, inner_idx,
-            content_key=self._content_keys.get(node_name),
             pipeline_version=self._pipeline_version,
             status=status,
         )

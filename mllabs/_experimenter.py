@@ -305,7 +305,7 @@ class Experimenter():
         no longer exist, and any Trial that read one of those Stages.
 
         Args:
-            version (int): Pipeline version number (see ``Project.save_pipeline``).
+            version (int): Pipeline version number (see ``Project.build_pipeline``).
             pipeline_name (str, optional): Pipeline name within the Project.
                 Defaults to the one this Experimenter was created with.
 
@@ -507,9 +507,9 @@ class Experimenter():
     def build(self, nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None):
         """Build Stage nodes.
 
-        Uses ``self.pipeline`` — compared against the artifacts already on
-        disk, nodes whose ``serial`` no longer matches are reset and
-        rebuilt automatically.
+        Staleness is settled when a Pipeline version is adopted
+        (:meth:`set_pipeline_version`), so anything still on disk when this
+        runs is current — it only builds what is missing.
 
         Args:
             nodes: Node query — ``None`` (all stages), ``list``, or regex ``str``.
@@ -603,11 +603,10 @@ class Experimenter():
             c.on_attach(self)
             c._setup(len(self.outer_folds), len(self.outer_folds[0].train_data_flows))
         n_jobs = min(n_jobs, len(jobs))
+        self.project.trials.register_all(t for t, _, _ in trials)
         tracker = TrialHistTracker(
             LoggerExecuteTracker(len(jobs), n_jobs, logger),
-            self.project.trials, self.name, pipeline.content_key(),
-            content_keys={t.name: self.project.trials.register(t)
-                          for t, _, _ in trials},
+            self.project.trials, self.name, self.pipeline_version,
         )
 
         try:

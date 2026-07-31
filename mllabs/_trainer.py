@@ -311,10 +311,9 @@ class Trainer:
     def train(self, n_jobs=1, gpu_id_list=None, logger=None):
         """Train all unbuilt selected nodes across all splits.
 
-        Stages are trained first (topological order), then Head nodes. Uses
-        ``self.pipeline`` — compared against the artifacts already on disk,
-        nodes whose ``serial`` no longer matches are reset and retrained
-        automatically.
+        Stages are trained first (topological order), then Trials. Stage
+        staleness is settled when a Pipeline version is adopted
+        (:meth:`set_pipeline_version`); Trial staleness is checked per job.
 
         Args:
             n_jobs (int): Number of parallel workers. Default 1 (sequential).

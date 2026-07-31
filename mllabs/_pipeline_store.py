@@ -5,6 +5,7 @@ _PipelineGroup/_PipelineNode/_DataSourceNode objects and plain dicts returned
 by fetch_all(); it does not know column names or table structure.
 """
 import json
+import pickle as pkl
 import sqlite3
 from pathlib import Path
 
@@ -31,14 +32,16 @@ _SCHEMA_SQL = """
         method TEXT,
         adapter TEXT,
         params TEXT,
-        desc TEXT,
-        serial TEXT NOT NULL
+        desc TEXT
     );
     CREATE TABLE IF NOT EXISTS datasource (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         schema TEXT NOT NULL,
-        targets TEXT NOT NULL,
-        serial TEXT NOT NULL
+        targets TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS versions (
+        version INTEGER PRIMARY KEY,
+        path TEXT NOT NULL
     );
 """
 
@@ -85,7 +88,6 @@ class PipelineStore:
                 datasource = {
                     'schema': json.loads(row['schema']),
                     'targets': json.loads(row['targets']),
-                    'serial': row['serial'],
                 }
 
             grps = {}
@@ -110,7 +112,6 @@ class PipelineStore:
                     'adapter': deserialize_from_json(row['adapter']),
                     'params': deserialize_from_json(row['params']) or {},
                     'desc': row['desc'],
-                    'serial': row['serial'],
                 }
 
         return {'pipeline_id': pipeline_id, 'datasource': datasource, 'grps': grps, 'nodes': nodes}
@@ -141,20 +142,69 @@ class PipelineStore:
         from ._serialize import serialize_to_json
         conn.execute(
             "INSERT OR REPLACE INTO nodes "
-            "(name, grp, processor, edges, method, adapter, params, desc, serial) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(name, grp, processor, edges, method, adapter, params, desc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (node.name, node.grp,
              serialize_to_json(node.processor) if node.processor is not None else None,
              serialize_to_json(node.edges),
              node.method,
              serialize_to_json(node.adapter) if node.adapter is not None else None,
              serialize_to_json(node.params),
-             node.desc,
-             node.serial)
+             node.desc)
         )
 
     def write_datasource(self, conn, ds):
         conn.execute(
-            "INSERT OR REPLACE INTO datasource (id, schema, targets, serial) VALUES (1, ?, ?, ?)",
-            (json.dumps(ds.schema), json.dumps(ds.targets), ds.serial)
+            "INSERT OR REPLACE INTO datasource (id, schema, targets) VALUES (1, ?, ?)",
+            (json.dumps(ds.schema), json.dumps(ds.targets))
         )
+
+    # ------------------------------------------------------------------
+    # built Pipeline versions
+    # ------------------------------------------------------------------
+
+    def save_version(self, pipeline):
+        """Pickle *pipeline* as the next version; return the version number.
+
+        Every call mints a new version — there is no content dedup. The
+        counter lives here, in the same db as the definitions that produced
+        it, rather than in a project-wide registry.
+        """
+        with sqlite3.connect(str(self.db_path)) as conn:
+            row = conn.execute("SELECT COALESCE(MAX(version), 0) FROM versions").fetchone()
+            version = row[0] + 1
+            version_path = self.db_path.parent / f'v{version}.pkl'
+            pipeline.version = version
+            with open(version_path, 'wb') as f:
+                pkl.dump(pipeline, f)
+            conn.execute(
+                "INSERT INTO versions (version, path) VALUES (?, ?)",
+                (version, str(version_path)),
+            )
+        return version
+
+    def load_version(self, version=None):
+        """Load a saved Pipeline version (latest if *version* is omitted)."""
+        if not self.exists():
+            raise KeyError(f"No pipeline db at {self.db_path}")
+        with sqlite3.connect(str(self.db_path)) as conn:
+            if version is None:
+                row = conn.execute(
+                    "SELECT path FROM versions ORDER BY version DESC LIMIT 1"
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT path FROM versions WHERE version = ?", (version,)
+                ).fetchone()
+        if not row:
+            raise KeyError(f"No saved pipeline version {version!r} in {self.db_path}")
+        with open(row[0], 'rb') as f:
+            return pkl.load(f)
+
+    def list_versions(self):
+        if not self.exists():
+            return []
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM versions ORDER BY version").fetchall()
+        return [dict(r) for r in rows]

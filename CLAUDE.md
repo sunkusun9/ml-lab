@@ -30,7 +30,7 @@ Project(path, cache_maxsize)          경로·캐시 소유, 프로젝트 전역
   └─ Trainer(name)                  전체 데이터 학습 (trainers/{name}/)
                                        └─ to_inferencer() ──► Inferencer
 ```
-- **Project** (`_project.py`): 디렉토리 레이아웃 소유 + Pipeline 버전 색인. 컴포넌트는 여전히 단독 동작 가능하지만 Experimenter/Trainer는 Project를 요구
+- **Project** (`_project.py`): 디렉토리 레이아웃 소유 + `TrialStore`/`ExperimenterStore` 레지스트리. Pipeline 버전은 Project가 색인하지 않음 — 각 pipeline이 자기 db에 자기 버전을 직접 관리(`build_pipeline` 참조). 컴포넌트는 여전히 단독 동작 가능하지만 Experimenter/Trainer는 Project를 요구
 - **PipelineBuilder / Pipeline** (`_pipeline.py`): 가변 빌더 + `build()`가 만드는 불변 **stage 전용** 그래프
 - **Trial / make_trials** (`_trial.py`): 평가할 구성 하나 = 예전의 Head 노드. Pipeline 밖에 있음
 - **TrialStore** (`_trial_store.py`): `trials`(정의) + `experiment_hist`(fold별 실행 이력)
@@ -87,17 +87,17 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   - **`role` 파라미터 없음** (stage 전용), **`tag` 파라미터 없음**
   - **`processor`/`adapter`/`params` 스펙 검증** (`_validate_processor`/`_validate_adapter`/`_validate_params`) — 산 객체를 넘기면 `TypeError`. 아래 "Lazy resolution" 참조
 - `build()` → `Pipeline`
-- `get_node_names(query)`, `get_node_attrs(name)`, `_get_affected_nodes(nodes)`, `_find_descendants(name)`
-- `_bump_serials(node_names)`: 정의 변경 시 새 UUID 부여 (staleness 판정에는 더 이상 쓰이지 않음 — 아래 참조)
+- `get_node_names(query)`, `get_node_attrs(name)`, `_find_descendants(name)`
+- `sync()`: DB가 source of truth. 그룹/노드 필드를 직접 값 비교(`diff()`)해 갱신하고, **그룹이 바뀌면 그 그룹(+자식 그룹) 소속 노드들의 attrs 캐시도 함께 무효화**해 `changes['nodes']['updated']`에 포함시킴(노드 자신의 행은 안 바뀌었어도 상속받는 값이 바뀌었으므로)
+- **`serial` 없음(2026-08-01 제거)**: 예전엔 정의 변경마다 새 UUID를 부여해 staleness/버전 판정에 썼지만, 지금은 두 용도 모두 다른 방식으로 대체됨 — staleness는 `Pipeline.diff_from`(아래)의 값 비교, 버전은 해시/dedup 없이 `PipelineStore`가 관리하는 단순 `max+1` 카운터(`Pipeline.content_key`도 없음 — 아래 "저장 구조" 참조)
 - `copy()`, `copy_nodes(node_names)` — 선택적 복사 (builder→builder)
 - `compare_nodes(nodes)` → `{processor_name: DataFrame}` (params 차이 + edges['X'] stage별 변수 차이)
 - `desc_pipeline(max_depth, direction)`, `desc_node(node_name, direction, show_params)`: Mermaid 다이어그램 — grp 계층이 필요하므로 **builder 전용**
 
 #### Pipeline (빌드 결과)
 - `nodes`: `{name: _BuiltNode}` — `None` 키는 `_BuiltDataSource` (builder와 동일한 관례)
-- `_BuiltNode` 속성(`__slots__`): `name`, `label`, `processor`, `edges`, `method`, `adapter`, `params`, `serial`, `desc`, `output_edges` (+ 클래스 상수 `role='stage'`)
-- `pipeline_id`(builder 신원) / `build_id`(빌드 호출마다 새 UUID)
-- **`content_key()`**: 노드 serial 집합 + datasource serial의 sha256. **버전 키는 이것** — `build_id`는 내용이 같아도 매번 달라져서 못 씀
+- `_BuiltNode` 속성(`__slots__`): `name`, `label`, `processor`, `edges`, `method`, `adapter`, `params`, `desc`, `output_edges` (+ 클래스 상수 `role='stage'`)
+- `pipeline_id`(builder 신원) / `build_id`(빌드 호출마다 새 UUID) / `version`(`int | None`) — **`Project.build_pipeline()`이 저장할 때만 세팅**. `builder.build()`를 직접 부르면 `None`(미저장 in-memory 빌드)
 - `get_node(name)`, `get_node_attrs(name)`, `get_node_names(query=None)`
 - `topo_order()`: DataSource에서 내려오는 깊이순 노드명 (DataSource 제외) — 빌드 시 1회 계산해 캐시
 - `descendants(name)`, `check_data_compatibility(data)`
@@ -108,7 +108,7 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 - **`_DataSourceNode`** (`_PipelineNode` 서브클래스):
   - `schema`: `{col: var_type}` — var_type은 VAR_TYPES 중 하나
   - `targets`: `list[str]` — 타겟 컬럼 목록 (타입과 별도)
-  - `get_attrs(grps)`: role='datasource', serial, schema, targets 반환 (processor/edges/method/params 없음)
+  - `get_attrs(grps)`: role='datasource', schema, targets 반환 (processor/edges/method/params 없음)
 
 - **`_PipelineGroup`**: 노드 그룹 — builder 내부 전용
   - 속성: `name`, `processor`, `edges`, `method`, `parent`, `adapter`, `params`, `desc`
@@ -117,9 +117,9 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   - `diff(processor, edges, method, parent, adapter, params)`: 달라진 필드명 리스트 반환 (`desc` 제외 → desc-only 변경은 rebuild 미유발)
 
 - **`_PipelineNode`**: 개별 노드 — builder 내부 전용
-  - 속성: `name`, `grp`, `processor`, `edges`, `method`, `adapter`, `params`, `desc`, **`serial`** (UUID str)
+  - 속성: `name`, `grp`, `processor`, `edges`, `method`, `adapter`, `params`, `desc`
   - `output_edges`: 이 노드를 입력으로 사용하는 노드명 리스트
-  - `get_attrs(grps)`: 그룹 속성과 노드 속성 병합 (`serial` 포함, `role='stage'` 상수)
+  - `get_attrs(grps)`: 그룹 속성과 노드 속성 병합 (`role='stage'` 상수)
   - `diff(grp, processor, edges, method, adapter, params)`: 달라진 필드명 리스트 반환 (`desc` 제외)
   - `set_grp`/`set_node`: `desc` 파라미터 수락; exist='diff' skip 경로에서도 `desc`는 업데이트됨
 
@@ -132,9 +132,9 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 Head를 Pipeline에서 떼어낸 결과. **Experiment 클래스는 없음** — Trial 리스트를 직접 넘긴다.
 
 - **`Trial`**: 평가할 구성 하나. `name`, `processor`, `method`, `adapter`, `params`, `edges`, `label`, `tag`
-  - `get_attrs()`: `Pipeline.get_node_attrs()`와 같은 모양(`role='head'` 고정, `serial` 없음) → Connector/executor/Collector가 stage 노드와 동일하게 취급
-  - **이름이 식별자**. 디스크 아티팩트 디렉토리명이자 `TrialStore` 이력의 키
-  - `content_key()`: 정의(`processor/method/adapter/params/edges`)의 sha256. `name`/`label` 제외 — 이름을 바꿔도 계산 결과는 같음. **params가 순수 데이터로 강제된 덕에** 안정적 해시가 가능
+  - `get_attrs()`: `Pipeline.get_node_attrs()`와 같은 모양(`role='head'` 고정) → Connector/executor/Collector가 stage 노드와 동일하게 취급
+  - **이름이 식별자**. 디스크 아티팩트 디렉토리명이자 `TrialStore`(`trials` 테이블 PK)의 키 — 재정의하면 아티팩트도 `TrialStore` row도 덮어씀
+  - `content_key()`: 정의(`processor/method/adapter/params/edges`)의 정규화 JSON 문자열. `name`/`label` 제외 — 이름을 바꿔도 계산 결과는 같음. **params가 순수 데이터로 강제된 덕에** 안정적 렌더링 가능. **어디에도 저장되지 않는 순수 값-비교 유틸** — 두 정의가 같은지 판별할 때만 씀
   - `stage_names()`: edges가 참조하는 stage 이름 집합
 
 - **`make_trials(name, processor, edges, method, adapter, params, param_grid, tags)`** → `list[Trial]`
@@ -148,20 +148,23 @@ Head를 Pipeline에서 떼어낸 결과. **Experiment 클래스는 없음** — 
 - `Project(path, cache_maxsize=4GB)` — `DataCache`를 소유하고 모든 Experimenter/Trainer가 공유
 - 경로: `pipeline_path(name)`, `exp_path(name)`, `trainer_path(name)`, `inferencer_path(name)`, `collectors_path()`
 - 팩토리: `pipeline_builder(name)`, `collectors()`, `experimenter(name, data, **kw)`, `load_experimenter(name, data)`, `trainer(name, data, **kw)`, `load_trainer(name, data)`
-- **Pipeline 버전**: `save_pipeline(pipeline, name)` → 정수 버전(1부터). `content_key`로 중복 제거되므로 **재빌드만으로는 버전이 안 올라감**. `load_pipeline(name, version=None)`, `get_pipeline_version`, `list_pipeline_versions`, `resolve_version(content_key, name)`
-  - 저장은 pkl (`v{n}.pkl`) — 형식은 이 메소드 뒤에 숨어 있어 나중에 교체 가능
+- **Pipeline 버전**: `build_pipeline(builder)` → `builder.build()` 호출 후 결과를 다음 버전(1부터, `builder._store`가 관리하는 카운터의 `max+1`)으로 저장하고 `pipeline.version`에 세팅해 반환. **content dedup 없음** — 내용이 같아도 호출할 때마다 새 버전(`builder`에 path가 없으면 `ValueError`)
+  - 카운터/버전 파일은 **Project가 아니라 각 pipeline 자신의 db**(`pipelines/{name}/{name}.db`)가 소유 — `build_pipeline`은 `builder._store.save_version()`에 위임할 뿐, 프로젝트 전역 색인이 없음
+  - `load_pipeline(name, version=None)`, `list_pipeline_versions(name)` — 둘 다 내부적으로 `PipelineStore(pipeline_path(name), name)`를 통해 조회
+  - 저장은 pkl (`v{n}.pkl`) — 형식은 `PipelineStore.save_version`/`load_version` 뒤에 숨어 있어 나중에 교체 가능
 - `trials`: `TrialStore`, `experimenters`: `ExperimenterStore`, `list_experimenters()`
 
 ### TrialStore (`_trial_store.py`)
 ```sql
-trials(content_key PK, name, label, processor, method, adapter, params, edges, tag)
+trials(name PK, label, processor, method, adapter, params, edges, tag)
 experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
-                content_key, pipeline_version, status)
+                pipeline_version, status)
 ```
-- **인조식별자 없음.** `trials`는 정의 해시가 PK, 이력은 **이름 두 개**(trial 이름 + experimenter 이름)가 키
-- 이력을 이름으로 키잉하는 이유: 아티팩트가 이미 이름으로 키잉돼 있음(`{exp}/__folds/{o}/{i}/{trial_name}/`, `{project}/exp/{name}`). 맞춰두면 조인 없이 읽히고, **정의를 바꿔 재실행 = 아티팩트 덮어쓰기 = 행 덮어쓰기**가 일관됨
-- `register(trial)`/`register_all(trials)`, `has(trial)`, `get_definition(content_key)`, `list_trials()`
-- `record(trial_name, experimenter, outer_idx, inner_idx, content_key, pipeline_version, status)`, `get_hist(...)`, `get_status(...)`, `remove_hist(...)`
+- **인조식별자도 content hash도 없음.** 두 테이블 다 **이름이 PK**(`trials`는 trial 이름 하나, 이력은 trial 이름 + experimenter 이름). `pipeline_version`은 해시가 아니라 **정수** — 그 실행의 `Experimenter.pipeline_version`을 그대로 기록
+- 이름으로 키잉하는 이유: 아티팩트가 이미 이름으로 키잉돼 있음(`{exp}/__folds/{o}/{i}/{trial_name}/`, `{project}/exp/{name}`). 맞춰두면 조인 없이 읽히고, **정의를 바꿔 재실행 = 아티팩트 덮어쓰기 = 행 덮어쓰기**가 두 테이블 모두 일관됨(`register`는 `INSERT OR REPLACE`)
+- **content_key 컬럼 없음(2026-08-01 제거)**: params가 평문 데이터로 강제된 덕에 정의 일치 여부는 값 비교 하나로 충분(`has()`), 아티팩트 rebuild 필요 여부도 디스크 `info['definition']` 값 비교로 이미 판정(`Experimenter._make_jobs`) — 해시 컬럼은 이 둘을 재서술할 뿐이었음. `experiment_hist`는 실행 로그일 뿐 정의의 출처가 아니라서, 이름이 재정의되면 예전 정의 자체를 복원하는 기능은 애초에 없음(`Trial.content_key()` 메소드 자체는 두 정의를 값으로 비교하는 유틸로 `_trial.py`에 남아 있으나 저장/식별용으로는 안 쓰임)
+- `register(trial)`/`register_all(trials)`: 이름 기준 upsert(반환값 없음). `has(trial)`: 그 이름에 저장된 게 **지금** 이 정의와 같은지 필드별 비교. `get_by_name(name)`, `list_trials()`
+- `record(trial_name, experimenter, outer_idx, inner_idx, pipeline_version, status)`, `get_hist(...)`, `get_status(...)`, `remove_hist(...)`
 
 ### Experimenter (`_experimenter.py`)
 - 생성자: `Experimenter(project, name, data, ..., pipeline_name='pipeline', pipeline_version=None)` — 보통은 `project.experimenter(name, data, ...)`로 생성
@@ -210,7 +213,7 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
 - fold 경로 아래 노드별 아티팩트 관리: `{path}/{node_name}/`
   - `obj.pkl` — processor 객체
   - `result.pkl` — fit_transform/fit_predict 출력
-  - `info.pkl` — `{status, build_id, node_serial, role, definition, fit_time, edges, train_shape, ...}`
+  - `info.pkl` — `{status, build_id, role, definition, fit_time, edges, train_shape, ...}`
     - **`role`**: `'stage'`/`'head'` — 아티팩트가 자기 종류를 스스로 설명. `DataFlow.load()`가 이걸로 Trial을 걸러냄
     - **`definition`**: `_definition_of(attrs)` = `{processor, method, adapter, params, edges}` — Trial staleness 비교에 사용
 - `status(name)`: `None`(init) / `'built'` / `'finalized'` / `'error'`
@@ -390,10 +393,9 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
 4. old에는 있는데 지금 없는 이름 → stale (아티팩트 청소용)
 5. DataSource schema/targets가 바뀌면 → 전부 stale
 
-- **`serial`은 비교에서 의도적으로 제외** — 편집만 하면 새 UUID가 되므로 "뭔가 바뀌었다"만 말할 뿐 "결과가 달라지나"는 못 말함
 - **Trial 처리**: Trial은 Pipeline 밖이라 diff가 이름을 모름. 알 필요도 없음 — 각 아티팩트가 `info['edges']`와 `info['role']`을 기록하므로 stale stage를 읽은 Trial을 **디스크에서 찾아낸다**(`_drop_stale`)
 - **Trial 자신의 정의 변경**은 `_make_jobs`에서 `info['definition'] != _definition_of(attrs)`로 **값 직접 비교**. params가 평문 데이터로 강제돼 있어서 dict 비교가 정확함 (해시 불필요)
-- 이전 serial 방식으로는 불가능했던 것: **자기가 읽지 않는 stage를 고치면 Trial이 유지된다** (pipeline serial은 전역이라 이 구분이 안 됐음)
+- **`serial` 자체가 없음(2026-08-01 전체 제거)**: 예전엔 정의 변경마다 새 UUID를 부여해 "뭔가 바뀌었다"는 신호로 썼지만, "결과가 달라지나"는 말 못 했다 — 지금은 `diff_from`이 정의를 직접 비교하므로 그 신호 자체가 불필요해짐. 이게 가능해진 건: **자기가 읽지 않는 stage를 고쳐도 Trial이 유지된다**(예전 serial은 전역이라 이 구분이 안 됐음)는 성질이 부산물로 따라옴
 
 ## Lazy resolution: processor / adapter / params (edges DSL과 동일한 지연 원칙)
 - `set_grp`/`set_node`는 `processor`/`adapter`/`params`를 **스펙 형태만 검증하고 절대 resolve/instantiate하지 않음** — 실제 값으로의 변환은 전부 사용 시점(`_node_processor.py`)으로 미룸
@@ -462,7 +464,7 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
   - `ProcessWorker`(spawn): job 경계에서 `del` + `gc.collect()`로 이전 job의 데이터·모델을 놓아줌(안 하면 피크 = 이전 데이터 + 모델 + 새 데이터). 워커 로그 fd는 dup2 직후 close
 - **_tracker.py**: `ExecuteTracker` 기반
   - `LoggerExecuteTracker` — 워커 이벤트→logger. `typ`에 따라 `logger.info`/`warning` 라우팅
-  - **`TrialHistTracker(tracker, store, experimenter, pipeline_version, content_keys)`** — 로깅 tracker를 감싸 `done`/`error` 시점에 `TrialStore`에 이력 기록. 이벤트 시점이라 멀티워커도 그대로 커버되고, 사후에 디스크를 다시 읽지 않아도 됨
+  - **`TrialHistTracker(tracker, store, experimenter, pipeline_version)`** — 로깅 tracker를 감싸 `done`/`error` 시점에 `TrialStore`에 이력 기록(`pipeline_version`은 그 Experimenter의 정수 버전, 해시 아님). 이벤트 시점이라 멀티워커도 그대로 커버되고, 사후에 디스크를 다시 읽지 않아도 됨
 - **_describer.py**: desc_spec, desc_pipeline, desc_node, compare_nodes (`desc_status`는 죽은 코드라 제거됨)
 - **_logger.py**: BaseLogger, DefaultLogger (start/update/end_progress, adhoc_progress, rename_progress)
 - **col.py**: `@name` column-selector 레지스트리 — 위 "col.py" 섹션 참조
@@ -486,14 +488,13 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
 **Project가 경로를 소유한다.**
 ```
 {project.path}/
-  project.db                        # pipeline_versions (name, version, content_key, path)
   experimenters.db                  # experimenters (name PK, data_key, title, status,
                                     #                pipeline_name, pipeline_version)
   trials.db                         # trials + experiment_hist
 
   pipelines/{name}/
-    {name}.db                       # PipelineBuilder 노드/그룹 정의 (SQLite)
-    v{n}.pkl                        # 버전별 빌드 결과 Pipeline (형식은 save_pipeline 뒤에 숨어 있음)
+    {name}.db                       # PipelineBuilder 노드/그룹 정의 + versions(version PK, path) — 이 pipeline만의 버전 카운터
+    v{n}.pkl                        # 버전별 빌드 결과 Pipeline (형식은 PipelineStore.save_version 뒤에 숨어 있음)
 
   collectors/
     __collectors.json               # name → 클래스 ref + path
