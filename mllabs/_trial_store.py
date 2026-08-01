@@ -18,21 +18,40 @@ hist row is readable on its own, and that redefining a name overwrites its
 row exactly as it overwrites the artifact — true in both tables.
 
 Neither table stores a content hash. Whether a stored definition still
-matches a given Trial is a plain value comparison (``has``), and whether an
-artifact needs rebuilding is decided the same way, against the artifact's own
-``info['definition']`` on disk (see ``Experimenter._make_jobs``) — a hash
-would only restate what these already compare directly. ``experiment_hist``
-is a run log, not the source of truth for a definition: it does not attempt
-to recover what a name's definition used to be before it was redefined.
+matches a given Trial is a plain value comparison (``has``) — a hash would
+only restate what that already compares directly. ``experiment_hist`` is a
+run log, not the source of truth for a definition: it does not attempt to
+recover what a name's definition used to be before it was redefined.
+
+Whether a fold needs rebuilding is decided purely from ``experiment_hist``
+now (see ``Experimenter._make_jobs``): a fold recorded ``'built'`` is
+skipped, anything else (``'error'`` or no row) gets a job — the Trial's own
+definition is not compared against its on-disk artifact for this anymore, so
+redefining a Trial does not by itself force a rerun of folds already marked
+``'built'``. ``Trainer._make_trial_jobs`` still compares against the
+artifact's own ``info['definition']`` instead, since a Trainer has no
+``experiment_hist`` to consult.
+
+``experiment_hist`` also carries an ``info`` column (2026-08-01) — everything
+``_process()``/``_write_prep_error`` produced besides ``status`` (``build_id``,
+``definition``, ``fit_time``, ``edges``, ``train_shape``,
+``warnings``, and, on failure, ``error``), JSON-encoded. This is what used to
+live only in the per-fold ``info.pkl`` NodeStore wrote on disk; recording it
+here instead, via ``TrialHistTracker``, means it survives a ``reset_nodes()``
+that wipes the artifact, and is queryable across folds/experimenters without
+walking directories. See ``NodeInfoStore`` (``_node_info_store.py``) for the
+Stage-side equivalent.
 """
 import json
 import sqlite3
 from pathlib import Path
 
+from ._store import ArtifactStore
+
 _SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS trials (
         name        TEXT PRIMARY KEY,
-        label       TEXT,
+        desc        TEXT,
         processor   TEXT NOT NULL,
         method      TEXT,
         adapter     TEXT,
@@ -47,6 +66,7 @@ _SCHEMA_SQL = """
         inner_idx        INTEGER NOT NULL,
         pipeline_version INTEGER,
         status           TEXT,
+        info             TEXT,
         PRIMARY KEY (trial_name, experimenter, outer_idx, inner_idx)
     );
     CREATE INDEX IF NOT EXISTS idx_hist_experimenter
@@ -54,8 +74,14 @@ _SCHEMA_SQL = """
 """
 
 
-class TrialStore:
-    """Registry of Trial definitions plus a per-fold run history."""
+class TrialStore(ArtifactStore):
+    """Registry of Trial definitions plus a per-fold run history.
+
+    Inherits :class:`~mllabs._store.ArtifactStore`'s method shape but does
+    not override any of it — it never persists obj/result artifacts, only
+    definitions (``trials``) and run history (``experiment_hist``). See
+    ``ArtifactStore`` for why the interface is shared anyway.
+    """
 
     def __init__(self, path, name='trials'):
         self.db_path = Path(path) / f'{name}.db'
@@ -79,9 +105,9 @@ class TrialStore:
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO trials "
-                "(name, label, processor, method, adapter, params, edges, tag) "
+                "(name, desc, processor, method, adapter, params, edges, tag) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (trial.name, trial.label, trial.processor,
+                (trial.name, trial.desc, trial.processor,
                  trial.method, json.dumps(trial.adapter), json.dumps(trial.params),
                  json.dumps(trial.edges), json.dumps(trial.tag)),
             )
@@ -120,7 +146,7 @@ class TrialStore:
     def _row_to_trial(row):
         return {
             'name': row['name'],
-            'label': row['label'],
+            'desc': row['desc'],
             'processor': row['processor'],
             'method': row['method'],
             'adapter': json.loads(row['adapter']) if row['adapter'] else None,
@@ -134,7 +160,7 @@ class TrialStore:
     # ------------------------------------------------------------------
 
     def record(self, trial_name, experimenter, outer_idx, inner_idx,
-               pipeline_version=None, status=None):
+               pipeline_version=None, status=None, info=None):
         """Upsert one fold's outcome.
 
         Args:
@@ -143,19 +169,27 @@ class TrialStore:
             outer_idx (int), inner_idx (int): Fold coordinates.
             pipeline_version (int, optional): The Pipeline version this ran
                 against (the Experimenter's ``pipeline_version``).
-            status (str, optional): ``'built'``, ``'finalized'``, ``'error'``, ...
+            status (str, optional): ``'built'`` or ``'error'``.
+            info (dict, optional): Everything ``_process()``/``_write_prep_error``
+                produced besides ``status`` — ``build_id``,
+                ``definition``, ``fit_time``, ``edges``, ``train_shape``,
+                ``warnings``, and, on failure, ``error``. JSON-encoded.
         """
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO experiment_hist "
                 "(trial_name, experimenter, outer_idx, inner_idx, "
-                "pipeline_version, status) VALUES (?, ?, ?, ?, ?, ?)",
+                "pipeline_version, status, info) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (trial_name, experimenter, outer_idx, inner_idx,
-                 pipeline_version, status),
+                 pipeline_version, status, json.dumps(info) if info is not None else None),
             )
 
     def get_hist(self, trial_name=None, experimenter=None, pipeline_version=None):
-        """History rows matching whichever filters are given."""
+        """History rows matching whichever filters are given.
+
+        Each row's ``info`` is decoded back into a dict (``None`` if it was
+        never recorded).
+        """
         where, params = [], []
         for column, value in (('trial_name', trial_name),
                               ('experimenter', experimenter),
@@ -170,12 +204,24 @@ class TrialStore:
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            row = dict(r)
+            row['info'] = json.loads(row['info']) if row['info'] else None
+            result.append(row)
+        return result
 
     def get_status(self, trial_name, experimenter):
         """``{(outer_idx, inner_idx): status}`` for one trial in one experimenter."""
         return {
             (r['outer_idx'], r['inner_idx']): r['status']
+            for r in self.get_hist(trial_name=trial_name, experimenter=experimenter)
+        }
+
+    def get_info(self, trial_name, experimenter):
+        """``{(outer_idx, inner_idx): info}`` for one trial in one experimenter."""
+        return {
+            (r['outer_idx'], r['inner_idx']): r['info']
             for r in self.get_hist(trial_name=trial_name, experimenter=experimenter)
         }
 

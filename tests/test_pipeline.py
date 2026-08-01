@@ -528,39 +528,39 @@ class TestNodeAttrs:
         p.set_grp('g1', processor=DummyStage, method='transform',
                   edges={'X': '{x1}'}, params={'a': 1})
         p.set_node('n1', grp='g1')
-        attrs = p.get_node_attrs('n1')
-        assert attrs['processor'] == DummyStage
-        assert attrs['method'] == 'transform'
-        assert attrs['params'] == {'a': 1}
+        spec = p.get_node_spec('n1')
+        assert spec.processor == DummyStage
+        assert spec.method == 'transform'
+        assert spec.params == {'a': 1}
 
     def test_node_overrides_processor(self, p):
         p.set_grp('g1', processor=DummyStage, method='transform',
                   edges={'X': '{x1}'})
         p.set_node('n1', grp='g1', processor=AnotherProcessor)
-        attrs = p.get_node_attrs('n1')
-        assert attrs['processor'] == AnotherProcessor
+        spec = p.get_node_spec('n1')
+        assert spec.processor == AnotherProcessor
 
     def test_node_edges_full_override_by_default(self, p):
         p.set_grp('g1', processor=DummyStage, method='transform',
                   edges={'X': '{a}'})
         p.set_node('n1', grp='g1', edges={'X': '{b}'})
-        attrs = p.get_node_attrs('n1')
-        assert attrs['edges']['X'] == '{b}'
+        spec = p.get_node_spec('n1')
+        assert spec.edges['X'] == '{b}'
 
     def test_node_edges_plus_continues_from_group(self, p):
         p.set_grp('g1', processor=DummyStage, method='transform',
                   edges={'X': '{a}'})
         p.set_node('n1', grp='g1', edges={'X': '+ {b}'})
-        attrs = p.get_node_attrs('n1')
-        assert attrs['edges']['X'] == '{a} + {b}'
+        spec = p.get_node_spec('n1')
+        assert spec.edges['X'] == '{a} + {b}'
 
     def test_node_edges_minus_continues_from_group(self, p):
         p.set_datasource({'a': 'numerical', 'b': 'numerical'})
         p.set_grp('g1', processor=DummyStage, method='transform',
                   edges={'X': '{a, b}'})
         p.set_node('n1', grp='g1', edges={'X': '- {b}'})
-        attrs = p.get_node_attrs('n1')
-        assert attrs['edges']['X'] == '{a, b} - {b}'
+        spec = p.get_node_spec('n1')
+        assert spec.edges['X'] == '{a, b} - {b}'
 
     def test_node_edges_plus_without_group_value_raises(self, p):
         p.set_grp('g1', processor=DummyStage, method='transform')
@@ -571,8 +571,8 @@ class TestNodeAttrs:
         p.set_grp('g1', processor=DummyStage, method='transform',
                   edges={'X': '{x1}'}, params={'a': 1, 'b': 2})
         p.set_node('n1', grp='g1', params={'b': 3, 'c': 4})
-        attrs = p.get_node_attrs('n1')
-        assert attrs['params'] == {'a': 1, 'b': 3, 'c': 4}
+        spec = p.get_node_spec('n1')
+        assert spec.params == {'a': 1, 'b': 3, 'c': 4}
 
     def test_adapter_left_unresolved_when_unspecified(self, p):
         # By-processor-class default resolution is deferred to point of use
@@ -580,24 +580,24 @@ class TestNodeAttrs:
         p.set_grp('g1', processor=DummyStage, method='transform',
                   edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
-        attrs = p.get_node_attrs('n1')
-        assert attrs['adapter'] is None
+        spec = p.get_node_spec('n1')
+        assert spec.adapter is None
 
     def test_adapter_auto_detect_at_use(self, p):
         from mllabs.adapter import resolve_node_adapter
         p.set_grp('g1', processor=DummyStage, method='transform',
                   edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
-        attrs = p.get_node_attrs('n1')
-        adapter = resolve_node_adapter(attrs['processor'], attrs['adapter'])
+        spec = p.get_node_spec('n1')
+        adapter = resolve_node_adapter(spec.processor, spec.adapter)
         assert adapter is not None
 
     def test_node_attrs_caching(self, p):
         p.set_grp('g1', processor=DummyStage, method='transform',
                   edges={'X': '{x1}'})
         p.set_node('n1', grp='g1')
-        a1 = p.nodes['n1'].get_attrs(p.grps)
-        a2 = p.nodes['n1'].get_attrs(p.grps)
+        a1 = p.nodes['n1'].get_spec(p.grps)
+        a2 = p.nodes['n1'].get_spec(p.grps)
         assert a1 is a2
 
 
@@ -742,9 +742,9 @@ class TestRenameGrp:
         assert sp.nodes['s1'].grp == 'renamed'
 
     def test_invalidates_node_cache(self, sp):
-        sp.nodes['s1'].get_attrs(sp.grps)
+        sp.nodes['s1'].get_spec(sp.grps)
         sp.rename_grp('stage1', 'renamed')
-        assert sp.nodes['s1'].attrs is None
+        assert sp.nodes['s1'].spec is None
 
     def test_source_not_found(self, p):
         with pytest.raises(ValueError):
@@ -1067,10 +1067,10 @@ class TestAdapterAttrsCacheInvalidation:
         p.set_grp('child', parent='parent', processor=DummyStage,
                   method='transform', edges={'X': '{x1}'})
         p.set_node('n1', grp='child')
-        _ = p.nodes['n1'].get_attrs(p.grps)
+        _ = p.nodes['n1'].get_spec(p.grps)
         p.set_grp('parent', adapter=self._adapter('both'), exist='replace')
-        attrs = p.nodes['n1'].get_attrs(p.grps)
-        assert attrs['adapter']['__params__']['eval_mode'] == 'both'
+        spec = p.nodes['n1'].get_spec(p.grps)
+        assert spec.adapter['__params__']['eval_mode'] == 'both'
 
     def test_grandchild_grp_attrs_cleared(self, p):
         p.set_grp('gp', adapter=self._adapter('valid'))
@@ -1078,19 +1078,18 @@ class TestAdapterAttrsCacheInvalidation:
         p.set_grp('child', parent='par', processor=DummyStage,
                   method='transform', edges={'X': '{x1}'})
         p.set_node('n1', grp='child')
-        _ = p.nodes['n1'].get_attrs(p.grps)
+        _ = p.nodes['n1'].get_spec(p.grps)
         p.set_grp('gp', adapter=self._adapter('both'), exist='replace')
-        attrs = p.nodes['n1'].get_attrs(p.grps)
-        assert attrs['adapter']['__params__']['eval_mode'] == 'both'
+        spec = p.nodes['n1'].get_spec(p.grps)
+        assert spec.adapter['__params__']['eval_mode'] == 'both'
 
 
 SCHEMA_SIMPLE = {'f1': 'numerical', 'f2': 'nominal', 'target': 'binary'}
 
 
 class TestDataSourceNode:
-    def test_get_node_attrs_works(self, p):
-        attrs = p.get_node_attrs(None)
-        assert attrs['role'] == 'datasource'
+    def test_get_attrs_works(self, p):
+        attrs = p.datasource.get_attrs()
         assert attrs['name'] == 'Data_Source'
         assert 'schema' in attrs
         assert 'targets' in attrs
@@ -1107,10 +1106,10 @@ class TestDataSourceNode:
 
     def test_set_datasource_skip_when_unchanged(self, p):
         p.set_datasource(SCHEMA_SIMPLE, targets=['target'])
-        old_attrs = p.get_node_attrs(None)
+        old_attrs = p.datasource.get_attrs()
         result = p.set_datasource(SCHEMA_SIMPLE, targets=['target'])
         assert result == 'skip'
-        assert p.get_node_attrs(None) is old_attrs
+        assert p.datasource.get_attrs() is old_attrs
 
     def test_set_datasource_invalid_type(self, p):
         with pytest.raises(ValueError, match='Invalid type'):
@@ -1127,9 +1126,9 @@ class TestDataSourceNode:
 
     def test_attrs_cache_invalidated_after_set_datasource(self, p):
         p.set_datasource(SCHEMA_SIMPLE)
-        old_attrs = p.get_node_attrs(None)
+        old_attrs = p.datasource.get_attrs()
         p.set_datasource({**SCHEMA_SIMPLE, 'f3': 'datetime'})
-        new_attrs = p.get_node_attrs(None)
+        new_attrs = p.datasource.get_attrs()
         assert new_attrs is not old_attrs
         assert 'f3' in new_attrs['schema']
 
@@ -1183,7 +1182,7 @@ class TestCheckDataCompatibility:
         pl.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
                    method='transform', edges={'X': '{f1, f2}'})
         pl.set_node('scaler', grp='scale')
-        e = Experimenter(data=sample_data, path=tmp_path / 'exp', pipeline=pl.build())
+        e = Experimenter(name='e1', data=sample_data, path=tmp_path / 'exp', pipeline=pl.build())
         with pytest.raises(ValueError, match='missing_col'):
             e.build()
 
@@ -1445,7 +1444,7 @@ class TestPipelineSync:
         # A syncs
         result = p.sync()
         assert 'n1' in result['nodes']['updated']
-        assert p.nodes['n1'].get_attrs(p.grps)['params'] == {'with_std': False}
+        assert p.nodes['n1'].get_spec(p.grps).params == {'with_std': False}
 
     def test_sync_rebuilds_output_edges(self, tmp_path):
         from sklearn.preprocessing import StandardScaler
@@ -1501,20 +1500,15 @@ class TestBuild:
         assert node.method == 'transform'
         assert node.edges['X'] == '{a} + {b}'
         assert node.params == {'a': 1, 'b': 3, 'c': 4}
-        assert node.role == 'stage'
 
     def test_group_name_kept_as_label_only(self, sp):
-        attrs = sp.build().get_node_attrs('s1')
-        assert attrs['label'] == 'stage1'
-        assert 'grp' not in attrs
-        assert attrs['role'] == 'stage'
+        node = sp.build().get_node('s1')
+        assert node.label == 'stage1'
 
     def test_node_attrs_shape_matches_builder(self, sp):
-        built = sp.build().get_node_attrs('h1')
-        from_builder = sp.get_node_attrs('h1')
-        for key in ('name', 'role', 'edges', 'processor', 'adapter', 'params',
-                    'method'):
-            assert built[key] == from_builder[key]
+        built = sp.build().get_node_spec('h1')
+        from_builder = sp.get_node_spec('h1')
+        assert built == from_builder
 
     def test_datasource_snapshot(self, p):
         p.set_datasource({'a': 'numerical', 'b': 'binary'}, targets=['b'])
@@ -1623,3 +1617,58 @@ class TestBuiltPipelineQueries:
         sub = chain.subset(['h1'])
         sub.nodes['s1'].edges['X'] = '{mutated}'
         assert chain.nodes['s1'].edges['X'] == '{x1}'
+
+
+class TestDiffFromDataSourceChange:
+    """A DataSource schema/targets change should only stale nodes whose own
+    edges actually pull different DataSource columns before vs. after —
+    not every node in the pipeline."""
+
+    def _pipeline(self, schema, targets=None, x_edge='{x1}'):
+        p = PipelineBuilder()
+        p.set_datasource(schema, targets=targets)
+        p.set_grp('g_stage', processor=DummyStage, method='transform', edges={'X': x_edge})
+        p.set_node('s1', grp='g_stage')
+        return p.build()
+
+    def test_unrelated_column_added_does_not_stale(self):
+        old = self._pipeline({'x1': 'numerical', 'target': 'binary'})
+        new = self._pipeline({'x1': 'numerical', 'target': 'binary', 'x2': 'numerical'})
+        assert new.diff_from(old) == set()
+
+    def test_referenced_column_removed_stales(self):
+        old = self._pipeline({'x1': 'numerical', 'x2': 'numerical', 'target': 'binary'},
+                              x_edge='{x1, x2}')
+        new = self._pipeline({'x1': 'numerical', 'target': 'binary'}, x_edge='{x1, x2}')
+        assert new.diff_from(old) == {'s1'}
+
+    def test_var_type_change_alone_does_not_stale(self):
+        old = self._pipeline({'x1': 'numerical', 'target': 'binary'})
+        new = self._pipeline({'x1': 'nominal', 'target': 'binary'})
+        assert new.diff_from(old) == set()
+
+    def test_targets_only_change_does_not_stale(self):
+        old = self._pipeline({'x1': 'numerical', 'x2': 'numerical', 'target': 'binary'},
+                              targets=['target'])
+        new = self._pipeline({'x1': 'numerical', 'x2': 'numerical', 'target': 'binary'},
+                              targets=[])
+        assert new.diff_from(old) == set()
+
+    def test_star_segment_stales_on_any_schema_change(self):
+        old = self._pipeline({'x1': 'numerical', 'target': 'binary'}, x_edge='*')
+        new = self._pipeline({'x1': 'numerical', 'target': 'binary', 'x2': 'numerical'}, x_edge='*')
+        assert new.diff_from(old) == {'s1'}
+
+    def test_downstream_of_stale_ds_node_also_stales(self):
+        def build(schema):
+            p = PipelineBuilder()
+            p.set_datasource(schema)
+            p.set_grp('g_stage', processor=DummyStage, method='transform', edges={'X': '{x1, x2}'})
+            p.set_node('s1', grp='g_stage')
+            p.set_grp('g_stage2', processor=DummyStage, method='transform', edges={'X': 's1:(*)'})
+            p.set_node('s2', grp='g_stage2')
+            return p.build()
+
+        old = build({'x1': 'numerical', 'x2': 'numerical', 'target': 'binary'})
+        new = build({'x1': 'numerical', 'target': 'binary'})
+        assert new.diff_from(old) == {'s1', 's2'}

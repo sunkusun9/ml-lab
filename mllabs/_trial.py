@@ -1,10 +1,9 @@
-import json
-
 from itertools import product
 
-from ._serialize import serialize_value
 from ._edge_dsl import referenced_nodes
-from ._pipeline import _validate_processor, _validate_adapter, _validate_params
+from ._pipeline import (
+    ProcessorSpec, _validate_processor, _validate_adapter, _validate_params,
+)
 
 
 class Trial:
@@ -17,16 +16,21 @@ class Trial:
     ``name`` is the identity: human-readable, stable, and used as the on-disk
     artifact directory and the :class:`~mllabs.TrialStore` key — the same role
     the Head node name played. Redefining a name overwrites both the artifact
-    and its ``TrialStore`` row; ``content_key()`` is a plain-value comparison
-    utility (is this the same definition as that one?), not a stored key.
+    and its ``TrialStore`` row.
 
     A Trial's own definition says nothing about the preprocessing it read, and
     Heads no longer live in the pipeline, so a Stage change cannot cascade into
-    them through the Pipeline graph. That gap is closed separately: each
-    caller that resets stale/changed Stages also finds the Trials whose
-    ``edges`` reference one of them (:meth:`stage_names` for
-    ``Trainer.reset_nodes``, or the artifact's own recorded ``edges`` for
-    ``Experimenter._drop_stale``) and resets those too.
+    them through the Pipeline graph automatically. The two callers that reset
+    stale/changed Stages handle this differently:
+
+    - ``Trainer.reset_nodes`` still cascades a Stage reset into any Trial
+      whose ``edges`` reference it (via :meth:`stage_names`) — a Trainer has
+      no notion of "historical" runs, so a Trial trained against a since-changed
+      Stage would just be a bug, not a record worth keeping.
+    - ``Experimenter.set_pipeline`` does *not* — a Trial's artifact
+      and its ``TrialStore.experiment_hist`` row document the pipeline
+      version it actually ran against, which stays valid even after a newer
+      version is adopted. Rerunning it is a separate, explicit action.
 
     Attributes:
         name (str): Identifier, also the artifact directory name.
@@ -35,60 +39,41 @@ class Trial:
         adapter: ``None`` / string ref / ``{"__ref__": ...}`` spec.
         params (dict): Constructor params — plain data or ref specs only.
         edges (dict): ``{key: dsl_string}``.
-        label (str): Display-only grouping label (e.g. the Experiment name).
+        desc (str): Human-readable description. Display-only, like
+            ``PipelineBuilder``'s ``desc`` — never affects matching, diffing,
+            or storage identity.
         tag (list[str]): Selection tags.
     """
 
     __slots__ = ('name', 'processor', 'method', 'adapter', 'params', 'edges',
-                 'label', 'tag')
+                 'desc', 'tag')
 
     def __init__(self, name, processor, edges, method='predict', adapter=None,
-                 params=None, label=None, tag=None):
+                 params=None, desc=None, tag=None):
         self.name = name
         self.processor = processor
         self.edges = dict(edges or {})
         self.method = method
         self.adapter = adapter
         self.params = dict(params or {})
-        self.label = label
+        self.desc = desc
         self.tag = list(tag or [])
 
-    def get_attrs(self):
-        """Resolved attributes in the same shape ``Pipeline.get_node_attrs`` returns.
+    def get_spec(self):
+        """This Trial's :class:`~mllabs._pipeline.ProcessorSpec`.
 
-        Lets Connectors, the executor, and Collectors treat a Trial exactly as
-        they treat a Head node.
+        The same shape ``Pipeline.get_node_spec`` returns for a Stage, so
+        Connectors, the executor, and Collectors treat the two identically.
+        ``desc``/``tag`` are display/selection metadata and stay on the Trial
+        itself rather than riding along in the spec.
         """
-        return {
-            'name': self.name,
-            'label': self.label,
-            'role': 'head',
-            'edges': self.edges,
-            'processor': self.processor,
-            'adapter': self.adapter,
-            'params': self.params,
-            'method': self.method,
-            'tag': self.tag,
-        }
-
-    def content_key(self):
-        """Deterministic JSON of everything that affects the result.
-
-        ``name``/``label`` are excluded — renaming a Trial does not change what
-        it computes. Params are plain data by construction (``_validate_params``
-        rejects live objects), which is what makes a stable, comparable
-        rendering possible at all. Not stored anywhere; use it to compare two
-        Trial definitions for equality without listing every field by hand.
-        """
-        return json.dumps(
-            serialize_value({
-                'processor': self.processor,
-                'method': self.method,
-                'adapter': self.adapter,
-                'params': self.params,
-                'edges': self.edges,
-            }),
-            sort_keys=True, ensure_ascii=False, separators=(',', ':'),
+        return ProcessorSpec(
+            name=self.name,
+            processor=self.processor,
+            edges=self.edges,
+            method=self.method,
+            adapter=self.adapter,
+            params=self.params,
         )
 
     def stage_names(self):
@@ -131,8 +116,8 @@ def make_trials(name, processor, edges, method='predict', adapter=None,
     same call always produces the same trial names.
 
     Args:
-        name (str): Name prefix, and the Trial ``label``. A single trial takes
-            *name* unchanged; several get ``{name}_{idx}`` zero-padded.
+        name (str): Name prefix. A single trial takes *name* unchanged;
+            several get ``{name}_{idx}`` zero-padded.
         processor (str): ``"module.ClassName"`` reference.
         edges (dict): ``{key: dsl_string}`` shared by every trial.
         method (str): Processor method. Default ``'predict'``.
@@ -188,7 +173,6 @@ def make_trials(name, processor, edges, method='predict', adapter=None,
             method=method,
             adapter=adapter,
             params=merged,
-            label=name,
             tag=list(tags or []),
         ))
     return trials

@@ -4,7 +4,7 @@ from ._logger import BaseLogger, DefaultLogger, ProgressSessionLogger, BaseProgr
 from ._experimenter import Experimenter
 from ._inferencer import Inferencer
 from ._connector import Connector
-from ._pipeline import ColSelector, Pipeline, PipelineBuilder
+from ._pipeline import ColSelector, Pipeline, PipelineBuilder, ProcessorSpec
 from ._trial import Trial, make_trials
 from ._trial_store import TrialStore
 from ._project import Project
@@ -30,6 +30,7 @@ __all__ = [
     'ColSelector',
     'Pipeline',
     'PipelineBuilder',
+    'ProcessorSpec',
     'Trial',
     'make_trials',
     'TrialStore',

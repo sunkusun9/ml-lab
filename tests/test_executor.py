@@ -9,7 +9,7 @@ from sklearn.model_selection import ShuffleSplit, KFold
 from mllabs._experimenter import Experimenter
 from mllabs._trainer import Trainer
 from mllabs._pipeline import PipelineBuilder
-from mllabs import Trial
+from mllabs import Trial, TrialStore
 from mllabs._cache import DataCache
 from mllabs._data_wrapper import wrap
 from mllabs._logger import ProgressSessionLogger
@@ -57,11 +57,17 @@ def pipeline():
 @pytest.fixture
 def exp(tmp_path, sample_data, pipeline):
     return Experimenter(
+        name='e1',
         data=sample_data,
         path=tmp_path / 'exp',
         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
         pipeline=pipeline.build(),
     )
+
+
+@pytest.fixture
+def trial_store(tmp_path):
+    return TrialStore(tmp_path / 'trials')
 
 
 def _setup_full(pipeline, exp=None):
@@ -97,6 +103,33 @@ def _wp():
     ]
 
 
+def _folds(trials, exp):
+    """Expand a bare Trial list into the ``(trial, outer_idx, inner_idx)``
+    tuples Experimenter.exp expects, across every fold of *exp* — Trainer's
+    set_trials() takes the bare list, but Experimenter.exp() doesn't."""
+    return [
+        (t, o, i)
+        for t in trials
+        for o in range(exp.get_n_splits())
+        for i in range(exp.get_n_splits_inner())
+    ]
+
+
+def _stage_errored(exp, node_name):
+    """Whether *node_name* (a Stage) has an 'error' row in this run's own
+    NodeStore history — NodeStore.status()/Experimenter.get_status() can only
+    ever see 'built' or None (obj.pkl existence), never 'error'; that's only
+    recorded in node_hist now."""
+    return any(r['status'] == 'error' for r in exp.node_store.get_hist(node_name=node_name))
+
+
+def _trial_errored(trial_store, trial_name, exp):
+    """Whether *trial_name* has an 'error' row in TrialStore.experiment_hist
+    for this Experimenter — same reasoning as _stage_errored, but Trial
+    history lives in TrialStore, not this run's NodeStore."""
+    return any(s == 'error' for s in trial_store.get_status(trial_name, exp.name).values())
+
+
 class TestBuildFlowMulti:
     """Exercise _build_flow_multi's worker-pool dispatch (ProcessWorker, n_jobs>1)."""
 
@@ -112,7 +145,7 @@ class TestBuildFlowMulti:
         exp.build(n_jobs=2)
 
         assert exp.get_status('good_node') == 'built'
-        assert exp.get_status('bad_node') == 'error'
+        assert _stage_errored(exp, 'bad_node')
         for outer_fold in exp.outer_folds:
             for flow in outer_fold.train_data_flows:
                 assert flow.status('good_node') == 'built'
@@ -120,11 +153,11 @@ class TestBuildFlowMulti:
     def test_skips_already_built_nodes(self, exp, pipeline):
         _setup_full(pipeline, exp)
         exp.build(n_jobs=2)
-        build_id = exp.outer_folds[0].train_data_flows[0].get_info('scaler')['build_id']
+        build_id = exp.node_store.get_info('scaler')[(0, 0)]['build_id']
 
         exp.build(n_jobs=2)
 
-        assert exp.outer_folds[0].train_data_flows[0].get_info('scaler')['build_id'] == build_id
+        assert exp.node_store.get_info('scaler')[(0, 0)]['build_id'] == build_id
 
 
 class TestNJobsCap:
@@ -146,12 +179,12 @@ class TestNJobsCap:
         for flow in exp.outer_folds[0].train_data_flows:
             assert flow.status('scaler') == 'built'
 
-    def test_exp_caps_worker_sessions_to_total(self, exp, pipeline):
+    def test_exp_caps_worker_sessions_to_total(self, exp, pipeline, trial_store):
         _setup_full(pipeline, exp)
         exp.build(n_jobs=2)
 
         logger = RecordingLogger()
-        exp.exp(_model(), n_jobs=8, logger=logger)                     # 2 folds x 1 head = 2 tasks
+        exp.exp(_folds(_model(), exp), trial_store, n_jobs=8, logger=logger)  # 2 folds x 1 head = 2 tasks
 
         worker_sessions = [s for s in logger.created if s != 0]
         assert worker_sessions == [1, 2]
@@ -264,7 +297,7 @@ class TestWorkerWarningVerbosity:
         out, err = capfd.readouterr()
         assert 'WORKER_WARN_ABC' in (out + err)
 
-    def test_predict_warnings_routed_via_logger(self, exp, pipeline, capfd, tmp_path):
+    def test_predict_warnings_routed_via_logger(self, exp, pipeline, capfd, tmp_path, trial_store):
         # predict/collect-time warnings (like XGBoost device mismatch) now flow
         # through the logger with the node prefix, not raw to stderr.
         from mllabs._logger import ProgressSessionLogger
@@ -275,7 +308,7 @@ class TestWorkerWarningVerbosity:
         registry.set_collector('m', MetricCollector, Connector(),
                                params={'output_var': None, 'metric_func': _const_metric})
         logger = ProgressSessionLogger(level=['info', 'progress'])  # no 'warning'
-        exp.exp(_wp(), registry, logger=logger)
+        exp.exp(_folds(_wp(), exp), trial_store, registry, logger=logger)
 
         assert any('PREDICT_WARN_XYZ' in w for w in logger.warning_list)
         assert any('[wp_node]' in w for w in logger.warning_list)   # node prefix present
@@ -309,7 +342,7 @@ class TestDataPrepErrors:
 
         assert exp.get_status('good_node') == 'built'
         assert exp.get_status('src_node') == 'built'
-        assert exp.get_status('bad_node') == 'error'
+        assert _stage_errored(exp, 'bad_node')
 
     def test_build_multi_reports_error_and_continues(self, exp, pipeline):
         pipeline.set_grp('good', processor='sklearn.preprocessing.StandardScaler',
@@ -327,25 +360,25 @@ class TestDataPrepErrors:
 
         assert exp.get_status('good_node') == 'built'
         assert exp.get_status('src_node') == 'built'
-        assert exp.get_status('bad_node') == 'error'
+        assert _stage_errored(exp, 'bad_node')
 
-    def test_exp_single_reports_error_and_continues(self, exp, pipeline):
+    def test_exp_single_reports_error_and_continues(self, exp, pipeline, trial_store):
         _setup_full(pipeline, exp)
 
         exp.build(n_jobs=1)
-        exp.exp(_bad_edges(), n_jobs=1)
+        exp.exp(_folds(_bad_edges(), exp), trial_store, n_jobs=1)
 
         assert exp.get_status('dt') == 'built'
-        assert exp.get_status('bad_dt') == 'error'
+        assert _trial_errored(trial_store, 'bad_dt', exp)
 
-    def test_exp_multi_reports_error_and_continues(self, exp, pipeline):
+    def test_exp_multi_reports_error_and_continues(self, exp, pipeline, trial_store):
         _setup_full(pipeline, exp)
 
         exp.build(n_jobs=2)
-        exp.exp(_bad_edges(), n_jobs=2)
+        exp.exp(_folds(_bad_edges(), exp), trial_store, n_jobs=2)
 
         assert exp.get_status('dt') == 'built'
-        assert exp.get_status('bad_dt') == 'error'
+        assert _trial_errored(trial_store, 'bad_dt', exp)
         for outer_fold in exp.outer_folds:
             for store in outer_fold.train_data_flows:
                 assert store.status('dt') == 'built'
@@ -354,14 +387,14 @@ class TestDataPrepErrors:
 class TestExperimentMulti:
     """Exercise _experiment_multi's worker-pool dispatch (ProcessWorker, n_jobs>1)."""
 
-    def test_runs_head_across_folds_and_reports_errors(self, exp, pipeline):
+    def test_runs_head_across_folds_and_reports_errors(self, exp, pipeline, trial_store):
         _setup_full(pipeline, exp)
 
         exp.build(n_jobs=2)
-        exp.exp(_bad_edges(), n_jobs=2)
+        exp.exp(_folds(_bad_edges(), exp), trial_store, n_jobs=2)
 
         assert exp.get_status('dt') == 'built'
-        assert exp.get_status('bad_dt') == 'error'
+        assert _trial_errored(trial_store, 'bad_dt', exp)
         for outer_fold in exp.outer_folds:
             for store in outer_fold.train_data_flows:
                 assert store.status('dt') == 'built'

@@ -1,33 +1,35 @@
 import pickle as pkl
-import numpy as np
 from pathlib import Path
+import numpy as np
 
 from ._data_wrapper import wrap, unwrap, DataWrapperProvider
 from ._flow import TrainDataFlow
+from ._store import NodeStore
 from ._edge_dsl import parse, eval_expr, referenced_nodes
 from ._logger import resolve_logger
 from ._run_common import resolve_common_status, require_built_pipeline
 
 
 class TrainFold:
-    """Single split data flow and artifact store for Trainer.
+    """Single split data flow for Trainer.
 
-    Analogous to OuterFold for Experimenter. Holds exactly one TrainDataFlow
-    and one NodeStore at the same fold path.
+    Analogous to OuterFold for Experimenter — every split shares the same
+    NodeStore (the Trainer's own, at its own base path, so it never collides
+    with an Experimenter's even while both use natural split_idx/outer_idx
+    values), told apart only by ``split_idx``.
 
     get_test_data() returns None (Trainer has no separate test set).
     """
 
-    def __init__(self, split_idx, base_path, data, train_idx, valid_idx=None, cache=None, aug_data=None):
+    def __init__(self, split_idx, store, data, train_idx, valid_idx=None, cache=None, aug_data=None):
         self.split_idx = split_idx
-        fold_path = Path(base_path) / str(split_idx)
         provider = DataWrapperProvider(data, train_idx, valid_idx=valid_idx, aug_data=aug_data)
         self.train_data_flows = [
             TrainDataFlow(
-                path=fold_path,
+                store=store,
                 data_source=provider,
                 cache=cache,
-                outer_idx=-(split_idx + 1),  # 음수로 Experimenter cache와 충돌 방지
+                outer_idx=split_idx,
                 inner_idx=0,
             )
         ]
@@ -44,29 +46,38 @@ class TrainFold:
 class Trainer:
     """Runs cross-validation training on a subset of Pipeline nodes.
 
+    No ``Project`` dependency — like :class:`~mllabs.Experimenter`, this
+    class only sees the narrow pieces it needs (``path``, ``cache``, an
+    already-loaded ``pipeline``), each handed in explicitly.
+    ``Project.trainer()``/``load_trainer()`` is the usual caller: it
+    resolves ``(pipeline_name, pipeline_version)`` into a loaded Pipeline via
+    its own ``load_pipeline`` and supplies its own ``cache`` — but nothing
+    stops constructing this directly, standalone.
+
     Uses ``self.pipeline`` — set via the constructor or :meth:`set_pipeline`.
     Trains the Trials supplied via :meth:`set_trials` plus the Stages they
     depend on; the Stage selection is recomputed whenever either is set.
 
     Attributes:
         name (str): Trainer name.
-        pipeline (Pipeline): The loaded Pipeline. Only the
+        pipeline (Pipeline): The adopted Pipeline. Only the
             ``(pipeline_name, pipeline_version)`` pointer is persisted — the
-            Pipeline itself lives once, under the Project.
+            Pipeline itself lives once, wherever the caller keeps its versions.
         selected_stages (list[str]): Stage nodes included in training.
         trials (list[Trial]): Trials to train (set via :meth:`set_trials`).
         train_folds (list[TrainFold]): Per-split data flows and artifact stores.
     """
 
-    def __init__(self, project, name, data, splitter=None, splitter_params=None,
-                 aug_data=None, pipeline_name='pipeline', pipeline_version=None):
-        self.project = project
+    def __init__(self, path, name, data, splitter=None, splitter_params=None,
+                 aug_data=None, cache=None, pipeline=None, pipeline_name='pipeline'):
         self.name = name
         self.data = data
-        self.path = project.trainer_path(name)
+        self.path = Path(path)
+        self.path.mkdir(parents=True, exist_ok=True)
         self.splitter = splitter
         self.splitter_params = splitter_params if splitter_params is not None else {}
-        self.cache = project.cache
+        self.cache = cache
+        self.node_store = NodeStore(self.path)
         self.aug_data = wrap(aug_data) if aug_data is not None else None
 
         self.selected_stages = []
@@ -77,8 +88,8 @@ class Trainer:
 
         split_indices = self._make_splits()
         self.train_folds = self._make_train_folds(split_indices)
-        if pipeline_version is not None:
-            self.set_pipeline_version(pipeline_version)
+        if pipeline is not None:
+            self.set_pipeline(pipeline, pipeline_name)
         else:
             self.save()
 
@@ -103,11 +114,11 @@ class Trainer:
             n_rows = self.data.get_shape()[0]
             full_idx = np.arange(n_rows)
             return [
-                TrainFold(0, self.path, self.data, full_idx, valid_idx=None,
+                TrainFold(0, self.node_store, self.data, full_idx, valid_idx=None,
                           cache=self.cache, aug_data=self.aug_data)
             ]
         return [
-            TrainFold(i, self.path, self.data, train_idx, valid_idx=valid_idx,
+            TrainFold(i, self.node_store, self.data, train_idx, valid_idx=valid_idx,
                       cache=self.cache, aug_data=self.aug_data)
             for i, (train_idx, valid_idx) in enumerate(split_indices)
         ]
@@ -119,25 +130,40 @@ class Trainer:
     # node selection
     # ------------------------------------------------------------------
 
-    def set_pipeline_version(self, version, pipeline_name=None):
-        """Point this Trainer at a Pipeline version from its Project.
+    def set_pipeline(self, pipeline, pipeline_name=None):
+        """Adopt an already-loaded Pipeline.
+
+        Takes the Pipeline object directly rather than a version number —
+        this class has no way to load one by name/version itself (see the
+        class docstring); ``Project.trainer()``/``load_trainer()`` resolve
+        that before calling this. ``self.pipeline_version`` is read straight
+        off *pipeline* (its ``.version``), never tracked separately.
 
         Which Stages are actually selected depends on the Trials — call
         :meth:`set_trials` to supply them.
 
+        Diffs the two Pipelines (:meth:`Pipeline.diff_from`) and resets the
+        Stage artifacts the change invalidated via :meth:`reset_nodes`, which
+        also cascades into any selected Trial that reads a reset Stage —
+        unlike ``Experimenter.set_pipeline``, a Trainer has no notion of a
+        "historical" run to preserve, so a Trial trained against a
+        since-changed Stage is simply stale.
+
         Args:
-            version (int): Pipeline version number.
-            pipeline_name (str, optional): Pipeline name within the Project.
+            pipeline (Pipeline): Already-built, already-loaded Pipeline.
+            pipeline_name (str, optional): Name to record this Pipeline
+                under in this Trainer's own persisted meta.
         """
-        if pipeline_name is not None:
-            self.pipeline_name = pipeline_name
-        pipeline = self.project.load_pipeline(self.pipeline_name, version)
         require_built_pipeline(pipeline)
         pipeline.check_data_compatibility(self.data)
+        if pipeline_name is not None:
+            self.pipeline_name = pipeline_name
         if self.pipeline is not None:
-            self._drop_stale(pipeline.diff_from(self.pipeline))
+            stale = pipeline.diff_from(self.pipeline)
+            if stale:
+                self.reset_nodes(sorted(stale))
         self.pipeline = pipeline
-        self.pipeline_version = version
+        self.pipeline_version = pipeline.version
         self._recompute_selection()
         self.save()
         return pipeline
@@ -150,15 +176,15 @@ class Trainer:
         """
         self.trials = list(trials)
         self._recompute_selection()
-        self._reset_stale(self.selected_stages + self.trial_names())
+        self.reset_nodes(self.selected_stages + self.trial_names())
         self.save()
 
     def trial_names(self):
         return [t.name for t in self.trials]
 
-    def trial_attrs(self):
-        """``{name: resolved attrs}`` for the selected Trials."""
-        return {t.name: t.get_attrs() for t in self.trials}
+    def trial_specs(self):
+        """``{name: ProcessorSpec}`` for the selected Trials."""
+        return {t.name: t.get_spec() for t in self.trials}
 
     def _recompute_selection(self):
         """Stages needed by the selected Trials, in topological order.
@@ -181,37 +207,14 @@ class Trainer:
                         self._collect_upstream(self.pipeline, name, needed)
         self.selected_stages = [n for n in self.pipeline.topo_order() if n in needed]
 
-    def _drop_stale(self, stale_stages):
-        """Remove the artifacts a set of stale Stages invalidates.
-
-        Same rule as :meth:`Experimenter._drop_stale`: Trials are not in the
-        Pipeline, so they are found through the ``edges`` each artifact recorded.
-        """
-        if not stale_stages:
-            return
-        doomed = set(stale_stages)
-        for fold in self.train_folds:
-            flow = fold.train_data_flows[0]
-            for name in flow.list_nodes():
-                if name in doomed:
-                    continue
-                info = flow.get_info(name)
-                if info is None or info.get('role') != 'head':
-                    continue
-                for dsl_string in (info.get('edges') or {}).values():
-                    if doomed & referenced_nodes(dsl_string):
-                        doomed.add(name)
-                        break
-        self.reset_nodes(sorted(doomed))
-
     def _require_pipeline(self):
         if self.pipeline is None:
-            raise RuntimeError("No pipeline set. Call set_pipeline_version(version) first.")
+            raise RuntimeError("No pipeline set. Call set_pipeline(pipeline) first.")
         return self.pipeline
 
     def _collect_upstream(self, pipeline, node_name, selected):
-        node_attrs = pipeline.get_node_attrs(node_name)
-        for dsl_string in node_attrs['edges'].values():
+        spec = pipeline.get_node_spec(node_name)
+        for dsl_string in spec.edges.values():
             for source_node in referenced_nodes(dsl_string):
                 if source_node is not None and source_node not in selected:
                     selected.add(source_node)
@@ -224,8 +227,9 @@ class Trainer:
     def get_status(self, node_name):
         """Return the disk status of a node across all folds.
 
-        Returns ``'built'``, ``'finalized'``, ``'error'``, ``None`` (init),
-        or ``'inconsistent'`` if folds differ.
+        Returns ``'built'``, ``None`` (init, or errored — ``NodeStore`` only
+        knows whether ``obj.pkl`` exists; see :meth:`get_node_error` for
+        Stage error detail), or ``'inconsistent'`` if folds differ.
         """
         return resolve_common_status(
             fold.train_data_flows[0].status(node_name)
@@ -233,11 +237,15 @@ class Trainer:
         )
 
     def get_node_error(self, node_name):
-        """Return error dict for a node in error state, or None."""
-        for fold in self.train_folds:
-            info = fold.train_data_flows[0].get_info(node_name)
-            if info is not None and info.get('status') == 'error':
-                return info.get('error')
+        """Return error dict for a Stage node in error state, or ``None``.
+
+        Trial errors aren't covered — a Trainer has no ``experiment_hist``
+        (see ``set_pipeline``) to record them in; only Stage errors are, in
+        this run's own ``NodeStore`` history.
+        """
+        for r in self.node_store.get_hist(node_name=node_name):
+            if r['status'] == 'error':
+                return (r['info'] or {}).get('error')
         return None
 
     def reset_nodes(self, nodes):
@@ -278,97 +286,129 @@ class Trainer:
     # train
     # ------------------------------------------------------------------
 
-    def _make_trial_jobs(self, attrs_map):
-        """One TrialJob per (Trial, split) still needing training.
+    def _make_trial_jobs(self, spec_map):
+        """One Job per (Trial, split) still needing training.
 
         A Trainer has a single flow per split, so the fold coordinate is
         ``(split_idx, 0)`` — the same shape the Experimenter uses.
+
+        A split is skipped only if its artifact is already built — like
+        ``Experimenter._make_jobs``, redefining a Trial no longer forces a
+        rerun of splits already built (``NodeStore`` no longer carries a
+        definition to compare against).
         """
-        from ._executor import TrialJob
-        from ._pipeline import _definition_of
+        from ._executor import Job
         from .adapter import resolve_node_adapter
         from .adapter._base import GPU_NO
 
         gpu_cache = {}
         jobs = []
         for trial in self.trials:
-            attrs = attrs_map[trial.name]
+            spec = spec_map[trial.name]
             if trial.name not in gpu_cache:
-                adapter = resolve_node_adapter(attrs.get('processor'), attrs.get('adapter'))
-                gpu_cache[trial.name] = adapter.get_gpu_usage(attrs.get('params')) != GPU_NO
+                adapter = resolve_node_adapter(spec.processor, spec.adapter)
+                gpu_cache[trial.name] = adapter.get_gpu_usage(spec.params) != GPU_NO
             for split_idx, fold in enumerate(self.train_folds):
                 flow = fold.train_data_flows[0]
-                info = flow.get_info(trial.name)
-                if info is not None and info.get('definition') != _definition_of(attrs):
-                    flow.reset_node(trial.name)
-                    info = None
-                if info is not None and info.get('status') in ('built', 'finalized'):
+                if flow.status(trial.name) == 'built':
                     continue
-                jobs.append(TrialJob(trial, attrs, (split_idx, 0), flow,
-                                     need_gpu=gpu_cache[trial.name]))
+                jobs.append(Job(trial.name, spec, split_idx, 0, flow,
+                                need_gpu=gpu_cache[trial.name]))
+        return jobs
+
+    def _make_stage_jobs(self, pipeline, node_names, gpu_id_list):
+        """Expand Stage node names into per-split Jobs.
+
+        Same role ``_make_trial_jobs`` plays for Trials: skip decisions
+        (a split already built for a given node) live here, not in the
+        executor — it only orders dispatch among what's left.
+        """
+        from ._executor import Job
+        from .adapter import resolve_node_adapter
+        from .adapter._base import GPU_NO
+
+        gpu_cache = {}
+        jobs = []
+        for name in node_names:
+            node = pipeline.get_node(name)
+            spec = node.get_spec()
+            if gpu_id_list and name not in gpu_cache:
+                adapter = resolve_node_adapter(node.processor, node.adapter)
+                gpu_cache[name] = adapter.get_gpu_usage(node.params) != GPU_NO
+            need_gpu = gpu_cache.get(name, False)
+
+            for split_idx, fold in enumerate(self.train_folds):
+                flow = fold.train_data_flows[0]
+                if flow.status(name) == 'built':
+                    continue
+                jobs.append(Job(name, spec, split_idx, 0, flow, need_gpu=need_gpu))
         return jobs
 
     def train(self, n_jobs=1, gpu_id_list=None, logger=None):
         """Train all unbuilt selected nodes across all splits.
 
         Stages are trained first (topological order), then Trials. Stage
-        staleness is settled when a Pipeline version is adopted
-        (:meth:`set_pipeline_version`); Trial staleness is checked per job.
+        staleness is settled when a Pipeline is adopted (:meth:`set_pipeline`);
+        Trial staleness is checked per job.
 
         Args:
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
             gpu_id_list (list, optional): GPU IDs for GPU-enabled nodes.
             logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
         """
-        from ._executor import _build_flow_single, _build_flow_multi, _experiment_single, _experiment_multi
-        from ._tracker import LoggerExecuteTracker
+        from ._executor import _execute_single, _execute_multi
+        from ._tracker import LoggerExecuteTracker, NodeInfoTracker
 
         logger = resolve_logger(logger)
         pipeline = self._require_pipeline()
         pipeline.check_data_compatibility(self.data)
-        attrs_map = self.trial_attrs()
-        # Stage staleness is settled when a version is adopted
-        # (set_pipeline_version); Trial staleness is checked per job below.
-        target_stages = [
-            n for n in self.selected_stages
-            if self.get_status(n) not in ['built', 'finalized']
-        ]
-        trial_jobs = self._make_trial_jobs(attrs_map)
+        spec_map = self.trial_specs()
+        # Stage staleness is settled when a Pipeline is adopted
+        # (set_pipeline); Trial staleness is checked per job below.
+        stage_jobs = self._make_stage_jobs(pipeline, self.selected_stages, gpu_id_list)
+        trial_jobs = self._make_trial_jobs(spec_map)
 
-        if not target_stages and not trial_jobs:
+        if not stage_jobs and not trial_jobs:
             logger.info("No nodes to train")
             return
 
-        total = len(self.train_folds) * len(target_stages) + len(trial_jobs)
+        total = len(stage_jobs) + len(trial_jobs)
         n_jobs = min(n_jobs, total)
-        tracker = LoggerExecuteTracker(total, n_jobs, logger)
+        base_tracker = LoggerExecuteTracker(total, n_jobs, logger)
+        # Trials have no experiment_hist here (a Trainer isn't an Experimenter),
+        # so only Stages get history recording — trial_jobs use base_tracker
+        # directly.
+        stage_tracker = NodeInfoTracker(base_tracker, self.node_store, self.pipeline_version)
         error_nodes = set()
         try:
-            if target_stages:
+            if stage_jobs:
                 if n_jobs > 1:
-                    stage_errors = _build_flow_multi(
-                        self.train_folds, pipeline, target_stages, n_jobs,
-                        gpu_id_list=gpu_id_list, tracker=tracker,
+                    stage_errors = _execute_multi(
+                        stage_jobs, n_jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=stage_tracker,
                         log_dir=self.path / '__worker_logs')
                 else:
-                    stage_errors = _build_flow_single(
-                        self.train_folds, pipeline, target_stages,
-                        gpu_id_list=gpu_id_list, tracker=tracker)
+                    stage_errors = _execute_single(
+                        stage_jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=stage_tracker)
                 error_nodes.update(n for _, _, n in stage_errors)
 
             if trial_jobs:
+                # No Collectors here (a Trainer isn't an Experimenter) — pass
+                # [] rather than the default None so the returned error keys
+                # match the (outer_idx, name) shape expected below.
                 if n_jobs > 1:
-                    head_errors = _experiment_multi(
-                        trial_jobs, n_jobs, gpu_id_list=gpu_id_list, tracker=tracker,
+                    head_errors = _execute_multi(
+                        trial_jobs, n_jobs, self.node_store, gpu_id_list=gpu_id_list,
+                        collectors=[], tracker=base_tracker,
                         log_dir=self.path / '__worker_logs')
                 else:
-                    head_errors = _experiment_single(
-                        trial_jobs, gpu_id_list=gpu_id_list, tracker=tracker)
+                    head_errors = _execute_single(
+                        trial_jobs, self.node_store, gpu_id_list=gpu_id_list,
+                        collectors=[], tracker=base_tracker)
                 error_nodes.update(n for _, n in head_errors)
         finally:
-            tracker.close()
+            base_tracker.close()
 
-        target_all = target_stages + sorted({j.name for j in trial_jobs})
+        target_all = sorted({j.name for j in stage_jobs}) + sorted({j.name for j in trial_jobs})
         n_ok = len(target_all) - len(error_nodes)
         if error_nodes:
             logger.info(
@@ -454,9 +494,9 @@ class Trainer:
                 objs.append(fold.train_data_flows[0].get_obj(name))
             node_objs[name] = objs
 
-        node_attrs = {n: pipeline.get_node_attrs(n) for n in self.selected_stages}
-        node_attrs.update(self.trial_attrs())
-        return Inferencer(node_attrs, list(self.selected_stages), self.trial_names(),
+        node_specs = {n: pipeline.get_node_spec(n) for n in self.selected_stages}
+        node_specs.update(self.trial_specs())
+        return Inferencer(node_specs, list(self.selected_stages), self.trial_names(),
                           self.get_n_splits(), node_objs, v=v)
 
     # ------------------------------------------------------------------
@@ -486,21 +526,47 @@ class Trainer:
         with open(self.path / '__trainer.pkl', 'wb') as f:
             pkl.dump(save_data, f)
 
+    @staticmethod
+    def _read_save_data(path):
+        """The raw ``__trainer.pkl`` dict for the Trainer at *path*.
+
+        Split out from :meth:`load` so a caller (``Project.load_trainer``)
+        can read ``pipeline_name``/``pipeline_version`` to resolve a Pipeline
+        object *before* calling :meth:`load`, without reading the file twice.
+        """
+        with open(Path(path) / '__trainer.pkl', 'rb') as f:
+            return pkl.load(f)
+
     @classmethod
-    def load(cls, project, name, data, aug_data=None):
-        """Reopen a saved Trainer by name, restoring its Pipeline version."""
-        path = project.trainer_path(name)
-        with open(path / '__trainer.pkl', 'rb') as f:
-            save_data = pkl.load(f)
+    def load(cls, path, data, save_data=None, cache=None, pipeline=None, aug_data=None):
+        """Reopen a saved Trainer from *path*.
+
+        Args:
+            path: This Trainer's base directory.
+            data: Dataset to attach.
+            save_data (dict, optional): Already-read ``__trainer.pkl``
+                contents — pass this if the caller already read it (e.g. to
+                resolve *pipeline*) to avoid reading the file twice. ``None``
+                reads it here via :meth:`_read_save_data`.
+            cache (DataCache, optional): Shared LRU cache.
+            pipeline (Pipeline, optional): Already-loaded Pipeline matching
+                this Trainer's saved ``(pipeline_name, pipeline_version)`` —
+                this class has no way to load one itself (see the class
+                docstring). ``None`` leaves the Trainer without a pipeline
+                (matching a Trainer that was saved before one was ever set).
+        """
+        path = Path(path)
+        if save_data is None:
+            save_data = cls._read_save_data(path)
 
         trainer = object.__new__(cls)
-        trainer.project = project
         trainer.name = save_data['name']
         trainer.data = data
         trainer.path = path
         trainer.splitter = save_data['splitter']
         trainer.splitter_params = save_data['splitter_params']
-        trainer.cache = project.cache
+        trainer.cache = cache
+        trainer.node_store = NodeStore(path)
         trainer.aug_data = wrap(aug_data) if aug_data is not None else None
         trainer.pipeline = None
         trainer.pipeline_name = save_data.get('pipeline_name', 'pipeline')
@@ -511,9 +577,8 @@ class Trainer:
         split_indices = save_data['split_indices']
         trainer.train_folds = trainer._make_train_folds(split_indices)
 
-        version = save_data.get('pipeline_version')
-        if version is not None:
+        if pipeline is not None:
             # Trials are not persisted — re-supply them with set_trials().
-            trainer.set_pipeline_version(version)
+            trainer.set_pipeline(pipeline)
 
         return trainer

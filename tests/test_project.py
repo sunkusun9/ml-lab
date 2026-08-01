@@ -118,7 +118,8 @@ class TestPipelineVersions:
         project.build_pipeline(builder)
         loaded = project.load_pipeline('main')
         assert loaded.topo_order() == ['scaler']
-        assert loaded.get_node_attrs('scaler')['role'] == 'stage'
+        assert loaded.get_node_spec('scaler').processor == \
+            'sklearn.preprocessing.StandardScaler'
 
     def test_load_unknown_raises(self, project):
         with pytest.raises(KeyError):
@@ -147,18 +148,13 @@ class TestTrialRegistration:
         assert rows[0]['params'] == {'max_depth': 5}
 
     def test_name_does_not_split_identity(self, store):
-        """Trial.content_key() ignores the name — renaming is not a new
-        definition. Storage still keys on name, so two different names
-        sharing this content_key land in two separate rows.
+        """Two Trials with an otherwise-identical definition but different
+        names still land in two separate rows — storage keys purely on name,
+        with no notion of "same definition" collapsing them.
         """
-        assert _trial('a').content_key() == _trial('b').content_key()
         store.register(_trial('a'))
         store.register(_trial('b'))
         assert len(store.list_trials()) == 2
-
-    def test_different_params_different_key(self):
-        assert _trial(params={'max_depth': 3}).content_key() != \
-               _trial(params={'max_depth': 5}).content_key()
 
     def test_register_all_registers_every_trial(self, store):
         trials = make_trials('dt', processor=TREE, edges=EDGES,
@@ -298,7 +294,7 @@ class TestExperimenterUnderProject:
 
     def test_no_pipeline_until_a_version_is_set(self, project, sample_data):
         e = project.experimenter('bare', sample_data)
-        with pytest.raises(RuntimeError, match='set_pipeline_version'):
+        with pytest.raises(RuntimeError, match='set_pipeline'):
             e.build()
 
     def test_switching_version_resets_stale_nodes(self, project, builder, sample_data):
@@ -306,10 +302,53 @@ class TestExperimenterUnderProject:
         e.build()
         assert e.get_status('scaler') == 'built'
 
-        builder.set_node('scaler', grp='scale', exist='replace')
-        v2 = project.build_pipeline(builder).version
-        e.set_pipeline_version(v2)
+        # Staleness is a value diff now (no serial) — 'replace' with the exact
+        # same definition is correctly a no-op, so this needs an actual change.
+        builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+        v2 = project.build_pipeline(builder)
+        e.set_pipeline(v2)
         assert e.get_status('scaler') is None
+
+    def test_build_respects_stage_dependency_order(self, project, sample_data):
+        """Exercises DataFlow.get_missing_nodes via _build_flow_single's
+        readiness loop — s2 depends on s1 and can only build once s1 is."""
+        p = project.pipeline_builder('chain')
+        p.set_datasource({'f1': 'numerical', 'target': 'binary'})
+        p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': '{f1}'})
+        p.set_node('s1', grp='scale')
+        p.set_grp('scale2', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': 's1:(*)'})
+        p.set_node('s2', grp='scale2')
+        version = project.build_pipeline(p).version
+        e = project.experimenter(
+            'chained', sample_data,
+            sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=0),
+            pipeline_name='chain', pipeline_version=version,
+        )
+        e.build()
+        assert e.get_status('s1') == 'built'
+        assert e.get_status('s2') == 'built'
+
+    def test_build_respects_stage_dependency_order_multi_worker(self, project, sample_data):
+        """Same as above but through _build_flow_multi's _collect_ready."""
+        p = project.pipeline_builder('chain2')
+        p.set_datasource({'f1': 'numerical', 'target': 'binary'})
+        p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': '{f1}'})
+        p.set_node('s1', grp='scale')
+        p.set_grp('scale2', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': 's1:(*)'})
+        p.set_node('s2', grp='scale2')
+        version = project.build_pipeline(p).version
+        e = project.experimenter(
+            'chained_multi', sample_data,
+            sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=0),
+            pipeline_name='chain2', pipeline_version=version,
+        )
+        e.build(n_jobs=2)
+        assert e.get_status('s1') == 'built'
+        assert e.get_status('s2') == 'built'
 
     def test_multiple_experimenters_per_project(self, project, builder, sample_data):
         version = project.build_pipeline(builder).version
@@ -324,11 +363,6 @@ class TestExperimenterUnderProject:
         rows = project.experimenters.list_all()
         assert [r['name'] for r in rows] == ['run_a']
         assert rows[0]['pipeline_version'] == e.pipeline_version
-
-    def test_status_change_is_persisted(self, project, builder, sample_data):
-        e = self._exp(project, builder, sample_data)
-        e.close()
-        assert project.experimenters.fetch('run_a')['status'] == 'close'
 
     def test_load_unknown_name_raises(self, project, sample_data):
         with pytest.raises(KeyError, match='No experimenter'):
@@ -360,17 +394,160 @@ class TestExperimenterUnderProject:
     def test_trials_run_and_land_in_hist(self, project, builder, sample_data):
         e = self._exp(project, builder, sample_data)
         e.build()
-        trials = make_trials('dt', processor=TREE,
-                             edges={'X': 'scaler:(*)', 'y': '{target}'},
-                             params={'max_depth': 3, 'random_state': 0})
-        e.exp(trials)
+        trial = make_trials('dt', processor=TREE, edges=EDGES,
+                             params={'max_depth': 3, 'random_state': 0})[0]
+        e.exp([(trial, 0, 0), (trial, 1, 0)], project.trials)
         assert e.get_status('dt') == 'built'
+        assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built', (1, 0): 'built'}
 
         # history is keyed by the two names, matching the layout on disk
-        project.trials.register(trials[0])
-        project.trials.record(trials[0].name, e.name, 0, 0,
-                              pipeline_version=e.pipeline_version,
-                              status=e.get_status('dt'))
         row = project.trials.get_hist(experimenter='run_a')[0]
         assert row['trial_name'] == 'dt'
         assert row['pipeline_version'] == e.pipeline_version
+
+    def test_exp_skips_fold_already_built_in_hist(self, project, builder, sample_data):
+        """_make_jobs consults TrialStore.experiment_hist, not the on-disk
+        artifact — a fold recorded 'built' there is skipped without dispatch."""
+        e = self._exp(project, builder, sample_data)
+        e.build()
+        trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0})
+        e.exp([(trial, 0, 0)], project.trials)
+        build_id_1 = project.trials.get_info('dt', 'run_a')[(0, 0)]['build_id']
+
+        e.exp([(trial, 0, 0)], project.trials)
+        build_id_2 = project.trials.get_info('dt', 'run_a')[(0, 0)]['build_id']
+        assert build_id_2 == build_id_1
+
+    def test_redefined_trial_with_built_hist_is_not_rerun(self, project, builder, sample_data):
+        """Redefining a Trial no longer forces a rerun of folds the hist
+        already marks 'built' — rerunning is an explicit action now."""
+        e = self._exp(project, builder, sample_data)
+        e.build()
+        trial_v1 = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0})
+        e.exp([(trial_v1, 0, 0)], project.trials)
+        build_id_1 = project.trials.get_info('dt', 'run_a')[(0, 0)]['build_id']
+
+        trial_v2 = Trial('dt', TREE, EDGES, params={'max_depth': 5, 'random_state': 0})
+        e.exp([(trial_v2, 0, 0)], project.trials)
+        build_id_2 = project.trials.get_info('dt', 'run_a')[(0, 0)]['build_id']
+        assert build_id_2 == build_id_1
+
+    def test_error_fold_is_retried(self, project, builder, sample_data):
+        """NodeStore.status() can no longer see 'error' at all (obj.pkl was
+        never written) — TrialStore.experiment_hist is the only place a
+        Trial's error status/detail is recorded now."""
+        e = self._exp(project, builder, sample_data)
+        e.build()
+        bad_trial = Trial('bad', 'mock.BadPredictor', EDGES)
+        e.exp([(bad_trial, 0, 0)], project.trials)
+        assert project.trials.get_status('bad', 'run_a')[(0, 0)] == 'error'
+        build_id_1 = project.trials.get_info('bad', 'run_a')[(0, 0)]['build_id']
+
+        e.exp([(bad_trial, 0, 0)], project.trials)
+        assert project.trials.get_status('bad', 'run_a')[(0, 0)] == 'error'
+        build_id_2 = project.trials.get_info('bad', 'run_a')[(0, 0)]['build_id']
+        assert build_id_2 != build_id_1
+
+    def test_exp_multi_worker(self, project, builder, sample_data):
+        """Experimenter.exp() through _execute_multi (n_jobs>1) — the merged
+        Stage/Trial worker-pool executor, exercised here on its Trial/
+        collectors path (unlike test_train_multi_worker, which only covers
+        Trainer). One good and one failing trial across two folds so both
+        the 'done' and 'error' worker messages are covered."""
+        e = self._exp(project, builder, sample_data)
+        e.build()
+        trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0})
+        bad_trial = Trial('bad', 'mock.BadPredictor', EDGES)
+        e.exp([(trial, 0, 0), (trial, 1, 0), (bad_trial, 0, 0)], project.trials, n_jobs=2)
+        assert e.get_status('dt') == 'built'
+        assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built', (1, 0): 'built'}
+        assert project.trials.get_status('bad', 'run_a')[(0, 0)] == 'error'
+
+
+class TestTrainerUnderProject:
+    """Exercises Trainer.train() -> StageJob/_build_flow_* through the same
+    job-based path Experimenter.build() uses."""
+
+    def test_train_respects_stage_dependency_order(self, project, sample_data):
+        from mllabs._data_wrapper import wrap
+
+        p = project.pipeline_builder('trainer_chain')
+        p.set_datasource({'f1': 'numerical', 'target': 'binary'})
+        p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': '{f1}'})
+        p.set_node('s1', grp='scale')
+        p.set_grp('scale2', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': 's1:(*)'})
+        p.set_node('s2', grp='scale2')
+        version = project.build_pipeline(p).version
+
+        t = project.trainer('trained_chain', wrap(sample_data),
+                            pipeline_name='trainer_chain', pipeline_version=version)
+        t.set_trials([Trial('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
+                            params={'max_depth': 3, 'random_state': 0})])
+        t.train()
+        assert t.get_status('s1') == 'built'
+        assert t.get_status('s2') == 'built'
+        assert t.get_status('dt') == 'built'
+
+    def test_train_multi_worker(self, project, sample_data):
+        from mllabs._data_wrapper import wrap
+
+        p = project.pipeline_builder('trainer_chain_multi')
+        p.set_datasource({'f1': 'numerical', 'target': 'binary'})
+        p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': '{f1}'})
+        p.set_node('s1', grp='scale')
+        p.set_grp('scale2', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': 's1:(*)'})
+        p.set_node('s2', grp='scale2')
+        version = project.build_pipeline(p).version
+
+        t = project.trainer('trained_chain_multi', wrap(sample_data),
+                            pipeline_name='trainer_chain_multi', pipeline_version=version)
+        t.set_trials([Trial('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
+                            params={'max_depth': 3, 'random_state': 0})])
+        t.train(n_jobs=2)
+        assert t.get_status('s1') == 'built'
+        assert t.get_status('s2') == 'built'
+        assert t.get_status('dt') == 'built'
+
+    def test_reload_recovers_built_stages_via_node_info(self, project, sample_data):
+        """Regression: TrainDataFlow's own outer_idx is negative (Trainer
+        offsets it to avoid colliding with an Experimenter's DataCache keys
+        on the shared project.cache), but NodeInfoStore is keyed on the
+        natural positive split_idx (matching StageJob.cache_key) — load()
+        must query NodeInfoStore via info_fold, not self.outer_idx, or a
+        reloaded Trainer can never reattach its own previously-built stages.
+        """
+        from mllabs._data_wrapper import wrap
+
+        p = project.pipeline_builder('trainer_reload_chain')
+        p.set_datasource({'f1': 'numerical', 'target': 'binary'})
+        p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': '{f1}'})
+        p.set_node('s1', grp='scale')
+        p.set_grp('scale2', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': 's1:(*)'})
+        p.set_node('s2', grp='scale2')
+        version = project.build_pipeline(p).version
+
+        trial = Trial('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
+                      params={'max_depth': 3, 'random_state': 0})
+        t = project.trainer('trainer_reload', wrap(sample_data),
+                            pipeline_name='trainer_reload_chain', pipeline_version=version)
+        t.set_trials([trial])
+        t.train()
+
+        # Checked before set_trials(): set_trials() unconditionally
+        # reset_nodes()s its whole selection, which would wipe the very
+        # artifacts this is testing — see the separate bug note about that.
+        loaded = project.load_trainer('trainer_reload', wrap(sample_data))
+        flow = loaded.train_folds[0].train_data_flows[0]
+        assert 's1' in flow.node_objs
+        assert 's2' in flow.node_objs
+
+        # Proves _node_edges (recovered from NodeInfoStore) actually routes
+        # data through s1 -> s2, not just that obj.pkl happened to load.
+        train_data = flow.get_train({'X': 's2:(*)', 'y': '{target}'})
+        assert train_data['X'].get_shape()[0] > 0

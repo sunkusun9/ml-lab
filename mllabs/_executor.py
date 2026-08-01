@@ -11,37 +11,38 @@ _mp_ctx = multiprocessing.get_context('spawn')
 
 from ._node_processor import ProgressMonitor
 from ._pipeline import _definition_of
-from ._store import NodeStore
 
 
-def _write_prep_error(node_path, node_attrs, edges, exc):
+def _prep_error_info(edges, exc):
     """Data-prep (get_train/get_valid/get_test_data) failed before dispatch to a worker.
-    Persist an 'error' info like a fit-time failure so the node's state stays consistent
-    and the run can move on to the remaining nodes/folds instead of crashing."""
-    error = {
-        'type': type(exc).__name__,
-        'message': str(exc),
-        'traceback': traceback.format_exc(),
-    }
-    info = {
+
+    Builds the same 'error' info shape a fit-time failure produces (see
+    ``_process``), so callers can hand it to a tracker's ``error(...)``
+    uniformly regardless of which stage the failure happened at. Not
+    persisted here — recording is the tracker's job now (``NodeInfoTracker``/
+    ``TrialHistTracker``), not ``NodeStore``.
+    """
+    return {
         'build_id': str(uuid.uuid4()),
         'fit_time': 0.0,
         'train_shape': None,
         'edges': edges,
         'status': 'error',
-        'error': error,
+        'error': {
+            'type': type(exc).__name__,
+            'message': str(exc),
+            'traceback': traceback.format_exc(),
+        },
     }
-    NodeStore.write_info(node_path, info)
-    return error
 
 
-def _process(node_attrs, train_data, valid_data, fit_process, monitor, gpu_id_list=None, single_worker = True):
+def _process(spec, train_data, valid_data, fit_process, monitor, gpu_id_list=None, single_worker = True):
     from ._node_processor import TransformProcessor, PredictProcessor
-    method = node_attrs['method']
+    method = spec.method
     if method in ['transform', 'fit_transform']:
-        obj = TransformProcessor(node_attrs['name'], node_attrs['processor'], node_attrs['adapter'], node_attrs['params'])
+        obj = TransformProcessor(spec.name, spec.processor, spec.adapter, spec.params)
     else:
-        obj = PredictProcessor(node_attrs['name'], node_attrs['processor'], method, node_attrs['adapter'], node_attrs['params'])
+        obj = PredictProcessor(spec.name, spec.processor, method, spec.adapter, spec.params)
 
     start_time = time.time()
     with warnings.catch_warnings(record=True) as caught:
@@ -56,11 +57,10 @@ def _process(node_attrs, train_data, valid_data, fit_process, monitor, gpu_id_li
             warn_msgs = [f"{w.category.__name__}: {w.message}" for w in caught]
             info = {
                 'build_id': str(uuid.uuid4()),
-                'role': node_attrs.get('role'),
-                'definition': _definition_of(node_attrs),
+                'definition': _definition_of(spec),
                 'fit_time': time.time() - start_time,
                 'train_shape': None,
-                'edges': node_attrs.get('edges'),
+                'edges': spec.edges,
                 'status': 'error',
                 'error': {
                     'type': type(e).__name__,
@@ -77,11 +77,10 @@ def _process(node_attrs, train_data, valid_data, fit_process, monitor, gpu_id_li
     ref_data = train_data[_ref_key]
     info = {
         'build_id': str(uuid.uuid4()),
-        'role': node_attrs.get('role'),
-        'definition': _definition_of(node_attrs),
+        'definition': _definition_of(spec),
         'fit_time': elapsed_time,
         'train_shape': ref_data.get_shape() if ref_data is not None else None,
-        'edges': node_attrs.get('edges'),
+        'edges': spec.edges,
     }
     warn_msgs = [f"{w.category.__name__}: {w.message}" for w in caught]
     if warn_msgs:
@@ -106,9 +105,9 @@ def _default_on_collect(collector, node_name, outer_idx, inner_idx, result):
     collector.push(node_name, outer_idx, inner_idx, result)
 
 
-def _run_collectors(collectors, node_attrs, obj, result, info, train_data, valid_data, test_data, ext_data,
+def _run_collectors(collectors, spec, obj, result, info, train_data, valid_data, test_data, ext_data,
                     outer_idx, inner_idx, monitor, on_collect=_default_on_collect):
-    matched = [c for c in collectors if c.connector.match(node_attrs)]
+    matched = [c for c in collectors if c.connector.match(spec)]
     if not matched:
         return []
     # Capture predict/collect-time warnings (e.g. XGBoost device-mismatch on
@@ -125,9 +124,9 @@ def _run_collectors(collectors, node_attrs, obj, result, info, train_data, valid
             if prop['need_output_test']:
                 proc_test = True
         context = {
-            'node_attrs': node_attrs,
+            'node_spec': spec,
             'processor': obj,
-            'spec': info,
+            'info': info,
             'input': (train_data, valid_data, test_data),
             'outer_idx': outer_idx,
             'inner_idx': inner_idx,
@@ -140,7 +139,7 @@ def _run_collectors(collectors, node_attrs, obj, result, info, train_data, valid
         for c in matched:
             if ext_data is not None and c.name in ext_data:
                 context['output_ext'] = obj.process(ext_data[c.name])
-            on_collect(c, node_attrs['name'], outer_idx, inner_idx, _safe_collect_call(c, context, monitor))
+            on_collect(c, spec.name, outer_idx, inner_idx, _safe_collect_call(c, context, monitor))
     return [f"{w.category.__name__}: {w.message}" for w in caught]
 
 
@@ -172,8 +171,8 @@ class _ProgressRouter(ProgressMonitor):
 class ProcessWorker(_mp_ctx.Process):
     """Process-based worker. Receives jobs via Pipe, reports results/progress back.
 
-    Job tuple: ``(node_path, file, node_attrs, idx, no, train_data, valid_data)``
-    Sentinel ``None`` stops the worker.
+    Job tuple: ``(spec, outer_idx, inner_idx, train_data, valid_data,
+    test_data, ext_data)``. Sentinel ``None`` stops the worker.
 
     Messages sent to main via conn:
         ('progress', current, total, metrics)
@@ -181,12 +180,20 @@ class ProcessWorker(_mp_ctx.Process):
         ('info', msg)
         ('done', info)
         ('error', error_info)
+
+    Args:
+        store (NodeStore): This run's store, constructed in the parent and
+            handed to the worker at spawn — ``NodeStore`` holds nothing but
+            a path (no open connections on ``self``), so it pickles across
+            the process boundary fine. Used to write the fitted obj/result
+            once a job finishes, the same call a single-process run makes.
     """
 
-    def __init__(self, conn, collectors, gpu_id=None, log_path=None):
+    def __init__(self, conn, collectors, store, gpu_id=None, log_path=None):
         super().__init__(daemon=True)
         self.conn = conn
         self.collectors = collectors
+        self.store = store
         self.gpu_id = gpu_id
         self.log_path = log_path
 
@@ -208,27 +215,26 @@ class ProcessWorker(_mp_ctx.Process):
             job = self.conn.recv()
             if job is None:
                 break
-            node_path, node_attrs, outer_idx, inner_idx, train_data, valid_data, test_data, ext_data = job
+            spec, outer_idx, inner_idx, train_data, valid_data, test_data, ext_data = job
             obj = result = info = None
             try:
-                node_name = node_attrs['name']
-                method = node_attrs['method']
+                node_name = spec.name
+                method = spec.method
                 fit_process = method in ['fit_transform', 'fit_predict']
-                obj, result, info = _process(node_attrs, train_data, valid_data, fit_process, monitor, gpu_id_list, single_worker = False)
+                obj, result, info = _process(spec, train_data, valid_data, fit_process, monitor, gpu_id_list, single_worker = False)
                 for w in info.get('warnings', []):
                     logger.warning(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}")
                 if obj is None:
-                    NodeStore.write_info(node_path, info)
-                    self.conn.send(('error', {**info['error'], 'fold': (outer_idx, inner_idx)}))
+                    self.conn.send(('error', {**info, 'fold': (outer_idx, inner_idx)}))
                     continue
 
-                NodeStore.write_objs(node_path, obj, result, info)
+                self.store.write_objs(node_name, outer_idx, inner_idx, obj, result)
 
                 def _send_collect(collector, node_name, outer_idx, inner_idx, res):
                     self.conn.send(('collect', collector.name, node_name, outer_idx, inner_idx, res))
 
                 collect_warns = _run_collectors(
-                    self.collectors, node_attrs, obj, result, info, train_data, valid_data, test_data, ext_data,
+                    self.collectors, spec, obj, result, info, train_data, valid_data, test_data, ext_data,
                     outer_idx, inner_idx, monitor, on_collect=_send_collect,
                 )
                 for w in collect_warns:
@@ -241,24 +247,13 @@ class ProcessWorker(_mp_ctx.Process):
                 # is received, so worker peak = old data + model + new data. Estimators
                 # (Keras models, LightGBM callbacks, evals_result_) hold reference
                 # cycles, so refcounting alone will not free them here.
-                job = node_attrs = train_data = valid_data = test_data = ext_data = None
+                job = spec = train_data = valid_data = test_data = ext_data = None
                 obj = result = info = None
                 gc.collect()
 
 # ---------------------------------------------------------------------------
 # Flow build
 # ---------------------------------------------------------------------------
-
-def _is_stage_ready(flow, pipeline, node_name):
-    from ._edge_dsl import referenced_nodes
-    for dsl_string in pipeline.get_node_attrs(node_name)['edges'].values():
-        for src_name in referenced_nodes(dsl_string):
-            if src_name is None:
-                continue
-            if src_name not in flow.node_objs:
-                return False
-    return True
-
 
 class _TrackerRouter(ProgressMonitor):
     def __init__(self, worker_idx, tracker):
@@ -273,110 +268,226 @@ class _TrackerRouter(ProgressMonitor):
         if self._tracker is not None:
             self._tracker.message(self.worker_idx, msg, typ)
 
-def _build_flow_single(outer_folds, pipeline, nodes, gpu_id_list=None, collectors=None, tracker=None):
+class Job:
+    """One unit of build/experiment work, fully resolved before dispatch.
+
+    Unifies what used to be two near-identical classes (StageJob, TrialJob)
+    — a Stage build and a Trial fit dispatch the same way once name/spec/
+    fold/flow/need_gpu are known. The caller builds the list and settles
+    what's already done (Experimenter/Trainer's ``_make_stage_jobs`` for
+    Stages, ``_make_jobs``/``_make_trial_jobs`` for Trials); the executor
+    never walks ``outer_folds``/``pipeline`` or decides what to skip. Stages
+    still need the executor to order dispatch (via
+    ``flow.get_missing_nodes``, since Stages depend on each other) — Trials
+    are leaves and don't.
+
+    Attributes:
+        name (str): Node/Trial name — also its artifact directory.
+        spec (ProcessorSpec): What to build and what to feed it — the same
+            shape whether a Stage or a Trial produced it.
+        outer_idx, inner_idx (int): Fold coordinates — also the
+            NodeStore/DataCache key.
+        flow (TrainDataFlow): Supplies train/valid/test inputs and owns the
+            artifact directory for this fold.
+        need_gpu (bool): Whether this job's adapter wants a GPU.
+    """
+
+    __slots__ = ('name', 'spec', 'outer_idx', 'inner_idx', 'flow', 'need_gpu')
+
+    def __init__(self, name, spec, outer_idx, inner_idx, flow, need_gpu=False):
+        self.name = name
+        self.spec = spec
+        self.outer_idx = outer_idx
+        self.inner_idx = inner_idx
+        self.flow = flow
+        self.need_gpu = need_gpu
+
+    def node_path(self):
+        return self.flow.node_path(self.name)
+
+    def __repr__(self):
+        return f"<Job {self.name!r} fold=({self.outer_idx}, {self.inner_idx}) gpu={self.need_gpu}>"
+
+
+def _stage_job_data(job):
+    """``(train, valid, test)`` for *job*, raising like any prep failure.
+
+    No ``ext_data``/collectors here — Collectors belong to an Experiment and
+    run against Trials, never Stages (see ``Experimenter.build``).
+    """
+    edges = job.spec.edges
+    train_data = job.flow.get_train(edges)
+    valid_data = job.flow.get_valid(edges)
+    test_data = job.flow.get_test(edges)
+    return train_data, valid_data, test_data
+
+
+def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None):
+    """Run *jobs* to completion, single-process.
+
+    Unifies what used to be two near-identical functions (``_build_flow_single``
+    for Stages, ``_experiment_single`` for Trials) — both dispatch a ready job
+    through ``_process`` and persist the result the same way; the only real
+    difference was Stage jobs never having Collectors. ``collectors=None`` is
+    that Stage/build case: input prep skips ``ext_data`` and nothing is
+    matched/run. Passing ``collectors=[]`` (Trainer's Trial path, which also
+    never has Collectors) takes the same code path as a real list, just with
+    nothing to match — functionally identical, ``None`` only worth it for the
+    minor skip.
+
+    The dependency-order ``while True: ready = [...]`` loop (needed because
+    Stages can depend on each other) works unchanged for Trials too, but the
+    ``get_missing_nodes`` gate inside it is Stage-only (``collectors is
+    None``) — a Trial's edges only ever reference already-built Stages, so
+    in the normal case that check would be immediately empty for it anyway,
+    but gating Trials on it too meant one referencing a Stage that never got
+    built would silently vanish (never dispatched, never an error) instead
+    of failing loudly the way ``_job_inputs`` used to (a ``KeyError`` from
+    ``TrainDataFlow._resolve_typ``, caught and recorded as a prep error).
+    ``job.flow.set_objs`` is called for every completed job regardless of
+    kind: without it, a Trial job would never leave ``ready`` (nothing else
+    marks it done), and the loop would redispatch it forever.
+
+    *store* is the run's ``NodeStore`` (shared by every job's ``flow`` in a
+    single call) — passed explicitly instead of importing the class and
+    calling its write methods statically, now that ``NodeStore`` is a plain,
+    lightweight object rather than something only reachable via a fold.
+
+    Internally, ``errors`` is always keyed ``(outer_idx, inner_idx, name)`` —
+    a job identity, needed so a failed job doesn't get redispatched forever
+    by the ready-loop. What's returned differs to match each existing
+    caller's contract: Stage callers (``collectors=None``) get that key
+    as-is; Trial callers (``Experimenter.exp``/``Trainer.train``) get it
+    collapsed to ``(outer_idx, name)``, matching ``_execute_multi``'s
+    shape — note this collapse can overwrite one inner fold's error with
+    another's if the same trial fails on more than one inner fold of the
+    same outer fold; that collision predates this merge and isn't fixed here.
+    """
     gpu_id_list = gpu_id_list or []
-    collectors = collectors or []
-
-    errors = {}
-    router = _TrackerRouter(1, tracker)
-
-    if tracker:
-        for outer_idx, outer_fold in enumerate(outer_folds):
-            for inner_idx, flow in enumerate(outer_fold.train_data_flows):
-                for n in nodes:
-                    if n in flow.node_objs:
-                        tracker.done(0, n, outer_idx, inner_idx, None)
+    errors = {}  # {(outer_idx, inner_idx, name): error_info}
+    router = _TrackerRouter(0, tracker)
 
     while True:
         ready = [
-            (outer_idx, inner_idx, flow, n)
-            for outer_idx, outer_fold in enumerate(outer_folds)
-            for inner_idx, flow in enumerate(outer_fold.train_data_flows)
-            for n in nodes
-            if n not in flow.node_objs and (outer_idx, inner_idx, n) not in errors
-            and _is_stage_ready(flow, pipeline, n)
+            job for job in jobs
+            if job.name not in job.flow.node_objs
+            and (job.outer_idx, job.inner_idx, job.name) not in errors
+            and (collectors is not None or not job.flow.get_missing_nodes(job.spec.edges))
         ]
         if not ready:
             break
 
-        for outer_idx, inner_idx, flow, node_name in ready:
-            node_attrs = pipeline.get_node_attrs(node_name)
-            try:
-                train_data = flow.get_train(node_attrs['edges'])
-                valid_data = flow.get_valid(node_attrs['edges'])
-                test_data = outer_folds[outer_idx].get_test_data(node_attrs['edges'])
-                ext_data = {}
-                for i in [c for c in collectors if c.connector.match(node_attrs)]:
-                    if i.get_properties().get('need_process_data', False):
-                        ext_data[i.name] = flow.get_data(i.get_ext_data(), node_attrs['edges'])
-            except Exception as e:
-                error = _write_prep_error(flow._node_path(node_name), node_attrs, node_attrs['edges'], e)
-                errors[(outer_idx, inner_idx, node_name)] = error
-                if tracker:
-                    tracker.error(0, node_name, outer_idx, inner_idx, error)
-                continue
-            fit_process = node_attrs['method'] in ['fit_transform', 'fit_predict']
+        for job in ready:
+            outer_idx, inner_idx, node_name = job.outer_idx, job.inner_idx, job.name
+            matched = [c for c in collectors if c.connector.match(job.spec)] if collectors is not None else []
 
+            try:
+                if collectors is not None:
+                    train_data, valid_data, test_data, ext_data = _job_inputs(job, collectors)
+                else:
+                    train_data, valid_data, test_data = _stage_job_data(job)
+                    ext_data = {}
+            except Exception as e:
+                info = _prep_error_info(job.spec.edges, e)
+                errors[(outer_idx, inner_idx, node_name)] = info
+                if tracker:
+                    tracker.error(0, node_name, outer_idx, inner_idx, info)
+                for c in matched:
+                    c.abort_node(node_name)
+                continue
+
+            fit_process = job.spec.method in ['fit_transform', 'fit_predict']
             if tracker:
                 tracker.start(0, node_name, outer_idx, inner_idx)
-            obj, result, info = _process(node_attrs, train_data, valid_data, fit_process, router, gpu_id_list, single_worker = True)
+            obj, result, info = _process(job.spec, train_data, valid_data, fit_process,
+                                         router, gpu_id_list, single_worker=True)
             for w in info.get('warnings', []):
-                if tracker:
-                    tracker.message(0, f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}", typ='warning')
+                router.message(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}", typ='warning')
             if obj is None:
-                errors[(outer_idx, inner_idx, node_name)] = info['error']
-                NodeStore.write_info(flow._node_path(node_name), info)
+                errors[(outer_idx, inner_idx, node_name)] = info
                 if tracker:
-                    tracker.error(0, node_name, outer_idx, inner_idx, info['error'])
+                    tracker.error(0, node_name, outer_idx, inner_idx, info)
+                for c in matched:
+                    c.abort_node(node_name)
                 continue
 
-            NodeStore.write_objs(flow._node_path(node_name), obj, result, info)
-            flow.set_objs(node_name, obj, result, info)
+            store.write_objs(node_name, outer_idx, inner_idx, obj, result)
+            job.flow.set_objs(node_name, obj, result, info)
             if tracker:
                 tracker.done(0, node_name, outer_idx, inner_idx, info)
 
-            if collectors:
-                collect_warns = _run_collectors(collectors, node_attrs, obj, result, info, train_data, valid_data, test_data, ext_data,
-                                                outer_idx, inner_idx, router)
-                if tracker:
-                    for w in collect_warns:
-                        tracker.message(0, f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}", typ='warning')
+            if matched:
+                collect_warns = _run_collectors(
+                    matched, job.spec, obj, result, info,
+                    train_data, valid_data, test_data, ext_data,
+                    outer_idx, inner_idx, router,
+                )
+                for w in collect_warns:
+                    router.message(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}", typ='warning')
 
-    return errors
+    if collectors is None:
+        return errors
+    return {(o, n): info for (o, i, n), info in errors.items()}
 
 
-def _build_flow_multi(outer_folds, pipeline, nodes, n_jobs, gpu_id_list=None, collectors=None, tracker=None,
-                      gpu_fallback_cpu=True, cpu_fallback_gpu=True, log_dir=None):
-    from .adapter._base import GPU_NO
+def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, tracker=None,
+                   gpu_fallback_cpu=True, cpu_fallback_gpu=True, log_dir=None):
+    """Run *jobs* to completion with a worker pool.
 
+    Unifies what used to be two near-identical functions (``_build_flow_multi``
+    for Stages, ``_experiment_multi`` for Trials) — same split as
+    ``_execute_single``: ``collectors=None`` is the Stage/build case (workers
+    get an empty collectors list, input prep skips ``ext_data`` and nothing
+    is matched); a list (possibly empty — Trainer's Trial path never has
+    Collectors either) is the Trial/experiment case.
+
+    Readiness is recomputed from scratch every dispatch cycle
+    (``_collect_ready``, ``_build_flow_multi``'s old style) rather than
+    tracked as two mutable lists trimmed on dispatch/error
+    (``_experiment_multi``'s old style, via a now-gone ``_drop`` helper) —
+    recompute is the only one of the two that's correct for Stages, whose
+    readiness changes as sibling Stages complete; it works for Trials too,
+    since a Trial's edges only ever reference already-built Stages, so
+    nothing about its readiness actually changes once ``jobs`` is fixed.
+    The dependency-order check itself (``flow.get_missing_nodes``) stays
+    Stage-only (``collectors is None``) — gating Trials on it too was a
+    latent bug introduced when ``_execute_single`` was first merged: a
+    Trial referencing a Stage that never got built would silently vanish
+    (never dispatched, never an error) instead of failing loudly the way
+    ``_job_inputs`` used to (a ``KeyError`` from
+    ``TrainDataFlow._resolve_typ``, caught and recorded as a prep error).
+    Fixed here and in ``_execute_single`` at the same time.
+
+    The worker-assignment fallback policy adopted here is
+    ``_experiment_multi``'s old one — a free worker of the "wrong" type is
+    only handed to a ready job if nothing of its own type is waiting — which
+    is strictly better than ``_build_flow_multi``'s old unconditional-steal
+    version; applied uniformly to Stage dispatch too now. One minor
+    imprecision from recomputing readiness fresh each cycle rather than
+    mutating shared lists: within a single ``_try_dispatch`` call, a job
+    dispatched from the GPU pass isn't reflected in the CPU pass's "is
+    anything of my own type still waiting" check (both passes read the same
+    snapshot) — worst case this delays an opportunistic cross-type dispatch
+    by one cycle, corrected on the next 'done'/'error' event.
+
+    Internal ``errors`` keys are always ``(outer_idx, inner_idx, name)``,
+    same reason as ``_execute_single``; the return value collapses this to
+    ``(outer_idx, name)`` for the Trial/experiment case to match
+    ``Experimenter.exp``/``Trainer.train``'s existing unpacking (same
+    same-outer/different-inner collision caveat as ``_execute_single``).
+    """
     gpu_id_list = gpu_id_list or []
-    collectors = collectors or []
     n_gpu = min(len(gpu_id_list), n_jobs)
     if log_dir is not None:
         os.makedirs(log_dir, exist_ok=True)
 
-    flow_map = {
-        (outer_idx, inner_idx): flow
-        for outer_idx, outer_fold in enumerate(outer_folds)
-        for inner_idx, flow in enumerate(outer_fold.train_data_flows)
-    }
-
-    _gpu_cache = {}  # node name -> bool, avoids re-resolving the adapter on every dispatch tick
-
-    def _needs_gpu(node_attrs):
-        if not gpu_id_list:
-            return False
-        name = node_attrs['name']
-        if name not in _gpu_cache:
-            from .adapter import resolve_node_adapter
-            adapter = resolve_node_adapter(node_attrs.get('processor'), node_attrs.get('adapter'))
-            _gpu_cache[name] = adapter.get_gpu_usage(node_attrs.get('params')) != GPU_NO
-        return _gpu_cache[name]
-
     workers = []  # [(process, parent_conn)]
     for i in range(n_jobs):
         parent_conn, child_conn = _mp_ctx.Pipe()
-        w = ProcessWorker(child_conn, collectors, gpu_id=gpu_id_list[i] if i < n_gpu else None,
+        # Stage jobs (collectors=None) never have Collectors to run, so the
+        # worker always gets an empty list in that case.
+        w = ProcessWorker(child_conn, collectors or [], store,
+                          gpu_id=gpu_id_list[i] if i < n_gpu else None,
                           log_path=os.path.join(log_dir, f'worker_{i}.log') if log_dir else None)
         w.start()
         child_conn.close()
@@ -385,71 +496,64 @@ def _build_flow_multi(outer_folds, pipeline, nodes, n_jobs, gpu_id_list=None, co
     for _, conn in workers:
         conn.recv()  # wait for 'ready'
 
-    if tracker:
-        for outer_idx, outer_fold in enumerate(outer_folds):
-            for inner_idx, flow in enumerate(outer_fold.train_data_flows):
-                for n in nodes:
-                    if n in flow.node_objs:
-                        tracker.done(0, n, outer_idx, inner_idx, None)
-
     free_gpu = list(range(n_gpu))
     free_cpu = list(range(n_gpu, n_jobs))
-    busy = {}   # parent_conn -> (outer_idx, inner_idx, node_name)
-    errors = {}
+    busy = {}    # conn -> Job
+    errors = {}  # {(outer_idx, inner_idx, name): error_info}
     all_conns = [conn for _, conn in workers]
 
     def _collect_ready():
-        in_flight = set(busy.values())
+        in_flight = {(j.outer_idx, j.inner_idx, j.name) for j in busy.values()}
         gpu_ready, cpu_ready = [], []
-        for outer_idx, outer_fold in enumerate(outer_folds):
-            for inner_idx, flow in enumerate(outer_fold.train_data_flows):
-                for n in nodes:
-                    key = (outer_idx, inner_idx, n)
-                    if n in flow.node_objs or key in errors or key in in_flight:
-                        continue
-                    if not _is_stage_ready(flow, pipeline, n):
-                        continue
-                    node_attrs = pipeline.get_node_attrs(n)
-                    (gpu_ready if _needs_gpu(node_attrs) else cpu_ready).append(key)
+        for job in jobs:
+            key = (job.outer_idx, job.inner_idx, job.name)
+            if job.name in job.flow.node_objs or key in errors or key in in_flight:
+                continue
+            if collectors is None and job.flow.get_missing_nodes(job.spec.edges):
+                continue
+            (gpu_ready if job.need_gpu else cpu_ready).append(job)
         return gpu_ready, cpu_ready
 
-    def _dispatch(outer_idx, inner_idx, node_name, worker_idx):
-        flow = flow_map[(outer_idx, inner_idx)]
-        node_attrs = pipeline.get_node_attrs(node_name)
+    def _dispatch(job, worker_idx):
+        matched = [c for c in collectors if c.connector.match(job.spec)] if collectors is not None else []
         try:
-            train_data = flow.get_train(node_attrs['edges'])
-            valid_data = flow.get_valid(node_attrs['edges'])
-            test_data = outer_folds[outer_idx].get_test_data(node_attrs['edges'], inner_idx)
-            ext_data = {}
-            for i in [c for c in collectors if c.connector.match(node_attrs)]:
-                if i.get_properties().get('need_process_data', False):
-                    ext_data[i.name] = flow.get_data(i.get_ext_data(), node_attrs['edges'])
+            if collectors is not None:
+                train_data, valid_data, test_data, ext_data = _job_inputs(job, collectors)
+            else:
+                train_data, valid_data, test_data = _stage_job_data(job)
+                ext_data = {}
         except Exception as e:
-            error = _write_prep_error(flow._node_path(node_name), node_attrs, node_attrs['edges'], e)
-            errors[(outer_idx, inner_idx, node_name)] = error
+            info = _prep_error_info(job.spec.edges, e)
+            errors[(job.outer_idx, job.inner_idx, job.name)] = info
             if tracker:
-                tracker.error(worker_idx, node_name, outer_idx, inner_idx, error)
+                tracker.error(worker_idx, job.name, job.outer_idx, job.inner_idx, info)
+            for c in matched:
+                c.abort_node(job.name)
             return
 
         _, conn = workers[worker_idx]
-        conn.send((flow._node_path(node_name), node_attrs, outer_idx, inner_idx, train_data, valid_data, test_data, ext_data))
-        busy[conn] = (outer_idx, inner_idx, node_name)
+        conn.send((job.spec, job.outer_idx, job.inner_idx, train_data, valid_data, test_data, ext_data))
+        busy[conn] = job
         (free_gpu if worker_idx < n_gpu else free_cpu).remove(worker_idx)
         if tracker:
-            tracker.start(worker_idx, node_name, outer_idx, inner_idx)
+            tracker.start(worker_idx, job.name, job.outer_idx, job.inner_idx)
 
     def _try_dispatch():
         gpu_ready, cpu_ready = _collect_ready()
-        for outer_idx, inner_idx, node_name in gpu_ready:
+        for job in gpu_ready:
             if free_gpu:
-                _dispatch(outer_idx, inner_idx, node_name, free_gpu[0])
-            elif free_cpu and gpu_fallback_cpu:
-                _dispatch(outer_idx, inner_idx, node_name, free_cpu[0])
-        for outer_idx, inner_idx, node_name in cpu_ready:
+                _dispatch(job, free_gpu[0])
+            elif free_cpu and not cpu_ready and gpu_fallback_cpu:
+                _dispatch(job, free_cpu[0])
+            else:
+                break
+        for job in cpu_ready:
             if free_cpu:
-                _dispatch(outer_idx, inner_idx, node_name, free_cpu[0])
-            elif free_gpu and cpu_fallback_gpu:
-                _dispatch(outer_idx, inner_idx, node_name, free_gpu[0])
+                _dispatch(job, free_cpu[0])
+            elif free_gpu and not gpu_ready and cpu_fallback_gpu:
+                _dispatch(job, free_gpu[0])
+            else:
+                break
 
     _try_dispatch()
 
@@ -457,11 +561,12 @@ def _build_flow_multi(outer_folds, pipeline, nodes, n_jobs, gpu_id_list=None, co
         for conn in wait(all_conns):
             msg_type, *data = conn.recv()
             worker_idx = next(i for i, (_, c) in enumerate(workers) if c is conn)
-            outer_idx, inner_idx, node_name = busy[conn]
+            job = busy[conn]
+            outer_idx, inner_idx, node_name = job.outer_idx, job.inner_idx, job.name
 
             if msg_type == 'done':
                 info = data[0]
-                flow_map[(outer_idx, inner_idx)].load_objs(node_name)
+                job.flow.load_objs(node_name, edges=job.spec.edges)
                 del busy[conn]
                 (free_gpu if worker_idx < n_gpu else free_cpu).append(worker_idx)
                 if tracker:
@@ -469,19 +574,23 @@ def _build_flow_multi(outer_folds, pipeline, nodes, n_jobs, gpu_id_list=None, co
                 _try_dispatch()
 
             elif msg_type == 'error':
-                error_info = data[0]
-                errors[(outer_idx, inner_idx, node_name)] = error_info
+                info = data[0]
+                errors[(outer_idx, inner_idx, node_name)] = info
                 del busy[conn]
                 (free_gpu if worker_idx < n_gpu else free_cpu).append(worker_idx)
                 if tracker:
-                    tracker.error(worker_idx, node_name, outer_idx, inner_idx, error_info)
+                    tracker.error(worker_idx, node_name, outer_idx, inner_idx, info)
+                if collectors is not None:
+                    for c in collectors:
+                        if c.connector.match(job.spec):
+                            c.abort_node(node_name)
                 _try_dispatch()
 
             elif msg_type == 'collect':
-                coll_name, node_name, fi, no, res = data
-                for c in collectors:
+                coll_name, n, o, i, res = data
+                for c in (collectors or []):
                     if c.name == coll_name:
-                        c.push(node_name, fi, no, res)
+                        c.push(n, o, i, res)
                         break
 
             elif msg_type == 'progress':
@@ -501,6 +610,10 @@ def _build_flow_multi(outer_folds, pipeline, nodes, n_jobs, gpu_id_list=None, co
     for _, conn in workers:
         conn.close()
 
+    if collectors is None:
+        return errors
+    return {(o, n): info for (o, i, n), info in errors.items()}
+
     return errors
 
 
@@ -508,254 +621,16 @@ def _build_flow_multi(outer_folds, pipeline, nodes, n_jobs, gpu_id_list=None, co
 # Experiment flow
 # ---------------------------------------------------------------------------
 
-class TrialJob:
-    """One unit of experiment work, fully resolved before dispatch.
-
-    ``exp()`` expands (trial, outer, inner) into these, so the executor no
-    longer walks folds or decides what to skip — it just runs the list. That
-    keeps fold policy in one place and makes the dispatcher's target list
-    literally the thing it was handed.
-
-    Attributes:
-        trial (Trial): What to fit.
-        attrs (dict): Resolved node attributes (``trial.get_attrs()``).
-        cache_key (tuple[int, int]): ``(outer_idx, inner_idx)`` — also the
-            fold coordinates used for artifacts, collectors and history.
-        flow (TrainDataFlow): Supplies train/valid/test inputs and owns the
-            artifact directory for this fold.
-        need_gpu (bool): Whether this Trial's adapter wants a GPU.
-    """
-
-    __slots__ = ('trial', 'attrs', 'cache_key', 'flow', 'need_gpu')
-
-    def __init__(self, trial, attrs, cache_key, flow, need_gpu=False):
-        self.trial = trial
-        self.attrs = attrs
-        self.cache_key = cache_key
-        self.flow = flow
-        self.need_gpu = need_gpu
-
-    @property
-    def name(self):
-        return self.trial.name
-
-    @property
-    def outer_idx(self):
-        return self.cache_key[0]
-
-    @property
-    def inner_idx(self):
-        return self.cache_key[1]
-
-    def node_path(self):
-        return self.flow._node_path(self.name)
-
-    def __repr__(self):
-        return f"<TrialJob {self.name!r} fold={self.cache_key} gpu={self.need_gpu}>"
-
-
 def _job_inputs(job, collectors):
     """``(train, valid, test, ext)`` for *job*, raising like any prep failure."""
-    edges = job.attrs['edges']
+    edges = job.spec.edges
     train_data = job.flow.get_train(edges)
     valid_data = job.flow.get_valid(edges)
     test_data = job.flow.get_test(edges)
     ext_data = {}
     for c in collectors:
-        if c.connector.match(job.attrs) and c.get_properties().get('need_process_data', False):
+        if c.connector.match(job.spec) and c.get_properties().get('need_process_data', False):
             ext_data[c.name] = job.flow.get_data(c.get_ext_data(), edges)
     return train_data, valid_data, test_data, ext_data
 
 
-def _experiment_single(jobs, gpu_id_list=None, collectors=None, tracker=None):
-    gpu_id_list = gpu_id_list or []
-    collectors = collectors or []
-    errors = {}  # {(outer_idx, trial_name): error_info}
-    monitor = _TrackerRouter(0, tracker)
-
-    for job in jobs:
-        name = job.name
-        if (job.outer_idx, name) in errors:
-            continue
-        matched = [c for c in collectors if c.connector.match(job.attrs)]
-        fit_process = job.attrs['method'] in ['fit_transform', 'fit_predict']
-
-        try:
-            train_data, valid_data, test_data, ext_data = _job_inputs(job, collectors)
-        except Exception as e:
-            error = _write_prep_error(job.node_path(), job.attrs, job.attrs['edges'], e)
-            errors[(job.outer_idx, name)] = {**error, 'fold': job.cache_key}
-            if tracker:
-                tracker.error(0, name, job.outer_idx, job.inner_idx, error)
-            for c in matched:
-                c.abort_node(name)
-            continue
-
-        if tracker:
-            tracker.start(0, name, job.outer_idx, job.inner_idx)
-        obj, result, info = _process(job.attrs, train_data, valid_data, fit_process,
-                                     monitor, gpu_id_list, single_worker=True)
-        for w in info.get('warnings', []):
-            monitor.message(f"[{name}] fold {job.outer_idx}_{job.inner_idx}: {w}", typ='warning')
-        if obj is None:
-            errors[(job.outer_idx, name)] = {**info['error'], 'fold': job.cache_key}
-            NodeStore.write_info(job.node_path(), info)
-            if tracker:
-                tracker.error(0, name, job.outer_idx, job.inner_idx, info['error'])
-            for c in matched:
-                c.abort_node(name)
-            continue
-
-        NodeStore.write_objs(job.node_path(), obj, result, info)
-        if tracker:
-            tracker.done(0, name, job.outer_idx, job.inner_idx, info)
-
-        if matched:
-            collect_warns = _run_collectors(
-                matched, job.attrs, obj, result, info,
-                train_data, valid_data, test_data, ext_data,
-                job.outer_idx, job.inner_idx, monitor,
-            )
-            if tracker:
-                for w in collect_warns:
-                    tracker.message(0, f"[{name}] fold {job.outer_idx}_{job.inner_idx}: {w}",
-                                    typ='warning')
-
-    return errors
-
-
-def _experiment_multi(jobs, n_jobs, gpu_id_list=None, collectors=None, tracker=None,
-                      gpu_fallback_cpu=True, cpu_fallback_gpu=True, log_dir=None):
-    gpu_id_list = gpu_id_list or []
-    collectors = collectors or []
-    n_gpu = min(len(gpu_id_list), n_jobs)
-    if log_dir is not None:
-        os.makedirs(log_dir, exist_ok=True)
-
-    workers = []
-    for i in range(n_jobs):
-        parent_conn, child_conn = _mp_ctx.Pipe()
-        w = ProcessWorker(child_conn, collectors,
-                          gpu_id=gpu_id_list[i] if i < n_gpu else None,
-                          log_path=os.path.join(log_dir, f'worker_{i}.log') if log_dir else None)
-        w.start()
-        child_conn.close()
-        workers.append((w, parent_conn))
-
-    for _, conn in workers:
-        conn.recv()  # wait for 'ready'
-
-    free_gpu = list(range(n_gpu))
-    free_cpu = list(range(n_gpu, n_jobs))
-    busy = {}    # conn -> job
-    errors = {}  # {(outer_idx, trial_name): error_info}
-    all_conns = [conn for _, conn in workers]
-
-    gpu_jobs = [j for j in jobs if j.need_gpu]
-    cpu_jobs = [j for j in jobs if not j.need_gpu]
-
-    def _drop(outer_idx, name):
-        gpu_jobs[:] = [j for j in gpu_jobs if not (j.outer_idx == outer_idx and j.name == name)]
-        cpu_jobs[:] = [j for j in cpu_jobs if not (j.outer_idx == outer_idx and j.name == name)]
-
-    def _dispatch(job, worker_idx):
-        name = job.name
-        try:
-            train_data, valid_data, test_data, ext_data = _job_inputs(job, collectors)
-        except Exception as e:
-            error = _write_prep_error(job.node_path(), job.attrs, job.attrs['edges'], e)
-            errors[(job.outer_idx, name)] = error
-            if tracker:
-                tracker.error(worker_idx, name, job.outer_idx, job.inner_idx, error)
-            for c in collectors:
-                if c.connector.match(job.attrs):
-                    c.abort_node(name)
-            _drop(job.outer_idx, name)
-            return False
-
-        _, conn = workers[worker_idx]
-        conn.send((job.node_path(), job.attrs, job.outer_idx, job.inner_idx,
-                   train_data, valid_data, test_data, ext_data))
-        busy[conn] = job
-        (free_gpu if worker_idx < n_gpu else free_cpu).remove(worker_idx)
-        if tracker:
-            tracker.start(worker_idx, name, job.outer_idx, job.inner_idx)
-        return True
-
-    def _try_dispatch():
-        for job in list(gpu_jobs):
-            if job not in gpu_jobs:
-                continue
-            if free_gpu:
-                _dispatch(job, free_gpu[0])
-            elif free_cpu and not cpu_jobs and gpu_fallback_cpu:
-                _dispatch(job, free_cpu[0])
-            else:
-                break
-            if job in gpu_jobs:
-                gpu_jobs.remove(job)
-        for job in list(cpu_jobs):
-            if job not in cpu_jobs:
-                continue
-            if free_cpu:
-                _dispatch(job, free_cpu[0])
-            elif free_gpu and not gpu_jobs and cpu_fallback_gpu:
-                _dispatch(job, free_gpu[0])
-            else:
-                break
-            if job in cpu_jobs:
-                cpu_jobs.remove(job)
-
-    _try_dispatch()
-
-    while busy:
-        for conn in wait(all_conns):
-            msg_type, *data = conn.recv()
-            worker_idx = next(i for i, (_, c) in enumerate(workers) if c is conn)
-            job = busy[conn]
-            name = job.name
-
-            if msg_type == 'done':
-                del busy[conn]
-                (free_gpu if worker_idx < n_gpu else free_cpu).append(worker_idx)
-                if tracker:
-                    tracker.done(worker_idx, name, job.outer_idx, job.inner_idx, data[0])
-                _try_dispatch()
-
-            elif msg_type == 'error':
-                errors[(job.outer_idx, name)] = data[0]
-                del busy[conn]
-                (free_gpu if worker_idx < n_gpu else free_cpu).append(worker_idx)
-                if tracker:
-                    tracker.error(worker_idx, name, job.outer_idx, job.inner_idx, data[0])
-                for c in collectors:
-                    if c.connector.match(job.attrs):
-                        c.abort_node(name)
-                _drop(job.outer_idx, name)
-                _try_dispatch()
-
-            elif msg_type == 'collect':
-                coll_name, n, o, i, res = data
-                for c in collectors:
-                    if c.name == coll_name:
-                        c.push(n, o, i, res)
-                        break
-
-            elif msg_type == 'progress':
-                if tracker:
-                    tracker.progress(worker_idx, *data)
-            elif msg_type == 'warning':
-                if tracker:
-                    tracker.message(worker_idx, data[0], typ='warning')
-            elif msg_type == 'info':
-                if tracker:
-                    tracker.message(worker_idx, data[0])
-
-    for _, conn in workers:
-        conn.send(None)
-    for w, _ in workers:
-        w.join()
-    for _, conn in workers:
-        conn.close()
-
-    return errors

@@ -55,7 +55,6 @@ class TestMakeTrialsGrid:
             assert t.processor == LGBM
             assert t.method == 'predict'
             assert t.edges == EDGES
-            assert t.label == 'lgbm'
 
     def test_edges_not_shared_between_trials(self, swept):
         a, b = swept[:2]
@@ -192,8 +191,11 @@ class TestCollectorsRegistry:
         return Collectors(tmp_path)
 
     def _set(self, reg, name='m', **kw):
+        # Unrestricted — Trial.get_spec() no longer carries a 'role' key to
+        # match on (2026-08-01, role was dead weight: Collectors only ever
+        # run against Trial jobs anyway, never Stage ones).
         return reg.set_collector(
-            name, 'mllabs.MetricCollector', Connector(role='head'),
+            name, 'mllabs.MetricCollector', Connector(),
             params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'},
                     'output_var': '*'},
             **kw,
@@ -266,24 +268,24 @@ class TestCollectorsRegistry:
         with pytest.raises(KeyError, match='nope'):
             self._reg(tmp_path).resolve(['nope'])
 
-    def test_match_by_role(self, swept, tmp_path):
+    def test_match_unrestricted_connector(self, swept, tmp_path):
         reg = self._reg(tmp_path)
         self._set(reg)
-        attrs = swept[0].get_attrs()
-        assert [c.name for c in reg.match(attrs)] == ['m']
+        spec = swept[0].get_spec()
+        assert [c.name for c in reg.match(spec)] == ['m']
 
     def test_match_filters_by_connector(self, swept, tmp_path):
         reg = self._reg(tmp_path)
         reg.set_collector('nope', 'mllabs.MetricCollector', Connector(node_query='^zzz'),
                           params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'},
                                   'output_var': '*'})
-        assert reg.match(swept[0].get_attrs()) == []
+        assert reg.match(swept[0].get_spec()) == []
 
     def test_match_restricted_to_names(self, swept, tmp_path):
         reg = self._reg(tmp_path)
         self._set(reg, 'a'); self._set(reg, 'b')
-        attrs = swept[0].get_attrs()
-        assert [c.name for c in reg.match(attrs, names=['a'])] == ['a']
+        spec = swept[0].get_spec()
+        assert [c.name for c in reg.match(spec, names=['a'])] == ['a']
 
     def test_save_load_roundtrip(self, tmp_path):
         reg = self._reg(tmp_path)

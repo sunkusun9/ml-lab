@@ -22,13 +22,12 @@ _SCHEMA_SQL = """
         name             TEXT PRIMARY KEY,
         data_key         TEXT,
         title            TEXT,
-        status           TEXT,
         pipeline_name    TEXT,
         pipeline_version INTEGER
     );
 """
 
-_COLUMNS = ('name', 'data_key', 'title', 'status',
+_COLUMNS = ('name', 'data_key', 'title',
             'pipeline_name', 'pipeline_version')
 
 

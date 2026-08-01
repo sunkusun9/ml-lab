@@ -122,6 +122,14 @@ class LoggerExecuteTracker(ExecuteTracker):
             
 
 
+def _info_without_status(info):
+    """*info* minus its ``'status'`` key — the hist tables carry status as its
+    own column, so the JSON blob next to it shouldn't repeat it."""
+    if info is None:
+        return None
+    return {k: v for k, v in info.items() if k != 'status'}
+
+
 class TrialHistTracker(ExecuteTracker):
     """Records Trial run history while delegating display to another tracker.
 
@@ -146,11 +154,11 @@ class TrialHistTracker(ExecuteTracker):
         self._experimenter = experimenter
         self._pipeline_version = pipeline_version
 
-    def _record(self, node_name, outer_idx, inner_idx, status):
+    def _record(self, node_name, outer_idx, inner_idx, status, info=None):
         self._store.record(
             node_name, self._experimenter, outer_idx, inner_idx,
             pipeline_version=self._pipeline_version,
-            status=status,
+            status=status, info=_info_without_status(info),
         )
 
     def start(self, worker_idx, node_name, outer_idx, inner_idx):
@@ -163,12 +171,73 @@ class TrialHistTracker(ExecuteTracker):
 
     def done(self, worker_idx, node_name, outer_idx, inner_idx, info):
         super().done(worker_idx, node_name, outer_idx, inner_idx, info)
-        self._record(node_name, outer_idx, inner_idx, 'built')
+        self._record(node_name, outer_idx, inner_idx, 'built', info)
         self._tracker.done(worker_idx, node_name, outer_idx, inner_idx, info)
 
     def error(self, worker_idx, node_name, outer_idx, inner_idx, error_info):
         super().error(worker_idx, node_name, outer_idx, inner_idx, error_info)
-        self._record(node_name, outer_idx, inner_idx, 'error')
+        self._record(node_name, outer_idx, inner_idx, 'error', error_info)
+        self._tracker.error(worker_idx, node_name, outer_idx, inner_idx, error_info)
+
+    def message(self, worker_idx, msg, typ='info'):
+        super().message(worker_idx, msg, typ)
+        self._tracker.message(worker_idx, msg, typ)
+
+    def block(self, node_name, outer_idx, inner_idx):
+        super().block(node_name, outer_idx, inner_idx)
+        self._tracker.block(node_name, outer_idx, inner_idx)
+
+    def close(self):
+        self._tracker.close()
+
+
+class NodeInfoTracker(ExecuteTracker):
+    """Records Stage node run history while delegating display to another tracker.
+
+    Stage-side counterpart to :class:`TrialHistTracker` — same reasoning
+    (``done``/``error`` fire once per (node, fold) with the real result, in
+    the parent process, so recording doesn't depend on re-reading disk after
+    the run). Writes to the run's own :class:`~mllabs._store.NodeStore`
+    history (``node_hist`` — merged into ``NodeStore`` 2026-08-01, no
+    ``run_name`` needed since that store is already scoped to one run) — this
+    is what replaced the ``info.pkl`` ``NodeStore.write_info`` used to write
+    on error.
+
+    Args:
+        tracker (ExecuteTracker): The display/logging tracker to delegate to.
+        store (NodeStore): This run's store — where history is written.
+        pipeline_version (int, optional): The run's ``pipeline_version``.
+    """
+
+    def __init__(self, tracker, store, pipeline_version=None):
+        super().__init__(tracker.total, len(tracker.workers))
+        self._tracker = tracker
+        self._store = store
+        self._pipeline_version = pipeline_version
+
+    def _record(self, node_name, outer_idx, inner_idx, status, info=None):
+        self._store.record(
+            node_name, outer_idx, inner_idx,
+            pipeline_version=self._pipeline_version,
+            status=status, info=_info_without_status(info),
+        )
+
+    def start(self, worker_idx, node_name, outer_idx, inner_idx):
+        super().start(worker_idx, node_name, outer_idx, inner_idx)
+        self._tracker.start(worker_idx, node_name, outer_idx, inner_idx)
+
+    def progress(self, worker_idx, current, total, metrics=None):
+        super().progress(worker_idx, current, total, metrics)
+        self._tracker.progress(worker_idx, current, total, metrics)
+
+    def done(self, worker_idx, node_name, outer_idx, inner_idx, info):
+        super().done(worker_idx, node_name, outer_idx, inner_idx, info)
+        self._record(node_name, outer_idx, inner_idx, 'built', info)
+        self._tracker.done(worker_idx, node_name, outer_idx, inner_idx, info)
+
+    def error(self, worker_idx, node_name, outer_idx, inner_idx, error_info):
+        super().error(worker_idx, node_name, outer_idx, inner_idx, error_info)
+        self._record(node_name, outer_idx, inner_idx, 'error', error_info)
         self._tracker.error(worker_idx, node_name, outer_idx, inner_idx, error_info)
 
     def message(self, worker_idx, msg, typ='info'):

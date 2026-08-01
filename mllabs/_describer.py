@@ -93,8 +93,8 @@ def desc_pipeline(pipeline, max_depth=None, direction='TD'):
         # current_node를 edge로 가지는 child 노드들 찾기
         for name in pipeline.nodes.keys():
             if name is not None:
-                node_attrs = pipeline.get_node_attrs(name)
-                for dsl_string in node_attrs['edges'].values():
+                spec = pipeline.get_node_spec(name)
+                for dsl_string in spec.edges.values():
                     for edge_name in referenced_nodes(dsl_string):
                         if (current_node == 'DataSource' and edge_name is None) or (edge_name == current_node):
                             # child 노드 발견
@@ -242,8 +242,8 @@ def desc_pipeline(pipeline, max_depth=None, direction='TD'):
         # 각 노드의 edges 확인
         for node_name in nodes:
             if node_name in pipeline.nodes:
-                node_attrs = pipeline.get_node_attrs(node_name)
-                for dsl_string in node_attrs['edges'].values():
+                spec = pipeline.get_node_spec(node_name)
+                for dsl_string in spec.edges.values():
                     for edge_name in referenced_nodes(dsl_string):
                         if edge_name is None:
                             # DataSource 연결
@@ -318,8 +318,8 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
             for name in pipeline.nodes.keys():
                 if name is not None and name not in visited:
                     found = False
-                    node_attrs = pipeline.get_node_attrs(name)
-                    edges = node_attrs['edges']
+                    spec = pipeline.get_node_spec(name)
+                    edges = spec.edges
                     for dsl_string in edges.values():
                         if found:
                             break
@@ -372,23 +372,23 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
     # 각 노드를 subgraph로 생성
     for name in sorted(all_nodes):
         if name in pipeline.nodes:
-            node_attrs = pipeline.get_node_attrs(name)
-            edges = node_attrs['edges']
+            spec = pipeline.get_node_spec(name)
+            edges = spec.edges
             display_name = get_grp_path(name)
             lines.append(f"    subgraph node_{name}[\"{display_name}\"]")
 
             if show_params:
                 # 파라미터 정보 포맷팅
-                processor_name = node_attrs['processor'] if node_attrs['processor'] else 'None'
-                method = node_attrs['method']
+                processor_name = spec.processor if spec.processor else 'None'
+                method = spec.method
 
                 info_parts = ["<table>"]
                 info_parts.append(f"<tr><td align='left'><b>processor</b></td><td align='left'>{processor_name}</td></tr>")
                 info_parts.append(f"<tr><td align='left'><b>method</b></td><td align='left'>{method}</td></tr>")
 
                 # params 정보
-                if node_attrs['params']:
-                    for key, value in node_attrs['params'].items():
+                if spec.params:
+                    for key, value in spec.params.items():
                         value_str = str(value)
                         if len(value_str) > 40:
                             value_str = value_str[:37] + '...'
@@ -415,8 +415,8 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
     edges_dict = {}
     for name in all_nodes:
         if name in pipeline.nodes:
-            node_attrs = pipeline.get_node_attrs(name)
-            edges = node_attrs['edges']
+            spec = pipeline.get_node_spec(name)
+            edges = spec.edges
             for key, dsl_string in edges.items():
                 for edge_name in referenced_nodes(dsl_string):
                     if edge_name is None:
@@ -446,8 +446,8 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
     lines.append(f"**Path from DataSource to '{target_display}' ({len(paths)} path(s) found)**")
 
     # Edge 정보 테이블 추가
-    node_attrs = pipeline.get_node_attrs(node_name)
-    edges = node_attrs['edges']
+    spec = pipeline.get_node_spec(node_name)
+    edges = spec.edges
     lines.append("")
     lines.append("### Edges")
     lines.append("")
@@ -475,11 +475,11 @@ def compare_nodes(pipeline, nodes):
         DataFrame index is node names and columns are a MultiIndex of
         ``('params', param_key)`` and ``('X', stage_label)``.
     """
-    attrs_map = {n: pipeline.get_node_attrs(n) for n in nodes}
+    spec_map = {n: pipeline.get_node_spec(n) for n in nodes}
 
     groups = {}
     for name in nodes:
-        proc = attrs_map[name]['processor']
+        proc = spec_map[name].processor
         proc_name = proc if proc is not None else 'None'
         groups.setdefault(proc_name, []).append(name)
 
@@ -488,16 +488,16 @@ def compare_nodes(pipeline, nodes):
         rows = {name: {} for name in group_nodes}
 
         # params
-        all_param_keys = sorted({k for n in group_nodes for k in attrs_map[n]['params']})
+        all_param_keys = sorted({k for n in group_nodes for k in spec_map[n].params})
         for name in group_nodes:
-            params = attrs_map[name]['params']
+            params = spec_map[name].params
             for k in all_param_keys:
                 rows[name][('params', k)] = params.get(k, None)
 
         # edges (X only) - stage node별 변수 비교
         stage_vars = {}
         for name in group_nodes:
-            x_entries = attrs_map[name]['edges'].get('X')
+            x_entries = spec_map[name].edges.get('X')
             if x_entries is None:
                 continue
             for sn, expr in iter_segments(x_entries):
