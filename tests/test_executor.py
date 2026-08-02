@@ -9,7 +9,7 @@ from sklearn.model_selection import ShuffleSplit, KFold
 from mllabs._experimenter import Experimenter
 from mllabs._trainer import Trainer
 from mllabs._pipeline import PipelineBuilder
-from mllabs import Trial, TrialStore
+from mllabs import Trial, TrialStore, Predictor
 from mllabs._cache import DataCache
 from mllabs._data_wrapper import wrap
 from mllabs._logger import ProgressSessionLogger
@@ -401,11 +401,11 @@ class TestExperimentMulti:
 
 
 class TestTrainerMulti:
-    """Trainer reuses _build_flow_multi/_experiment_multi over a different fold layout
-    (TrainFold: single shared train_data_flow/artifact_store per split) — verify it's
+    """Trainer reuses _execute_multi over a different fold layout
+    (TrainFold: single shared train_data_flow per split) — verify it's
     also compatible with n_jobs>1 dispatch."""
 
-    def test_train_stage_and_head_with_n_jobs(self, pipeline, sample_data, tmp_path):
+    def test_train_node_and_predictor_with_n_jobs(self, pipeline, sample_data, tmp_path):
         _setup_full(pipeline)
         t = Trainer(
             name='t1', data=wrap(sample_data), path=tmp_path / 'trainer',
@@ -413,7 +413,7 @@ class TestTrainerMulti:
             splitter_params={}, cache=DataCache(),
         )
         t.set_pipeline(pipeline.build())
-        t.set_trials(_model())
+        t.set_predictors([Predictor.from_trial(t_) for t_ in _model()])
 
         t.train(n_jobs=2)
 

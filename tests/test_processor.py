@@ -865,13 +865,13 @@ class TestPipelineDesc:
         pipeline.set_node('n1', 'g1', processor='mock._DummyProc', edges={'X': '{x1}'}, method='fit_transform', desc='my node', exist='replace')
         assert pipeline.nodes['n1'].desc == 'my node'
 
-    # --- get_attrs에 desc 포함 안 됨 (상속 없음) ---
+    # --- get_spec에 desc 포함 안 됨 (상속 없음) ---
 
-    def test_desc_not_in_get_attrs(self, pipeline):
+    def test_desc_not_in_get_spec(self, pipeline):
         pipeline.set_grp('g1', desc='group desc', exist='replace')
         pipeline.set_node('n1', 'g1', processor='mock._DummyProc', edges={'X': '{x1}'}, method='fit_transform', desc='node desc', exist='replace')
-        attrs = pipeline.get_node_attrs('n1')
-        assert 'desc' not in attrs
+        spec = pipeline.get_node_spec('n1')
+        assert not hasattr(spec, 'desc')
 
     def test_node_desc_not_inherited_from_grp(self, pipeline):
         pipeline.set_grp('g1', desc='group desc', exist='replace')

@@ -495,15 +495,15 @@ def compare_nodes(pipeline, nodes):
                 rows[name][('params', k)] = params.get(k, None)
 
         # edges (X only) - stage node별 변수 비교
-        stage_vars = {}
+        source_vars = {}
         for name in group_nodes:
             x_entries = spec_map[name].edges.get('X')
             if x_entries is None:
                 continue
             for sn, expr in iter_segments(x_entries):
-                stage_vars.setdefault(sn, {}).setdefault(name, []).append(unparse(expr))
+                source_vars.setdefault(sn, {}).setdefault(name, []).append(unparse(expr))
 
-        for sn, node_vars in stage_vars.items():
+        for sn, node_vars in source_vars.items():
             sn_str = str(sn) if sn is not None else 'DataSource'
             for name in group_nodes:
                 if name not in node_vars:

@@ -5,6 +5,8 @@ import numpy as np
 from ._data_wrapper import wrap, unwrap, DataWrapperProvider
 from ._flow import TrainDataFlow
 from ._store import NodeStore
+from ._predictor_store import PredictorStore
+from ._trial import Trial
 from ._edge_dsl import parse, eval_expr, referenced_nodes
 from ._logger import resolve_logger
 from ._run_common import resolve_common_status, require_built_pipeline
@@ -55,16 +57,31 @@ class Trainer:
     stops constructing this directly, standalone.
 
     Uses ``self.pipeline`` — set via the constructor or :meth:`set_pipeline`.
-    Trains the Trials supplied via :meth:`set_trials` plus the Stages they
-    depend on; the Stage selection is recomputed whenever either is set.
+    Trains the Predictors supplied via :meth:`set_predictors` plus the
+    Pipeline nodes they depend on; the node selection is recomputed whenever
+    either is set.
+
+    Two artifact stores, not one. Pipeline nodes keep the Trainer's own base
+    path; Predictors get their own directory underneath it. They are the same
+    :class:`~mllabs._store.NodeStore` class — a Predictor's fitted model and
+    per-split history are stored exactly like a node's — but separating them
+    means a Predictor is told apart structurally rather than by which history
+    table happened to record it, and it keeps the two ``__node_hist.db`` files
+    from colliding. ``__predictors/`` also holds the
+    :class:`~mllabs.PredictorStore` with the definitions themselves, so a
+    reloaded Trainer comes back with its selection intact.
 
     Attributes:
         name (str): Trainer name.
         pipeline (Pipeline): The adopted Pipeline. Only the
             ``(pipeline_name, pipeline_version)`` pointer is persisted — the
             Pipeline itself lives once, wherever the caller keeps its versions.
-        selected_stages (list[str]): Stage nodes included in training.
-        trials (list[Trial]): Trials to train (set via :meth:`set_trials`).
+        selected_nodes (list[str]): Pipeline nodes included in training.
+        predictors (list[Predictor]): Predictors to train (set via
+            :meth:`set_predictors`).
+        node_store (NodeStore): Artifacts + history for Pipeline nodes.
+        predictor_store (NodeStore): Artifacts + history for Predictors.
+        predictor_defs (PredictorStore): The Predictor definitions themselves.
         train_folds (list[TrainFold]): Per-split data flows and artifact stores.
     """
 
@@ -78,10 +95,13 @@ class Trainer:
         self.splitter_params = splitter_params if splitter_params is not None else {}
         self.cache = cache
         self.node_store = NodeStore(self.path)
+        self.predictor_path = self.path / '__predictors'
+        self.predictor_store = NodeStore(self.predictor_path)
+        self.predictor_defs = PredictorStore(self.predictor_path)
         self.aug_data = wrap(aug_data) if aug_data is not None else None
 
-        self.selected_stages = []
-        self.trials = []
+        self.selected_nodes = []
+        self.predictors = []
         self.pipeline = None
         self.pipeline_name = pipeline_name
         self.pipeline_version = None
@@ -139,15 +159,15 @@ class Trainer:
         that before calling this. ``self.pipeline_version`` is read straight
         off *pipeline* (its ``.version``), never tracked separately.
 
-        Which Stages are actually selected depends on the Trials — call
-        :meth:`set_trials` to supply them.
+        Which nodes are actually selected depends on the Predictors — call
+        :meth:`set_predictors` to supply them.
 
         Diffs the two Pipelines (:meth:`Pipeline.diff_from`) and resets the
-        Stage artifacts the change invalidated via :meth:`reset_nodes`, which
-        also cascades into any selected Trial that reads a reset Stage —
+        node artifacts the change invalidated via :meth:`reset_nodes`, which
+        also cascades into any selected Predictor that reads a reset node —
         unlike ``Experimenter.set_pipeline``, a Trainer has no notion of a
-        "historical" run to preserve, so a Trial trained against a
-        since-changed Stage is simply stale.
+        "historical" run to preserve, so a Predictor trained against a
+        since-changed node is simply stale.
 
         Args:
             pipeline (Pipeline): Already-built, already-loaded Pipeline.
@@ -168,44 +188,58 @@ class Trainer:
         self.save()
         return pipeline
 
-    def set_trials(self, trials):
-        """Select the Trials to train, plus the Stages they depend on.
+    def set_predictors(self, predictors):
+        """Select the Predictors to train, plus the nodes they depend on.
+
+        The selection is persisted (``predictor_defs``), so a reloaded
+        Trainer keeps it without this having to be called again.
 
         Args:
-            trials (list[Trial]): Trials to train.
+            predictors (list[Predictor]): Predictors to train. A
+                :class:`~mllabs.Trial` is rejected — promote it explicitly
+                with ``Predictor.from_trial(trial)`` so the provenance it
+                came from is recorded rather than guessed.
         """
-        self.trials = list(trials)
+        predictors = list(predictors)
+        for p in predictors:
+            if isinstance(p, Trial):
+                raise TypeError(
+                    f"set_predictors() got a Trial ({p.name!r}); promote it with "
+                    f"Predictor.from_trial(trial, experimenter=...) first"
+                )
+        self.predictors = predictors
+        self.predictor_defs.replace_all(self.predictors)
         self._recompute_selection()
-        self.reset_nodes(self.selected_stages + self.trial_names())
+        self.reset_nodes(self.selected_nodes + self.predictor_names())
         self.save()
 
-    def trial_names(self):
-        return [t.name for t in self.trials]
+    def predictor_names(self):
+        return [p.name for p in self.predictors]
 
-    def trial_specs(self):
-        """``{name: ProcessorSpec}`` for the selected Trials."""
-        return {t.name: t.get_spec() for t in self.trials}
+    def predictor_specs(self):
+        """``{name: ProcessorSpec}`` for the selected Predictors."""
+        return {p.name: p.get_spec() for p in self.predictors}
 
     def _recompute_selection(self):
-        """Stages needed by the selected Trials, in topological order.
+        """Pipeline nodes needed by the selected Predictors, topologically ordered.
 
-        With no Trials set yet, every Stage is selected — training the whole
-        preprocessing graph is still meaningful on its own.
+        With no Predictors set yet, every node is selected — training the
+        whole preprocessing graph is still meaningful on its own.
         """
         if self.pipeline is None:
-            self.selected_stages = []
+            self.selected_nodes = []
             return
-        if not self.trials:
-            self.selected_stages = list(self.pipeline.topo_order())
+        if not self.predictors:
+            self.selected_nodes = list(self.pipeline.topo_order())
             return
         needed = set()
-        for trial in self.trials:
-            for dsl_string in trial.edges.values():
+        for predictor in self.predictors:
+            for dsl_string in predictor.edges.values():
                 for name in referenced_nodes(dsl_string):
                     if name is not None and name not in needed:
                         needed.add(name)
                         self._collect_upstream(self.pipeline, name, needed)
-        self.selected_stages = [n for n in self.pipeline.topo_order() if n in needed]
+        self.selected_nodes = [n for n in self.pipeline.topo_order() if n in needed]
 
     def _require_pipeline(self):
         if self.pipeline is None:
@@ -224,37 +258,43 @@ class Trainer:
     # status
     # ------------------------------------------------------------------
 
+    def _store_for(self, name):
+        """Which of the two stores holds *name*'s artifacts."""
+        return self.predictor_store if name in set(self.predictor_names()) else self.node_store
+
     def get_status(self, node_name):
-        """Return the disk status of a node across all folds.
+        """Return the disk status of a node or Predictor across all splits.
 
         Returns ``'built'``, ``None`` (init, or errored — ``NodeStore`` only
-        knows whether ``obj.pkl`` exists; see :meth:`get_node_error` for
-        Stage error detail), or ``'inconsistent'`` if folds differ.
+        knows whether ``obj.pkl`` exists; see :meth:`get_node_error` for the
+        error detail), or ``'inconsistent'`` if splits differ.
         """
+        store = self._store_for(node_name)
         return resolve_common_status(
-            fold.train_data_flows[0].status(node_name)
+            store.status(node_name, fold.split_idx, 0)
             for fold in self.train_folds
         )
 
     def get_node_error(self, node_name):
-        """Return error dict for a Stage node in error state, or ``None``.
+        """Return the error dict for a node or Predictor in error state, or ``None``.
 
-        Trial errors aren't covered — a Trainer has no ``experiment_hist``
-        (see ``set_pipeline``) to record them in; only Stage errors are, in
-        this run's own ``NodeStore`` history.
+        Predictors are covered as well as Pipeline nodes: each store records
+        its own history, so a failed Predictor leaves an ``'error'`` row in
+        ``predictor_store`` the same way a failed node does in ``node_store``.
         """
-        for r in self.node_store.get_hist(node_name=node_name):
+        for r in self._store_for(node_name).get_hist(node_name=node_name):
             if r['status'] == 'error':
                 return (r['info'] or {}).get('error')
         return None
 
     def reset_nodes(self, nodes):
         pipeline = self._require_pipeline()
-        selected_set = set(self.selected_stages + self.trial_names())
+        predictor_names = set(self.predictor_names())
+        selected_set = set(self.selected_nodes) | predictor_names
         affected = set(n for n in nodes if n in selected_set)
 
-        # Only Stages have downstream nodes to cascade into; a Trial is a leaf
-        # and is not part of the pipeline graph at all.
+        # Only Pipeline nodes have downstream nodes to cascade into; a
+        # Predictor is a leaf and is not part of the pipeline graph at all.
         queue = [n for n in affected if n in pipeline.nodes]
         while queue:
             n = queue.pop(0)
@@ -264,18 +304,24 @@ class Trainer:
                     if downstream in pipeline.nodes:
                         queue.append(downstream)
 
-        # A Trial reading a reset Stage must be retrained too.
-        stage_reset = affected & set(self.selected_stages)
-        if stage_reset:
-            for trial in self.trials:
-                if trial.name in affected:
+        # A Predictor reading a reset node must be retrained too.
+        node_reset = affected & set(self.selected_nodes)
+        if node_reset:
+            for predictor in self.predictors:
+                if predictor.name in affected:
                     continue
-                if trial.stage_names() & stage_reset:
-                    affected.add(trial.name)
+                if predictor.node_names() & node_reset:
+                    affected.add(predictor.name)
 
         for name in affected:
-            for fold in self.train_folds:
-                fold.train_data_flows[0].reset_node(name)
+            if name in predictor_names:
+                for fold in self.train_folds:
+                    self.predictor_store.reset_node(name, fold.split_idx, 0)
+                    fold.train_data_flows[0].node_objs.pop(name, None)
+                    fold.train_data_flows[0]._node_edges.pop(name, None)
+            else:
+                for fold in self.train_folds:
+                    fold.train_data_flows[0].reset_node(name)
 
         if self.cache is not None:
             self.cache.clear_nodes(affected)
@@ -286,16 +332,18 @@ class Trainer:
     # train
     # ------------------------------------------------------------------
 
-    def _make_trial_jobs(self, spec_map):
-        """One Job per (Trial, split) still needing training.
+    def _make_predictor_jobs(self, spec_map):
+        """One Job per (Predictor, split) still needing training.
 
         A Trainer has a single flow per split, so the fold coordinate is
-        ``(split_idx, 0)`` — the same shape the Experimenter uses.
+        ``(split_idx, 0)`` — the same shape the Experimenter uses. The flow
+        passed to the Job is still the node flow: that is what feeds the
+        Predictor its inputs. Only the artifacts land elsewhere, via the
+        store the executor is handed.
 
-        A split is skipped only if its artifact is already built — like
-        ``Experimenter._make_jobs``, redefining a Trial no longer forces a
-        rerun of splits already built (``NodeStore`` no longer carries a
-        definition to compare against).
+        A split is skipped only if its artifact is already built — the same
+        disk-based test :meth:`_make_node_jobs` uses, so a redefined
+        Predictor does not by itself force a rerun of splits already built.
         """
         from ._executor import Job
         from .adapter import resolve_node_adapter
@@ -303,25 +351,25 @@ class Trainer:
 
         gpu_cache = {}
         jobs = []
-        for trial in self.trials:
-            spec = spec_map[trial.name]
-            if trial.name not in gpu_cache:
+        for predictor in self.predictors:
+            spec = spec_map[predictor.name]
+            if predictor.name not in gpu_cache:
                 adapter = resolve_node_adapter(spec.processor, spec.adapter)
-                gpu_cache[trial.name] = adapter.get_gpu_usage(spec.params) != GPU_NO
+                gpu_cache[predictor.name] = adapter.get_gpu_usage(spec.params) != GPU_NO
             for split_idx, fold in enumerate(self.train_folds):
-                flow = fold.train_data_flows[0]
-                if flow.status(trial.name) == 'built':
+                if self.predictor_store.status(predictor.name, split_idx, 0) == 'built':
                     continue
-                jobs.append(Job(trial.name, spec, split_idx, 0, flow,
-                                need_gpu=gpu_cache[trial.name]))
+                jobs.append(Job(predictor.name, spec, split_idx, 0,
+                                fold.train_data_flows[0],
+                                need_gpu=gpu_cache[predictor.name]))
         return jobs
 
-    def _make_stage_jobs(self, pipeline, node_names, gpu_id_list):
-        """Expand Stage node names into per-split Jobs.
+    def _make_node_jobs(self, pipeline, node_names, gpu_id_list):
+        """Expand Pipeline node names into per-split Jobs.
 
-        Same role ``_make_trial_jobs`` plays for Trials: skip decisions
-        (a split already built for a given node) live here, not in the
-        executor — it only orders dispatch among what's left.
+        Same role ``_make_predictor_jobs`` plays for Predictors: skip
+        decisions (a split already built for a given node) live here, not in
+        the executor — it only orders dispatch among what's left.
         """
         from ._executor import Job
         from .adapter import resolve_node_adapter
@@ -347,9 +395,9 @@ class Trainer:
     def train(self, n_jobs=1, gpu_id_list=None, logger=None):
         """Train all unbuilt selected nodes across all splits.
 
-        Stages are trained first (topological order), then Trials. Stage
-        staleness is settled when a Pipeline is adopted (:meth:`set_pipeline`);
-        Trial staleness is checked per job.
+        Pipeline nodes are trained first (topological order), then
+        Predictors. Node staleness is settled when a Pipeline is adopted
+        (:meth:`set_pipeline`); Predictor staleness is checked per job.
 
         Args:
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
@@ -362,53 +410,53 @@ class Trainer:
         logger = resolve_logger(logger)
         pipeline = self._require_pipeline()
         pipeline.check_data_compatibility(self.data)
-        spec_map = self.trial_specs()
-        # Stage staleness is settled when a Pipeline is adopted
-        # (set_pipeline); Trial staleness is checked per job below.
-        stage_jobs = self._make_stage_jobs(pipeline, self.selected_stages, gpu_id_list)
-        trial_jobs = self._make_trial_jobs(spec_map)
+        spec_map = self.predictor_specs()
+        # Node staleness is settled when a Pipeline is adopted
+        # (set_pipeline); Predictor staleness is checked per job below.
+        node_jobs = self._make_node_jobs(pipeline, self.selected_nodes, gpu_id_list)
+        predictor_jobs = self._make_predictor_jobs(spec_map)
 
-        if not stage_jobs and not trial_jobs:
+        if not node_jobs and not predictor_jobs:
             logger.info("No nodes to train")
             return
 
-        total = len(stage_jobs) + len(trial_jobs)
+        total = len(node_jobs) + len(predictor_jobs)
         n_jobs = min(n_jobs, total)
         base_tracker = LoggerExecuteTracker(total, n_jobs, logger)
-        # Trials have no experiment_hist here (a Trainer isn't an Experimenter),
-        # so only Stages get history recording — trial_jobs use base_tracker
-        # directly.
-        stage_tracker = NodeInfoTracker(base_tracker, self.node_store, self.pipeline_version)
+        # Each store records its own history, so the two kinds of job get a
+        # tracker apiece — same class, different store.
+        node_tracker = NodeInfoTracker(base_tracker, self.node_store, self.pipeline_version)
+        predictor_tracker = NodeInfoTracker(base_tracker, self.predictor_store, self.pipeline_version)
         error_nodes = set()
         try:
-            if stage_jobs:
+            if node_jobs:
                 if n_jobs > 1:
-                    stage_errors = _execute_multi(
-                        stage_jobs, n_jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=stage_tracker,
+                    node_errors = _execute_multi(
+                        node_jobs, n_jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=node_tracker,
                         log_dir=self.path / '__worker_logs')
                 else:
-                    stage_errors = _execute_single(
-                        stage_jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=stage_tracker)
-                error_nodes.update(n for _, _, n in stage_errors)
+                    node_errors = _execute_single(
+                        node_jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=node_tracker)
+                error_nodes.update(n for _, _, n in node_errors)
 
-            if trial_jobs:
+            if predictor_jobs:
                 # No Collectors here (a Trainer isn't an Experimenter) — pass
                 # [] rather than the default None so the returned error keys
                 # match the (outer_idx, name) shape expected below.
                 if n_jobs > 1:
-                    head_errors = _execute_multi(
-                        trial_jobs, n_jobs, self.node_store, gpu_id_list=gpu_id_list,
-                        collectors=[], tracker=base_tracker,
+                    predictor_errors = _execute_multi(
+                        predictor_jobs, n_jobs, self.predictor_store, gpu_id_list=gpu_id_list,
+                        collectors=[], tracker=predictor_tracker,
                         log_dir=self.path / '__worker_logs')
                 else:
-                    head_errors = _execute_single(
-                        trial_jobs, self.node_store, gpu_id_list=gpu_id_list,
-                        collectors=[], tracker=base_tracker)
-                error_nodes.update(n for _, n in head_errors)
+                    predictor_errors = _execute_single(
+                        predictor_jobs, self.predictor_store, gpu_id_list=gpu_id_list,
+                        collectors=[], tracker=predictor_tracker)
+                error_nodes.update(n for _, n in predictor_errors)
         finally:
             base_tracker.close()
 
-        target_all = sorted({j.name for j in stage_jobs}) + sorted({j.name for j in trial_jobs})
+        target_all = sorted({j.name for j in node_jobs}) + sorted({j.name for j in predictor_jobs})
         n_ok = len(target_all) - len(error_nodes)
         if error_nodes:
             logger.info(
@@ -429,23 +477,30 @@ class Trainer:
 
         Args:
             data: Input dataset.
-            v: Output column filter applied to Head outputs.
+            v: Output column filter applied to Predictor outputs.
 
         Yields:
-            DataFrame: Concatenated Head outputs for each split.
+            DataFrame: Concatenated Predictor outputs for each split.
         """
         data = wrap(data)
+        predictor_edges = {p.name: p.edges for p in self.predictors}
         for fold in self.train_folds:
             flow = fold.train_data_flows[0]
             flow.load()
-            head_outputs = []
-            for name in self.trial_names():
+            outputs = []
+            for name in self.predictor_names():
                 if name not in flow.node_objs:
-                    # Trial models are not loaded with the flow (they are leaves
-                    # and would only bloat it) — pull this one in on demand.
-                    if flow.status(name) != 'built':
+                    # Predictor models live in their own store, so flow.load()
+                    # never pulls them in (which is what keeps them out of
+                    # memory) — fetch on demand.
+                    if self.predictor_store.status(name, fold.split_idx, 0) != 'built':
                         continue
-                    flow.load_objs(name)
+                    flow.node_objs[name] = self.predictor_store.get_objs(
+                        name, fold.split_idx, 0)
+                # _resolve needs the edges too, and neither the artifact nor
+                # this flow's history carries a Predictor's — the definition
+                # is the source of truth for them.
+                flow._node_edges[name] = predictor_edges[name]
                 output = flow._resolve(data, name)
                 if output is None:
                     continue
@@ -453,13 +508,13 @@ class Trainer:
                     obj = flow.node_objs[name][0]
                     cols = eval_expr(parse(v), output, processor=obj)
                     output = output.select_columns(cols)
-                head_outputs.append(output)
-            if not head_outputs:
+                outputs.append(output)
+            if not outputs:
                 continue
-            if len(head_outputs) == 1:
-                yield head_outputs[0]
+            if len(outputs) == 1:
+                yield outputs[0]
             else:
-                yield type(head_outputs[0]).concat(head_outputs, axis=1)
+                yield type(outputs[0]).concat(outputs, axis=1)
 
     # ------------------------------------------------------------------
     # to_inferencer
@@ -482,21 +537,21 @@ class Trainer:
         from ._inferencer import Inferencer
         pipeline = self._require_pipeline()
 
-        all_selected = self.selected_stages + self.trial_names()
+        all_selected = self.selected_nodes + self.predictor_names()
         for name in all_selected:
             if self.get_status(name) != 'built':
                 raise RuntimeError(f"Node '{name}' is not built. Run train() first.")
 
         node_objs = {}
         for name in all_selected:
-            objs = []
-            for fold in self.train_folds:
-                objs.append(fold.train_data_flows[0].get_obj(name))
-            node_objs[name] = objs
+            store = self._store_for(name)
+            node_objs[name] = [
+                store.get_obj(name, fold.split_idx, 0) for fold in self.train_folds
+            ]
 
-        node_specs = {n: pipeline.get_node_spec(n) for n in self.selected_stages}
-        node_specs.update(self.trial_specs())
-        return Inferencer(node_specs, list(self.selected_stages), self.trial_names(),
+        node_specs = {n: pipeline.get_node_spec(n) for n in self.selected_nodes}
+        node_specs.update(self.predictor_specs())
+        return Inferencer(node_specs, list(self.selected_nodes), self.predictor_names(),
                           self.get_n_splits(), node_objs, v=v)
 
     # ------------------------------------------------------------------
@@ -567,18 +622,22 @@ class Trainer:
         trainer.splitter_params = save_data['splitter_params']
         trainer.cache = cache
         trainer.node_store = NodeStore(path)
+        trainer.predictor_path = path / '__predictors'
+        trainer.predictor_store = NodeStore(trainer.predictor_path)
+        trainer.predictor_defs = PredictorStore(trainer.predictor_path)
         trainer.aug_data = wrap(aug_data) if aug_data is not None else None
         trainer.pipeline = None
         trainer.pipeline_name = save_data.get('pipeline_name', 'pipeline')
         trainer.pipeline_version = None
-        trainer.selected_stages = []
-        trainer.trials = []
+        trainer.selected_nodes = []
+        trainer.predictors = trainer.predictor_defs.list_predictors()
 
         split_indices = save_data['split_indices']
         trainer.train_folds = trainer._make_train_folds(split_indices)
 
         if pipeline is not None:
-            # Trials are not persisted — re-supply them with set_trials().
+            # Recomputes the node selection off the restored Predictors —
+            # set_predictors() does not need calling again.
             trainer.set_pipeline(pipeline)
 
         return trainer

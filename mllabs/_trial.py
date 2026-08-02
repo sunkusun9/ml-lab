@@ -19,18 +19,17 @@ class Trial:
     and its ``TrialStore`` row.
 
     A Trial's own definition says nothing about the preprocessing it read, and
-    Heads no longer live in the pipeline, so a Stage change cannot cascade into
-    them through the Pipeline graph automatically. The two callers that reset
-    stale/changed Stages handle this differently:
+    it does not live in the pipeline, so a node change cannot cascade into it
+    through the Pipeline graph automatically. ``Experimenter.set_pipeline``
+    deliberately does not cascade either — a Trial's artifact and its
+    ``TrialStore.experiment_hist`` row document the pipeline version it
+    actually ran against, which stays valid even after a newer version is
+    adopted. Rerunning it is a separate, explicit action.
 
-    - ``Trainer.reset_nodes`` still cascades a Stage reset into any Trial
-      whose ``edges`` reference it (via :meth:`stage_names`) — a Trainer has
-      no notion of "historical" runs, so a Trial trained against a since-changed
-      Stage would just be a bug, not a record worth keeping.
-    - ``Experimenter.set_pipeline`` does *not* — a Trial's artifact
-      and its ``TrialStore.experiment_hist`` row document the pipeline
-      version it actually ran against, which stays valid even after a newer
-      version is adopted. Rerunning it is a separate, explicit action.
+    The Trainer side makes the opposite call, which is why it has its own
+    :class:`~mllabs.Predictor` rather than reusing this class: a Trainer keeps
+    no historical runs, so a model trained against a since-changed node is
+    just stale and ``Trainer.reset_nodes`` cascades into it.
 
     Attributes:
         name (str): Identifier, also the artifact directory name.
@@ -76,14 +75,14 @@ class Trial:
             params=self.params,
         )
 
-    def stage_names(self):
-        """Names of the Stage nodes this Trial's edges read.
+    def node_names(self):
+        """Names of the Pipeline nodes this Trial's edges read.
 
         Only direct references are needed: callers intersect this against a
-        set of reset/stale Stage names that is already transitively closed
-        (``Pipeline.diff_from`` and ``Trainer.reset_nodes`` both cascade
-        through ``output_edges`` before checking Trials), so the chain is
-        covered without this method walking it itself.
+        set of reset/stale node names that is already transitively closed
+        (``Pipeline.diff_from`` cascades through ``output_edges`` before
+        checking Trials), so the chain is covered without this method walking
+        it itself.
         """
         names = set()
         for dsl_string in self.edges.values():

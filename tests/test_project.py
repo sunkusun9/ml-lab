@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import ShuffleSplit
 
-from mllabs import Project, TrialStore, Trial, PipelineBuilder, make_trials
+from mllabs import Project, TrialStore, Trial, Predictor, PipelineBuilder, make_trials
 
 
 TREE = 'sklearn.tree.DecisionTreeClassifier'
@@ -170,6 +170,13 @@ class TestTrialRegistration:
     def test_has_false_after_redefinition(self, store):
         store.register(_trial(params={'max_depth': 3}))
         assert not store.has(_trial(params={'max_depth': 5}))
+
+    def test_param_order_does_not_affect_the_comparison(self, store):
+        """has() compares decoded values, not the stored JSON text — so the
+        key order params happened to be written in cannot make an identical
+        definition look changed."""
+        store.register(_trial(params={'a': 1, 'b': 2}))
+        assert store.has(_trial(params={'b': 2, 'a': 1}))
 
     def test_get_by_name_roundtrip(self, store):
         store.register(_trial(params={'max_depth': 7}))
@@ -465,10 +472,10 @@ class TestExperimenterUnderProject:
 
 
 class TestTrainerUnderProject:
-    """Exercises Trainer.train() -> StageJob/_build_flow_* through the same
-    job-based path Experimenter.build() uses."""
+    """Exercises Trainer.train() -> Job/_execute_* through the same job-based
+    path Experimenter.build() uses."""
 
-    def test_train_respects_stage_dependency_order(self, project, sample_data):
+    def test_train_respects_node_dependency_order(self, project, sample_data):
         from mllabs._data_wrapper import wrap
 
         p = project.pipeline_builder('trainer_chain')
@@ -483,8 +490,8 @@ class TestTrainerUnderProject:
 
         t = project.trainer('trained_chain', wrap(sample_data),
                             pipeline_name='trainer_chain', pipeline_version=version)
-        t.set_trials([Trial('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
-                            params={'max_depth': 3, 'random_state': 0})])
+        t.set_predictors([Predictor('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
+                                    params={'max_depth': 3, 'random_state': 0})])
         t.train()
         assert t.get_status('s1') == 'built'
         assert t.get_status('s2') == 'built'
@@ -505,20 +512,17 @@ class TestTrainerUnderProject:
 
         t = project.trainer('trained_chain_multi', wrap(sample_data),
                             pipeline_name='trainer_chain_multi', pipeline_version=version)
-        t.set_trials([Trial('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
-                            params={'max_depth': 3, 'random_state': 0})])
+        t.set_predictors([Predictor('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
+                                    params={'max_depth': 3, 'random_state': 0})])
         t.train(n_jobs=2)
         assert t.get_status('s1') == 'built'
         assert t.get_status('s2') == 'built'
         assert t.get_status('dt') == 'built'
 
-    def test_reload_recovers_built_stages_via_node_info(self, project, sample_data):
-        """Regression: TrainDataFlow's own outer_idx is negative (Trainer
-        offsets it to avoid colliding with an Experimenter's DataCache keys
-        on the shared project.cache), but NodeInfoStore is keyed on the
-        natural positive split_idx (matching StageJob.cache_key) — load()
-        must query NodeInfoStore via info_fold, not self.outer_idx, or a
-        reloaded Trainer can never reattach its own previously-built stages.
+    def test_reload_recovers_built_nodes_via_history(self, project, sample_data):
+        """A reloaded Trainer reattaches the nodes it already built: load()
+        recovers each one's processor *and* its edges from the store's
+        history, so the flow can route data through the chain again.
         """
         from mllabs._data_wrapper import wrap
 
@@ -532,22 +536,26 @@ class TestTrainerUnderProject:
         p.set_node('s2', grp='scale2')
         version = project.build_pipeline(p).version
 
-        trial = Trial('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
-                      params={'max_depth': 3, 'random_state': 0})
+        predictor = Predictor('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
+                              params={'max_depth': 3, 'random_state': 0})
         t = project.trainer('trainer_reload', wrap(sample_data),
                             pipeline_name='trainer_reload_chain', pipeline_version=version)
-        t.set_trials([trial])
+        t.set_predictors([predictor])
         t.train()
 
-        # Checked before set_trials(): set_trials() unconditionally
-        # reset_nodes()s its whole selection, which would wipe the very
-        # artifacts this is testing — see the separate bug note about that.
         loaded = project.load_trainer('trainer_reload', wrap(sample_data))
         flow = loaded.train_folds[0].train_data_flows[0]
         assert 's1' in flow.node_objs
         assert 's2' in flow.node_objs
 
-        # Proves _node_edges (recovered from NodeInfoStore) actually routes
-        # data through s1 -> s2, not just that obj.pkl happened to load.
+        # The selection comes back from PredictorStore, so nothing needs
+        # re-supplying — and nothing gets reset, which set_predictors() would
+        # have done to the very artifacts this is testing.
+        assert loaded.predictor_names() == ['dt']
+        assert loaded.selected_nodes == ['s1', 's2']
+        assert loaded.get_status('dt') == 'built'
+
+        # Proves _node_edges (recovered from the store's history) actually
+        # routes data through s1 -> s2, not just that obj.pkl happened to load.
         train_data = flow.get_train({'X': 's2:(*)', 'y': '{target}'})
         assert train_data['X'].get_shape()[0] > 0

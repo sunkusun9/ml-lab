@@ -779,7 +779,7 @@ class Pipeline:
         return Pipeline(nodes, datasource, self.pipeline_id, self.build_id)
 
     def __repr__(self):
-        return (f"<Pipeline stages={len(self.nodes) - 1} "
+        return (f"<Pipeline nodes={len(self.nodes) - 1} "
                 f"build_id={self.build_id[:8]}>")
 
 

@@ -8,6 +8,7 @@ from sklearn.model_selection import ShuffleSplit, KFold
 from mllabs.sampler import Sampler, ImbLearnSampler
 from mllabs._data_wrapper import PandasWrapper, wrap
 from mllabs._node_processor import TransformProcessor, PredictProcessor
+from mllabs import Project
 from mllabs._experimenter import Experimenter
 from mllabs._trainer import Trainer
 from mllabs._cache import DataCache
@@ -32,14 +33,26 @@ def make_data(X=None, y=None):
     return d
 
 
-def make_exp(path, data, aug_data=None):
-    return Experimenter(
-        data=data,
-        path=path,
-        sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=42),
-        sp_v=KFold(n_splits=3, shuffle=True, random_state=42),
-        aug_data=aug_data,
-    )
+SPLITTERS = dict(
+    sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=42),
+    sp_v=KFold(n_splits=3, shuffle=True, random_state=42),
+)
+
+
+def make_exp(path, data, aug_data=None, name='e1'):
+    return Experimenter(path, name, data, aug_data=aug_data, **SPLITTERS)
+
+
+def make_project_exp(root, data, aug_data=None, name='e1'):
+    """An Experimenter created through a Project, so it can be reloaded.
+
+    Reloading goes through ``Project.load_experimenter`` — the Experimenter
+    itself has no ``load()``, since it holds no Project reference to resolve
+    its saved meta/pipeline pointer with.
+    """
+    project = Project(root)
+    project.experimenter(name, data, aug_data=aug_data, **SPLITTERS)
+    return project
 
 
 class MockResampler:
@@ -272,17 +285,15 @@ class TestExperimenterAugData:
         assert 'f2' in train.get_columns()
 
     def test_load_passes_aug_data(self, tmp_path, base_data, aug_df):
-        path = tmp_path / 'exp'
-        make_exp(path, base_data, aug_data=aug_df)
-        exp2 = Experimenter.load(path, data=base_data, aug_data=aug_df)
+        project = make_project_exp(tmp_path / 'proj', base_data, aug_data=aug_df)
+        exp2 = project.load_experimenter('e1', base_data, aug_data=aug_df)
         assert exp2.aug_data is not None
         n = exp2.outer_folds[0].train_data_flows[0].data_source.get_train().get_shape()[0]
         assert n > 0
 
     def test_load_without_aug_data(self, tmp_path, base_data):
-        path = tmp_path / 'exp'
-        make_exp(path, base_data)
-        exp2 = Experimenter.load(path, data=base_data)
+        project = make_project_exp(tmp_path / 'proj', base_data)
+        exp2 = project.load_experimenter('e1', base_data)
         assert exp2.aug_data is None
 
 

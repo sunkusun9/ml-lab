@@ -54,7 +54,7 @@ class TestLazyTensorFlow:
             "p.set_grp('g1', processor='mllabs.nn.NNClassifier', method='predict',\n"
             "          edges={'X': '{x1}', 'y': '{target}'})\n"
             "p.set_node('n1', grp='g1')\n"
-            "p.get_node_attrs('n1')\n"
+            "p.get_node_spec('n1')\n"
             "assert 'tensorflow' not in sys.modules, 'tensorflow eagerly imported'\n"
             "print('ok')\n"
         )

@@ -14,39 +14,40 @@ class Inferencer:
 
     Attributes:
         node_specs (dict): ``{name: ProcessorSpec}`` for every selected
-            Stage and Trial. Only ``edges`` is actually needed at serve time,
-            so the Inferencer carries these rather than a whole Pipeline.
-        selected_stages (list[str]): Stage node names, in topological order.
-        selected_heads (list[str]): Trial names producing the output.
+            Pipeline node and Predictor. Only ``edges`` is actually needed at
+            serve time, so the Inferencer carries these rather than a whole
+            Pipeline.
+        selected_nodes (list[str]): Pipeline node names, topologically ordered.
+        selected_predictors (list[str]): Predictor names producing the output.
         n_splits (int): Number of cross-validation splits.
         node_objs (dict): ``{name: [processor_split0, ...]}``.
-        v: Output column filter applied to Trial outputs.
+        v: Output column filter applied to Predictor outputs.
     """
 
-    def __init__(self, node_specs, selected_stages, selected_heads, n_splits, node_objs, v=None):
+    def __init__(self, node_specs, selected_nodes, selected_predictors, n_splits, node_objs, v=None):
         self.node_specs = node_specs
-        self.selected_stages = selected_stages
-        self.selected_heads = selected_heads
+        self.selected_nodes = selected_nodes
+        self.selected_predictors = selected_predictors
         self.n_splits = n_splits
         self.node_objs = node_objs
         self.v = v
 
     def _make_flow(self, split_idx):
         flow = InferenceDataFlow()
-        for name in self.selected_stages + self.selected_heads:
+        for name in self.selected_nodes + self.selected_predictors:
             flow.add_node(name, self.node_objs[name][split_idx],
                           self.node_specs[name].edges)
         return flow
 
     def _resolve_heads(self, nodes):
         if nodes is None:
-            return self.selected_heads
+            return self.selected_predictors
         if isinstance(nodes, str):
             nodes = [nodes]
-        unknown = [n for n in nodes if n not in self.selected_heads]
+        unknown = [n for n in nodes if n not in self.selected_predictors]
         if unknown:
             raise ValueError(f"Unknown head node(s): {unknown}")
-        return [n for n in self.selected_heads if n in set(nodes)]
+        return [n for n in self.selected_predictors if n in set(nodes)]
 
     def process(self, data, agg='mean', nodes=None):
         """Run inference on new data and aggregate across splits.
@@ -57,7 +58,7 @@ class Inferencer:
                 ``'mean'`` (default), ``'mode'``, a callable receiving a list of
                 per-split DataFrames, or ``None`` (returns list).
                 Ignored when ``n_splits == 1``.
-            nodes (str | list[str] | None): Head node(s) to include.
+            nodes (str | list[str] | None): Predictor node(s) to include.
                 ``None`` (default) uses all selected heads.
 
         Returns:
@@ -114,8 +115,8 @@ class Inferencer:
         path.mkdir(parents=True, exist_ok=True)
         save_data = {
             'node_specs': self.node_specs,
-            'selected_stages': self.selected_stages,
-            'selected_heads': self.selected_heads,
+            'selected_nodes': self.selected_nodes,
+            'selected_predictors': self.selected_predictors,
             'n_splits': self.n_splits,
             'node_objs': self.node_objs,
             'v': self.v,
@@ -138,8 +139,8 @@ class Inferencer:
             save_data = pkl.load(f)
         return cls(
             save_data['node_specs'],
-            save_data['selected_stages'],
-            save_data['selected_heads'],
+            save_data['selected_nodes'],
+            save_data['selected_predictors'],
             save_data['n_splits'],
             save_data['node_objs'],
             save_data.get('v'),

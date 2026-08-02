@@ -8,7 +8,7 @@ from sklearn.model_selection import KFold
 
 from mllabs._trainer import Trainer
 from mllabs._pipeline import PipelineBuilder
-from mllabs import Trial
+from mllabs import Trial, Predictor
 from mllabs._cache import DataCache
 from mllabs._data_wrapper import wrap
 
@@ -35,23 +35,22 @@ def pipeline(tmp_path):
     return p
 
 
+DT = 'sklearn.tree.DecisionTreeClassifier'
 DT_EDGES = {'X': 'scaler:(*)', 'y': '{target}'}
 
 
 def _dt(name='dt', params=None, method='predict'):
-    return Trial(name, 'sklearn.tree.DecisionTreeClassifier', DT_EDGES,
-                 method=method,
-                 params=params if params is not None else {'max_depth': 3, 'random_state': 42})
+    return Predictor(name, DT, DT_EDGES, method=method,
+                     params=params if params is not None else {'max_depth': 3, 'random_state': 42})
 
 
 def _bad_dt(name='bad_dt'):
-    """Trial reading the 'bad_node' stage, so that stage gets selected/trained."""
-    return Trial(name, 'sklearn.tree.DecisionTreeClassifier',
-                 {'X': 'bad_node:(*)', 'y': '{target}'})
+    """Predictor reading the 'bad_node' node, so that node gets selected/trained."""
+    return Predictor(name, DT, {'X': 'bad_node:(*)', 'y': '{target}'})
 
 
-def _trials(*trials):
-    return list(trials) or [_dt()]
+def _predictors(*predictors):
+    return list(predictors) or [_dt()]
 
 
 @pytest.fixture
@@ -66,47 +65,81 @@ def _make_trainer(pipeline, sample_data, splitter, name='t1', path=None):
                    splitter=splitter, splitter_params={}, cache=DataCache())
 
 
+def _build_ids(trainer, name):
+    """Per-split ``build_id`` for *name*, from whichever store holds it.
+
+    History is per-store now, so a Predictor's rows live in
+    ``predictor_store`` and a node's in ``node_store`` — the flow itself
+    carries no history.
+    """
+    info = trainer._store_for(name).get_info(name)
+    return [info[(fold.split_idx, 0)]['build_id'] for fold in trainer.train_folds]
+
+
+def _add_bad_node(pipeline):
+    pipeline.set_grp('bad', processor='mock.BadProcessor', method='transform',
+                     edges={'X': '{f1}'})
+    pipeline.set_node('bad_node', grp='bad')
+
+
 class TestTrainerConstruction:
     def test_no_splitter(self, pipeline, sample_data):
         trainer = _make_trainer(pipeline, sample_data, None)
         assert trainer.splitter is None
         assert trainer.get_n_splits() == 1
 
+    def test_two_stores_at_separate_paths(self, pipeline, sample_data, sp_v):
+        """Predictors get their own NodeStore — same class, own directory, so
+        the two ``__node_hist.db`` files cannot collide."""
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        assert trainer.predictor_store.path == trainer.node_store.path / '__predictors'
+        assert trainer.predictor_store.db_path != trainer.node_store.db_path
+
 
 class TestSelection:
-    def test_stages_default_to_all_without_trials(self, pipeline, sample_data, sp_v):
+    def test_nodes_default_to_all_without_predictors(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        assert trainer.selected_stages == ['scaler']
-        assert trainer.trial_names() == []
+        assert trainer.selected_nodes == ['scaler']
+        assert trainer.predictor_names() == []
 
-    def test_set_trials_selects_them(self, pipeline, sample_data, sp_v):
+    def test_set_predictors_selects_them(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
-        assert trainer.trial_names() == ['dt']
+        trainer.set_predictors(_predictors())
+        assert trainer.predictor_names() == ['dt']
 
-    def test_set_trials_collects_upstream_stages(self, pipeline, sample_data, sp_v):
+    def test_set_predictors_collects_upstream_nodes(self, pipeline, sample_data, sp_v):
         pipeline.set_grp('extra', processor='sklearn.preprocessing.StandardScaler',
                          method='transform', edges={'X': '{f1}'})
         pipeline.set_node('unused', grp='extra')
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
-        assert trainer.selected_stages == ['scaler']   # 'unused' is not referenced
+        trainer.set_predictors(_predictors())
+        assert trainer.selected_nodes == ['scaler']   # 'unused' is not referenced
 
-    def test_trials_filter_by_name(self, pipeline, sample_data, sp_v):
+    def test_predictors_filter_by_name(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials([_dt('b')])
-        assert trainer.trial_names() == ['b']
+        trainer.set_predictors([_dt('b')])
+        assert trainer.predictor_names() == ['b']
 
-    def test_trial_attrs_carry_trial_id(self, pipeline, sample_data, sp_v):
+    def test_predictor_specs_carry_the_definition(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
-        built = pipeline.build()
-        assert trainer.trial_attrs()['dt']['serial'] == _dt().trial_id(built)
+        trainer.set_predictors(_predictors())
+        spec = trainer.predictor_specs()['dt']
+        assert spec.processor == DT
+        assert spec.edges == DT_EDGES
+        assert spec.params == {'max_depth': 3, 'random_state': 42}
+
+    def test_set_predictors_rejects_a_trial(self, pipeline, sample_data, sp_v):
+        """A Trial must be promoted explicitly, so the provenance it came
+        from is recorded rather than guessed."""
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        with pytest.raises(TypeError, match='from_trial'):
+            trainer.set_predictors([Trial('dt', DT, DT_EDGES)])
 
     def test_no_pipeline_raises_on_train(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
@@ -118,18 +151,24 @@ class TestSelection:
         with pytest.raises(RuntimeError, match='set_pipeline'):
             trainer.to_inferencer()
 
-    def test_set_pipeline_persists_pkl(self, pipeline, sample_data, sp_v):
+    def test_set_pipeline_persists_only_a_pointer(self, pipeline, sample_data, sp_v):
+        """No pipeline.pkl copy — the Pipeline lives once, wherever its
+        versions are kept, and the Trainer stores only the pointer."""
         trainer = _make_trainer(pipeline, sample_data, sp_v)
-        trainer.set_pipeline(pipeline.build())
-        assert (trainer.path / 'pipeline.pkl').exists()
+        built = pipeline.build()
+        trainer.set_pipeline(built, pipeline_name='pipeline')
+        assert not (trainer.path / 'pipeline.pkl').exists()
+        assert Trainer._read_save_data(trainer.path)['pipeline_version'] == built.version
 
     def test_set_pipeline_resets_stale_nodes(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
         trainer.train()
         assert trainer.get_status('scaler') == 'built'
-        pipeline.set_node('scaler', grp='scale', exist='replace')
+        pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+                         method='transform', edges={'X': '{f1, f2, f3}'},
+                         params={'with_std': False})
         trainer.set_pipeline(pipeline.build())
         assert trainer.get_status('scaler') is None
 
@@ -138,7 +177,7 @@ class TestTrain:
     def test_train_basic(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
         trainer.train()
         assert trainer.get_status('scaler') == 'built'
         assert trainer.get_status('dt') == 'built'
@@ -146,138 +185,210 @@ class TestTrain:
     def test_train_skips_built(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
         trainer.train()
 
-        build_ids = {
-            name: [fold.train_data_flows[0].get_info(name)['build_id'] for fold in trainer.train_folds]
-            for name in ['scaler', 'dt']
-        }
+        before = {name: _build_ids(trainer, name) for name in ['scaler', 'dt']}
         trainer.train()
         for name in ['scaler', 'dt']:
-            for i, fold in enumerate(trainer.train_folds):
-                assert fold.train_data_flows[0].get_info(name)['build_id'] == build_ids[name][i]
+            assert _build_ids(trainer, name) == before[name]
 
     def test_train_no_splitter(self, pipeline, sample_data):
         trainer = _make_trainer(pipeline, sample_data, None, name='t_nosplit')
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
         trainer.train()
         assert trainer.get_status('scaler') == 'built'
         assert trainer.get_status('dt') == 'built'
 
     def test_train_error(self, pipeline, sample_data, sp_v):
-        pipeline.set_grp('bad', processor='mock.BadProcessor',
-                         method='transform',
-                         edges={'X': '{f1}'})
-        pipeline.set_node('bad_node', grp='bad')
+        """A failed node has no artifact, so its *status* is None — 'error'
+        exists only in history, which is what get_node_error reads."""
+        _add_bad_node(pipeline)
         trainer = _make_trainer(pipeline, sample_data, sp_v, name='t_err')
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials(_bad_dt()))
+        trainer.set_predictors(_predictors(_bad_dt()))
         trainer.train()
-        assert trainer.get_status('bad_node') == 'error'
+        assert trainer.get_status('bad_node') is None
         err = trainer.get_node_error('bad_node')
         assert err['type'] == 'ValueError'
         assert 'intentional error' in err['message']
 
+    def test_train_records_predictor_errors(self, pipeline, sample_data, sp_v):
+        """Predictor failures are recorded too, now that they have a store of
+        their own — a Trainer used to have nowhere to put them."""
+        _add_bad_node(pipeline)
+        trainer = _make_trainer(pipeline, sample_data, sp_v, name='t_perr')
+        trainer.set_pipeline(pipeline.build())
+        trainer.set_predictors(_predictors(_bad_dt()))
+        trainer.train()
+        assert trainer.get_status('bad_dt') is None
+        assert trainer.get_node_error('bad_dt') is not None
+
     def test_train_error_continues_other_nodes(self, pipeline, sample_data, sp_v):
-        pipeline.set_grp('bad', processor='mock.BadProcessor',
-                         method='transform',
-                         edges={'X': '{f1}'})
-        pipeline.set_node('bad_node', grp='bad')
+        _add_bad_node(pipeline)
         trainer = _make_trainer(pipeline, sample_data, sp_v, name='t_mixed')
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials(_dt(), _bad_dt()))
+        trainer.set_predictors(_predictors(_dt(), _bad_dt()))
         trainer.train()
         assert trainer.get_status('dt') == 'built'
-        assert trainer.get_status('bad_node') == 'error'
+        assert trainer.get_status('bad_node') is None
+        assert trainer.get_node_error('bad_node') is not None
 
     def test_train_n_splits(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
         assert trainer.get_n_splits() == 3
         trainer.train()
         for fold in trainer.train_folds:
-            assert fold.train_data_flows[0].status('dt') == 'built'
+            assert trainer.predictor_store.status('dt', fold.split_idx, 0) == 'built'
 
-    def test_serial_in_info(self, pipeline, sample_data, sp_v):
+    def test_history_records_the_pipeline_version(self, pipeline, sample_data, sp_v):
+        """What a run was made against is recorded as the Pipeline's integer
+        version — there is no serial/hash anymore."""
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        built = pipeline.build()
+        trainer.set_pipeline(built)
+        trainer.set_predictors(_predictors())
+        trainer.train()
+        for store in (trainer.node_store, trainer.predictor_store):
+            for row in store.get_hist():
+                assert row['pipeline_version'] == built.version
+
+    def test_redefining_a_predictor_retrains_it(self, pipeline, sample_data, sp_v):
+        """Not because the definition is compared — _make_predictor_jobs only
+        looks at whether the split is built. set_predictors() resets its whole
+        selection unconditionally, and that is what forces the rerun."""
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
         trainer.train()
-        expected_serial = _dt().trial_id(pipeline.build())
-        for fold in trainer.train_folds:
-            info = fold.train_data_flows[0].get_info('dt')
-            assert info['node_serial'] == expected_serial
+        before = _build_ids(trainer, 'dt')
 
-    def test_serial_mismatch_triggers_reset(self, pipeline, sample_data, sp_v):
+        trainer.set_predictors(_predictors(_dt(params={'max_depth': 5, 'random_state': 42})))
+        assert trainer.get_status('dt') is None      # the reset, not a diff
+        trainer.train()
+        assert _build_ids(trainer, 'dt') != before
+
+    def test_resupplying_the_same_predictor_also_resets(self, pipeline, sample_data, sp_v):
+        """Current behaviour, pinned deliberately: set_predictors() does not
+        compare against what is stored, so handing it an unchanged selection
+        still wipes the training."""
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
         trainer.train()
 
-        build_ids_before = [
-            fold.train_data_flows[0].get_info('dt')['build_id']
-            for fold in trainer.train_folds
-        ]
+        trainer.set_predictors(_predictors())
+        assert trainer.get_status('dt') is None
+        assert trainer.get_status('scaler') is None
 
-        trainer.set_trials(_trials(_dt(params={'max_depth': 5, 'random_state': 42})))
-        trainer.train()
-
-        build_ids_after = [
-            fold.train_data_flows[0].get_info('dt')['build_id']
-            for fold in trainer.train_folds
-        ]
-        assert build_ids_before != build_ids_after
-
-    def test_serial_mismatch_stage_cascades(self, pipeline, sample_data, sp_v):
+    def test_node_edit_cascades_into_the_predictor(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
         trainer.train()
-
-        build_ids_before = {
-            name: [fold.train_data_flows[0].get_info(name)['build_id'] for fold in trainer.train_folds]
-            for name in ['scaler', 'dt']
-        }
+        before = {name: _build_ids(trainer, name) for name in ['scaler', 'dt']}
 
         pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
-                         method='transform',
-                         edges={'X': '{f1, f2, f3}'},
+                         method='transform', edges={'X': '{f1, f2, f3}'},
                          params={'with_std': False})
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        assert trainer.get_status('scaler') is None
+        assert trainer.get_status('dt') is None      # cascaded via node_names()
         trainer.train()
 
         for name in ['scaler', 'dt']:
-            build_ids_after = [fold.train_data_flows[0].get_info(name)['build_id'] for fold in trainer.train_folds]
-            assert build_ids_before[name] != build_ids_after
+            assert _build_ids(trainer, name) != before[name]
 
-    def test_no_serial_mismatch_skips_rebuild(self, pipeline, sample_data, sp_v):
+    def test_unrelated_node_edit_leaves_the_predictor_alone(self, pipeline, sample_data, sp_v):
+        pipeline.set_grp('other', processor='sklearn.preprocessing.StandardScaler',
+                         method='transform', edges={'X': '{f1}'})
+        pipeline.set_node('unused', grp='other')
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
+        trainer.train()
+        before = _build_ids(trainer, 'dt')
+
+        pipeline.set_grp('other', processor='sklearn.preprocessing.StandardScaler',
+                         method='transform', edges={'X': '{f1}'},
+                         params={'with_mean': False})
+        trainer.set_pipeline(pipeline.build())
+        trainer.train()
+        assert _build_ids(trainer, 'dt') == before
+
+
+class TestPredictorStorage:
+    def test_artifacts_land_in_the_predictor_store(self, pipeline, sample_data, sp_v):
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        trainer.set_predictors(_predictors())
+        trainer.train()
+        for fold in trainer.train_folds:
+            assert trainer.predictor_store.status('dt', fold.split_idx, 0) == 'built'
+            assert trainer.node_store.status('dt', fold.split_idx, 0) is None
+            assert trainer.node_store.status('scaler', fold.split_idx, 0) == 'built'
+
+    def test_predictor_is_not_loaded_into_the_flow(self, pipeline, sample_data, sp_v):
+        """Its history is in the other store, so flow.load() never sees a row
+        for it — which is what keeps the fitted model out of memory."""
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        trainer.set_predictors(_predictors())
         trainer.train()
 
-        build_ids_before = [
-            fold.train_data_flows[0].get_info('dt')['build_id']
-            for fold in trainer.train_folds
-        ]
-        trainer.train()
+        flow = trainer.train_folds[0].train_data_flows[0]
+        flow.node_objs.clear()
+        flow.load()
+        assert 'scaler' in flow.node_objs
+        assert 'dt' not in flow.node_objs
 
-        build_ids_after = [
-            fold.train_data_flows[0].get_info('dt')['build_id']
-            for fold in trainer.train_folds
-        ]
-        assert build_ids_before == build_ids_after
+    def test_definitions_are_persisted(self, pipeline, sample_data, sp_v):
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        trainer.set_predictors(_predictors())
+        stored = trainer.predictor_defs.list_predictors()
+        assert [p.name for p in stored] == ['dt']
+        assert stored[0].edges == DT_EDGES
+        assert stored[0].params == {'max_depth': 3, 'random_state': 42}
+
+    def test_deselected_predictors_are_dropped(self, pipeline, sample_data, sp_v):
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        trainer.set_predictors(_predictors(_dt('a'), _dt('b')))
+        trainer.set_predictors(_predictors(_dt('b')))
+        assert [p.name for p in trainer.predictor_defs.list_predictors()] == ['b']
+
+    def test_provenance_round_trips(self, pipeline, sample_data, sp_v):
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        trial = Trial('dt', DT, DT_EDGES, params={'max_depth': 3}, tag=['x'])
+        trainer.set_predictors([Predictor.from_trial(trial, experimenter='exp1')])
+
+        stored = trainer.predictor_defs.get_by_name('dt')
+        assert stored.src_trial == 'dt'
+        assert stored.src_experimenter == 'exp1'
+        assert stored.tag == ['x']
+
+    def test_from_trial_copies_the_definition(self):
+        trial = Trial('dt', DT, DT_EDGES, method='predict_proba',
+                      params={'max_depth': 3}, desc='best so far')
+        predictor = Predictor.from_trial(trial, name='final', experimenter='exp1')
+        assert predictor.name == 'final'
+        assert predictor.src_trial == 'dt'          # recorded even when renamed
+        assert predictor.get_spec().edges == trial.get_spec().edges
+        assert predictor.get_spec().params == trial.get_spec().params
+        assert predictor.method == 'predict_proba'
+        assert predictor.desc == 'best so far'
 
 
 class TestProcess:
     def test_process_yields_per_split(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
         trainer.train()
         results = list(trainer.process(sample_data))
         assert len(results) == trainer.get_n_splits()
@@ -285,9 +396,26 @@ class TestProcess:
     def test_process_output_shape(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
         trainer.train()
         for output in trainer.process(sample_data):
+            assert output.get_shape()[0] == len(sample_data)
+
+    def test_process_after_reload(self, pipeline, sample_data, sp_v):
+        """Regression: a reloaded flow has no edges for a Predictor (neither
+        the artifact nor this flow's history carries them), so process() used
+        to resolve every Predictor to None and yield nothing at all."""
+        built = pipeline.build()
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(built)
+        trainer.set_predictors(_predictors())
+        trainer.train()
+
+        loaded = Trainer.load(trainer.path, wrap(sample_data),
+                              cache=DataCache(), pipeline=built)
+        results = list(loaded.process(sample_data))
+        assert len(results) == loaded.get_n_splits()
+        for output in results:
             assert output.get_shape()[0] == len(sample_data)
 
 
@@ -295,7 +423,7 @@ class TestResetNodes:
     def test_reset_clears_node_objs(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
         trainer.train()
         trainer.reset_nodes(['scaler'])
         assert trainer.get_status('scaler') is None
@@ -304,52 +432,59 @@ class TestResetNodes:
     def test_reset_allows_retrain(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
+        trainer.set_predictors(_predictors())
         trainer.train()
         trainer.reset_nodes(['dt'])
         assert trainer.get_status('dt') is None
         trainer.train()
         assert trainer.get_status('dt') == 'built'
 
+    def test_reset_predictor_leaves_nodes_built(self, pipeline, sample_data, sp_v):
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        trainer.set_predictors(_predictors())
+        trainer.train()
+        trainer.reset_nodes(['dt'])
+        assert trainer.get_status('scaler') == 'built'
+
 
 class TestSaveLoad:
+    def _trained(self, pipeline, sample_data, sp_v):
+        built = pipeline.build()
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(built)
+        trainer.set_predictors(_predictors())
+        trainer.train()
+        return trainer, built
+
     def test_save_creates_file(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         assert (trainer.path / '__trainer.pkl').exists()
 
     def test_save_load_roundtrip(self, pipeline, sample_data, sp_v):
-        trainer = _make_trainer(pipeline, sample_data, sp_v)
-        trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
-        trainer.train()
-        path = trainer.path
-
-        loaded = Trainer._load(path, data=None, cache=DataCache())
+        trainer, built = self._trained(pipeline, sample_data, sp_v)
+        loaded = Trainer.load(trainer.path, wrap(sample_data),
+                              cache=DataCache(), pipeline=built)
         assert loaded.name == 't1'
         assert loaded.get_status('scaler') == 'built'
         assert loaded.get_status('dt') == 'built'
 
-    def test_load_does_not_restore_trials(self, pipeline, sample_data, sp_v):
-        """Trials are not persisted — re-supply them with set_trials()."""
-        trainer = _make_trainer(pipeline, sample_data, sp_v)
-        trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
-        trainer.train()
-
-        loaded = Trainer._load(trainer.path, data=None, cache=DataCache())
-        assert loaded.trial_names() == []
-        loaded.set_trials(_trials())
-        assert loaded.trial_names() == ['dt']
+    def test_load_restores_predictors(self, pipeline, sample_data, sp_v):
+        """Predictors are persisted now — set_predictors() does not need
+        calling again, which also means the reload does not reset anything."""
+        trainer, built = self._trained(pipeline, sample_data, sp_v)
+        loaded = Trainer.load(trainer.path, wrap(sample_data),
+                              cache=DataCache(), pipeline=built)
+        assert loaded.predictor_names() == ['dt']
+        assert loaded.predictors[0].params == {'max_depth': 3, 'random_state': 42}
+        assert loaded.get_status('dt') == 'built'
 
     def test_load_restores_pipeline(self, pipeline, sample_data, sp_v):
-        trainer = _make_trainer(pipeline, sample_data, sp_v)
-        trainer.set_pipeline(pipeline.build())
-        trainer.set_trials(_trials())
-        trainer.train()
-
-        loaded = Trainer._load(trainer.path, data=None, cache=DataCache())
+        trainer, built = self._trained(pipeline, sample_data, sp_v)
+        loaded = Trainer.load(trainer.path, wrap(sample_data),
+                              cache=DataCache(), pipeline=built)
         assert loaded.pipeline is not None
         assert 'scaler' in loaded.pipeline.nodes
-        assert loaded.selected_stages == ['scaler']
+        assert loaded.selected_nodes == ['scaler']
         loaded.reset_nodes(['scaler'])  # uses restored pipeline without needing set_pipeline again
         assert loaded.get_status('scaler') is None

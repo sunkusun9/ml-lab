@@ -121,69 +121,46 @@ class TestMakeTrialsValidation:
             make_trials('x', processor=TREE, edges=EDGES, param_grid={'max_depth': []})
 
 
-class TestTrialIdentity:
-    def test_get_attrs_shape_matches_node_attrs(self, pipeline, swept):
-        """A Trial must look like a node to Connector/executor/Collector.
+class TestTrialSpec:
+    """What a Trial resolves to for the executor, and what it reads.
 
-        It carries ``tag`` (selection lives on the Experiment side now) and no
-        ``serial`` — its identity is ``trial_id(pipeline)`` instead.
-        """
-        trial_attrs = swept[0].get_attrs()
-        node_attrs = pipeline.build().get_node_attrs('scaler')
-        assert set(trial_attrs) - {'tag'} == set(node_attrs) - {'serial'}
+    Identity is no longer derived here: a Trial's name *is* its identity and
+    "is this the stored definition" is a plain value comparison, both covered
+    by ``TestTrialRegistration`` in test_project.py. The content hash that
+    used to live on this class (``trial_id``, folding in upstream node
+    serials) is gone along with serials themselves.
+    """
 
-    def test_role_is_head(self, swept):
-        assert swept[0].get_attrs()['role'] == 'head'
+    def test_spec_shape_matches_a_node_spec(self, pipeline, swept):
+        """A Trial must look like a node to Connector/executor/Collector."""
+        trial_spec = swept[0].get_spec()
+        node_spec = pipeline.build().get_node_spec('scaler')
+        assert type(trial_spec) is type(node_spec)
+        assert trial_spec.__slots__ == node_spec.__slots__
 
-    def test_same_definition_same_id(self, pipeline):
-        built = pipeline.build()
-        a = Trial('a', TREE, EDGES, params={'max_depth': 3})
-        b = Trial('b', TREE, EDGES, params={'max_depth': 3})
-        assert a.trial_id(built) == b.trial_id(built)
+    def test_spec_carries_the_definition(self, swept):
+        spec = swept[0].get_spec()
+        trial = swept[0]
+        assert (spec.name, spec.processor, spec.method) == (trial.name, LGBM, 'predict')
+        assert spec.edges == EDGES
+        assert spec.params == trial.params
 
-    def test_name_does_not_affect_id(self, pipeline):
-        built = pipeline.build()
-        assert (Trial('one', TREE, EDGES).trial_id(built)
-                == Trial('two', TREE, EDGES).trial_id(built))
+    def test_spec_drops_display_only_fields(self, swept):
+        """desc/tag stay on the Trial — they never reach the executor."""
+        spec = swept[0].get_spec()
+        assert not hasattr(spec, 'desc')
+        assert not hasattr(spec, 'tag')
 
-    def test_param_change_changes_id(self, pipeline):
-        built = pipeline.build()
-        assert (Trial('a', TREE, EDGES, params={'max_depth': 3}).trial_id(built)
-                != Trial('a', TREE, EDGES, params={'max_depth': 5}).trial_id(built))
+    def test_node_names_lists_referenced_nodes(self):
+        assert Trial('a', TREE, EDGES).node_names() == {'scaler'}
 
-    def test_processor_change_changes_id(self, pipeline):
-        built = pipeline.build()
-        assert Trial('a', TREE, EDGES).trial_id(built) != Trial('a', LGBM, EDGES).trial_id(built)
+    def test_node_names_excludes_the_datasource(self):
+        """``{target}`` reads the DataSource, which is not a node reference."""
+        assert Trial('a', TREE, {'y': '{target}'}).node_names() == set()
 
-    def test_param_order_does_not_affect_id(self, pipeline):
-        built = pipeline.build()
-        assert (Trial('a', TREE, EDGES, params={'a': 1, 'b': 2}).trial_id(built)
-                == Trial('a', TREE, EDGES, params={'b': 2, 'a': 1}).trial_id(built))
-
-    def test_upstream_stage_serial_is_part_of_id(self, pipeline):
-        """A Stage edit must invalidate dependent Trials — Heads left the
-        pipeline, so _bump_serials can no longer cascade into them."""
-        trial = Trial('a', TREE, EDGES, params={'max_depth': 3})
-        before = trial.trial_id(pipeline.build())
-
-        pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
-                         method='transform', edges={'X': '{f1, f2}'},
-                         params={'with_std': False})
-        assert trial.trial_id(pipeline.build()) != before
-
-    def test_unrelated_stage_edit_does_not_change_id(self, pipeline):
-        pipeline.set_grp('other', processor='sklearn.preprocessing.StandardScaler',
-                         method='transform', edges={'X': '{f1}'})
-        pipeline.set_node('other_node', grp='other')
-        trial = Trial('a', TREE, EDGES)
-        before = trial.trial_id(pipeline.build())
-
-        pipeline.set_grp('other', processor='sklearn.preprocessing.StandardScaler',
-                         method='transform', edges={'X': '{f1}'}, params={'with_mean': False})
-        assert trial.trial_id(pipeline.build()) == before
-
-    def test_upstream_serials_lists_referenced_stages(self, pipeline):
-        assert set(Trial('a', TREE, EDGES).upstream_serials(pipeline.build())) == {'scaler'}
+    def test_node_names_spans_every_edge_key(self):
+        trial = Trial('a', TREE, {'X': 'scaler:(*)', 'y': 'labeller:(*)'})
+        assert trial.node_names() == {'scaler', 'labeller'}
 
 
 class TestCollectorsRegistry:

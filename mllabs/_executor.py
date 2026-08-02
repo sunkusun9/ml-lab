@@ -274,7 +274,7 @@ class Job:
     Unifies what used to be two near-identical classes (StageJob, TrialJob)
     — a Stage build and a Trial fit dispatch the same way once name/spec/
     fold/flow/need_gpu are known. The caller builds the list and settles
-    what's already done (Experimenter/Trainer's ``_make_stage_jobs`` for
+    what's already done (Experimenter/Trainer's ``_make_node_jobs`` for
     Stages, ``_make_jobs``/``_make_trial_jobs`` for Trials); the executor
     never walks ``outer_folds``/``pipeline`` or decides what to skip. Stages
     still need the executor to order dispatch (via
@@ -309,7 +309,7 @@ class Job:
         return f"<Job {self.name!r} fold=({self.outer_idx}, {self.inner_idx}) gpu={self.need_gpu}>"
 
 
-def _stage_job_data(job):
+def _job_data(job):
     """``(train, valid, test)`` for *job*, raising like any prep failure.
 
     No ``ext_data``/collectors here — Collectors belong to an Experiment and
@@ -385,7 +385,7 @@ def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None
                 if collectors is not None:
                     train_data, valid_data, test_data, ext_data = _job_inputs(job, collectors)
                 else:
-                    train_data, valid_data, test_data = _stage_job_data(job)
+                    train_data, valid_data, test_data = _job_data(job)
                     ext_data = {}
             except Exception as e:
                 info = _prep_error_info(job.spec.edges, e)
@@ -520,7 +520,7 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
             if collectors is not None:
                 train_data, valid_data, test_data, ext_data = _job_inputs(job, collectors)
             else:
-                train_data, valid_data, test_data = _stage_job_data(job)
+                train_data, valid_data, test_data = _job_data(job)
                 ext_data = {}
         except Exception as e:
             info = _prep_error_info(job.spec.edges, e)
@@ -566,7 +566,12 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
 
             if msg_type == 'done':
                 info = data[0]
-                job.flow.load_objs(node_name, edges=job.spec.edges)
+                # Read back through *store*, not job.flow's own: the worker
+                # wrote where this call was told to write, and a caller can
+                # aim the two elsewhere (a Trainer feeds Predictors from the
+                # node flow while storing them separately).
+                obj, result = store.get_objs(node_name, outer_idx, inner_idx)
+                job.flow.set_objs(node_name, obj, result, {'edges': job.spec.edges})
                 del busy[conn]
                 (free_gpu if worker_idx < n_gpu else free_cpu).append(worker_idx)
                 if tracker:

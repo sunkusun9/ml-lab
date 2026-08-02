@@ -447,7 +447,7 @@ class Experimenter():
         if rebuild:
             self.reset_nodes(target_nodes)
 
-        jobs = self._make_stage_jobs(pipeline, target_nodes, gpu_id_list)
+        jobs = self._make_node_jobs(pipeline, target_nodes, gpu_id_list)
         if not jobs:
             logger.info("No stage nodes to build")
             return
@@ -476,7 +476,7 @@ class Experimenter():
         else:
             logger.info(f"Build complete: {len(jobs)} job(s)")
 
-    def _make_stage_jobs(self, pipeline, node_names, gpu_id_list):
+    def _make_node_jobs(self, pipeline, node_names, gpu_id_list):
         """Expand Stage node names into per-fold Jobs.
 
         Skip decisions live here, not in the executor (mirrors ``_make_jobs``

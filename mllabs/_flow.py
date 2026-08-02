@@ -44,16 +44,17 @@ class DataFlow:
         return obj, result
 
     def load(self):
-        """Load Stage processors, recovering each one's ``edges`` via the
-        store's history (``node_hist``) — the artifact itself
+        """Load this fold's processors, recovering each one's ``edges`` via
+        the store's history (``node_hist``) — the artifact itself
         (obj.pkl/result.pkl) carries neither anymore.
 
         A node with no matching history row is left unloaded rather than
-        guessed at either way. That also covers Trials without needing to
-        ask what kind of node this is: a Trial's outcome is only ever
-        recorded in ``TrialStore.experiment_hist``, never in this run's
-        ``node_hist``, so it always falls into the no-row branch and its
-        (potentially large) fitted model is never pulled into memory here.
+        guessed at either way. That is also what keeps fitted models out of
+        memory here without this having to ask what kind of node it is
+        looking at: a Trial's outcome is only ever recorded in
+        ``TrialStore.experiment_hist``, and a Trainer's Predictors have a
+        store of their own, so neither has a row in the store this flow
+        reads.
         """
         fold_info = self.store.get_fold_info(self.outer_idx, self.inner_idx)
         for name in self.store.list_nodes(self.outer_idx, self.inner_idx):
@@ -178,14 +179,6 @@ class TrainDataFlow(DataFlow):
         self.node_objs[node_name] = (obj, result)
         if info.get('edges') is not None:
             self._node_edges[node_name] = info['edges']
-
-    def get_available_stages(self, pipeline):
-        """Returns stage node names that this DataFlow can produce output for."""
-        return [n for n in pipeline.topo_order() if n in self.node_objs]
-
-    def get_missing_stages(self, pipeline):
-        """Returns stage node names that are in the pipeline but not yet built in this DataFlow."""
-        return [n for n in pipeline.topo_order() if n not in self.node_objs]
 
     def get_train(self, edges):
         """{key: data} train output resolved via edges."""
