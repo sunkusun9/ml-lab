@@ -24,7 +24,7 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 ```
 Project(path, cache_maxsize)          경로·캐시 소유. 프로젝트 전역인 것만
   ├─ PipelineBuilder ──build()──► Pipeline    가변 정의 → 불변 노드 그래프
-  ├─ Collectors                     Collector 인스턴스 레지스트리
+  ├─ Collectors ──CollectorStore──► Collector 정의(entity 행 + params pkl) → 재조립
   ├─ TrialStore                     Trial 정의 + 실행 이력 (프로젝트 전역 — 결과 비교가 목적)
   ├─ ProjectStore                   run 이름 목록만 (experimenters / trainers)
   ├─ Experimenter(name)             CV 실험 (exp/{name}/) — Trial을 평가
@@ -358,12 +358,22 @@ predictors(name PK, desc, processor, method, adapter, params, edges, tag,
 
 ### Collector (`collector/` 패키지)
 - **Collectors** (`_registry.py`): Collector 인스턴스를 소유하는 레지스트리. `Project.collectors()`로 얻음
-  - `Collectors(path=None)` — path 있으면 등록 시 `{path}/{name}`이 기본 저장 위치
+  - `Collectors(path=None)` — path 있으면 등록 시 `{path}/{name}`이 기본 저장 위치. **생성자가 곧 복원** — 그 path의 `CollectorStore`에서 등록돼 있던 걸 전부 되살림(`load()` 클래스메소드 없음)
   - `set_collector(name, collector, connector, path=None, params=None, exist='skip')` — 부품에서 조립. `collector`는 클래스 또는 `"module.ClassName"`, `connector`는 인스턴스 또는 `{__ref__}`, `params`엔 `resolve_ref_values` 적용
-  - `get_collector`/`remove_collector`/`names()`/`in`/`len`/`iter`
+  - **등록 즉시 영속화(2026-08-04)** — `set_collector`가 store에 write-through. `Collectors.save()`는 **없음**. path 없는 레지스트리는 메모리 전용(아무것도 안 남김)
+  - `get_collector`/`remove_collector`(store 행+params 파일까지 삭제)/`names()`/`in`/`len`/`iter`
   - **`resolve(names)`**: 미등록 이름이면 `KeyError` — 조용히 넘어가면 "아무것도 수집 안 됨"과 구분이 안 되기 때문
-  - `match(spec, names=None)`, `save()`, `load(path)` (`__collectors.json`에 name→클래스 ref + path)
+  - `match(spec, names=None)`
   - 여러 실행이 한 레지스트리를 공유하면 메트릭이 한곳에 모여 비교 가능
+
+- **CollectorStore / CollectorEntity** (`collector/_store.py`, 2026-08-04): Collector 정의 저장소
+  - `collectors(name PK, collector TEXT, connector TEXT, path TEXT)` + `{path}/__params/{name}.pkl`
+  - **인스턴스를 저장하지 않는다** — 조립 부품 두 쪽(entity 행 + params pkl)만 남기고 로드 때 `build_collector(entity, params)`로 **다시 조립**. `set_collector`와 완전히 같은 경로를 타므로 등록과 복원이 구조적으로 같아짐. 실행 중 인스턴스에 붙는 값(`warnings`, `_n_outer/_n_inner`)은 애초에 영속화 대상이 아님
+  - `params`가 **pkl 파일**인 이유: `ProcessCollector(ext_data=df)`처럼 정의로 표현 불가능한 산 객체가 params에 들어옴 — 노드/Trial처럼 JSON 강제를 할 수 없어서 이 한 조각만 pickle. 나머지 4개는 평문 컬럼이라 **unpickle 없이** 목록/내용 조회 가능(`list_entities()`)
+  - `CollectorEntity`(`__slots__`: `name`/`collector`/`connector`/`path`) — 한 행의 표현. `of(name, collector, connector, path)`가 준 대로의 **문자 원형**으로 정규화(클래스를 넘겼으면 `_obj_to_ref`, `Connector` 인스턴스면 `{__ref__, __params__}`)
+  - `register(entity, params)` / `build(name)` / `load_all()` / `get_entity` / `list_entities` / `get_params` / `names` / `remove`
+  - 폐지된 것: `__collectors.json`(name→cls+path 인덱스), `Collector.save()`/`load()`와 그 `__config.pkl`. 후자는 **정의를 pickle한 것**이었고 `path`/`name`이 json 인덱스와 이중으로 존재했음
+  - **Collector 클래스는 모듈 최상위여야 함** — 함수 안에서 정의한 서브클래스는 ref로 resolve할 수 없음(멀티워커 실행이 collector를 pickle해 워커로 보내므로 원래부터 그랬음). `Collector.__getstate__`/`_SAVE_EXCLUDE`는 그 경로 때문에 계속 살아있음
 
 - **Collector** (`_base.py`): 기본 클래스
   - `__init__(name, connector)`, `path`는 `Collectors.set_collector` 시 설정
@@ -372,7 +382,7 @@ predictors(name PK, desc, processor, method, adapter, params, edges, tag,
   - `on_attach(experimenter)`: `exp()`가 호출 — experimenter identity 비교로 중복 재계산 방지; `_on_attach(experimenter)` no-op 훅을 subclass에서 override
   - `_experimenter`: pickle 제외 (save/load 시 None으로 초기화)
   - `has_node(node)`: 수집 결과 보유 여부 (구 `has()`는 중복이라 제거됨)
-  - `reset_nodes(nodes)`(base: `self._buf`에서 해당 노드 제거 — 서브클래스는 `super().reset_nodes(nodes)` 먼저 호출 후 자신의 disk/cache 정리), `save()`, `load(cls, path)`
+  - `reset_nodes(nodes)`(base: `self._buf`에서 해당 노드 제거 — 서브클래스는 `super().reset_nodes(nodes)` 먼저 호출 후 자신의 disk/cache 정리). **`save()`/`load()` 없음(2026-08-04 제거)** — 정의는 `CollectorStore`가, 데이터는 각 서브클래스가 자기 `path`에 이미 즉시 기록함
   - `_get_nodes(nodes, available)`: None/list/str(regex) 패턴 매칭
   - context: `{node_spec, processor, info, input, outer_idx, inner_idx, output_train, output_valid, output_test, output_ext}` — 2026-08-02에 `node_attrs`→`node_spec`(ProcessorSpec), `spec`→`info`로 개명(예전 `spec` 키가 담던 건 `_process()`의 info dict라 새 `ProcessorSpec`과 이름이 겹쳤음)
 
@@ -393,10 +403,10 @@ predictors(name PK, desc, processor, method, adapter, params, edges, tag,
 
 - **StackingCollector** (`_stacking.py`): 스태킹 데이터 수집
   - `__init__(name, connector, output_var, method='mean')` — experimenter 불필요
-  - `_on_attach`에서 experimenter로부터 `_index`, `_target`(ndarray), `_target_columns`, `_data_cls` 구축
-  - `output_var`, `method`(mean/mode/simple)
-  - `_aggregate()`: `DataWrapper` 대신 `_data_cls`(입력 데이터 타입)의 static 메서드 사용
-  - 쿼리: `get_dataset(nodes=None, include_target=True)`
+  - **`_on_attach` 없음(2026-08-04)** — 예전엔 attach 시점에 `_index`/`_target`/`_target_columns`/`_data_cls`를 만들어 인스턴스에 들고 있었는데, 이것들은 **설정이 아니라 데이터**(길이가 데이터셋만한 배열)라 config pickle에 실릴 물건이 아니었음. `CollectorStore`가 인스턴스를 저장하지 않게 되면서 이 잔재가 드러나 정리됨
+  - **집계도 읽기 시점으로 미룸** — `_flush_outer`는 inner 결과를 집계하지 않고 **리스트 그대로** `_outer_buf`에 쌓고, `_save_node`가 `{node}.pkl`에 `{'folds': [[inner...], ...]}`로 저장. `get_dataset(experimenter, ...)`가 experimenter에서 `data_cls`/`n_splits`/index/target을 얻어 그때 집계·결합
+  - `_aggregate(data_cls, iterator)`: `method`(mean/mode/simple)에 따라 `data_cls`의 static 메서드 호출
+  - 쿼리: **`get_dataset(experimenter, nodes=None, include_target=True)`** — experimenter가 필수 인자. 저장된 fold 수가 그 experimenter의 `get_n_splits()`와 다르면 `ValueError`
 
 - **ModelAttrCollector** (`_model_attr.py`): 모델 속성 수집 (feature_importances 등)
   - `result_key`, `adapter`(default=None, `get_adapter(connector.processor)`로 자동 설정), `params`
@@ -559,12 +569,12 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
 - **_project.py / _trial.py / _trial_store.py / _predictor.py / _predictor_store.py**: 위 해당 섹션 참조
 - **_executor.py**: 실제 실행
   - **`Job(name, spec, outer_idx, inner_idx, flow, need_gpu=False)`(2026-08-01, `StageJob`/`TrialJob` 통합)** — 노드와 Trial 공용 job 단위. `spec`은 `Pipeline.get_node_spec()`/`Trial.get_spec()`/`Predictor.get_spec()`이 준 `ProcessorSpec`을 job 생성 시점에 1회 계산해 박아 넣은 것(따로 `node`/`trial` 객체를 들고 있지 않음). `flow` 하나로 `get_train`/`get_valid`/`get_test(edges)`를 다 만들 수 있어서(`TrainDataFlow`) `outer_folds`/`train_folds` 참조가 필요 없어짐. `node_path()`는 `flow.node_path(name)`에 위임
-  - **`_execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None)`(2026-08-01, `_build_flow_single`/`_experiment_single` 통합)** — 단일 프로세스로 `Job` 리스트를 그대로 실행. 노드/Trial 차이는 `collectors`뿐이었음(노드는 Collector가 없음) — **`collectors=None`이 노드/build 경로**: 입력 준비가 `ext_data` 없이 `_node_job_data(job)`로 끝나고 매치/실행도 스킵. `collectors=[]`(Trainer의 Predictor 경로 — Trainer도 Collector가 없음)는 실제 리스트와 같은 코드 경로를 타되 매치될 게 없을 뿐이라 결과는 동일 — `None`은 그 스킵만큼만 다름
+  - **`_execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None)`(2026-08-01, `_build_flow_single`/`_experiment_single` 통합)** — 단일 프로세스로 `Job` 리스트를 그대로 실행. 노드/Trial 차이는 `collectors`뿐이었음(노드는 Collector가 없음) — **`collectors=None`이 노드/build 경로**: 입력 준비가 `ext_data` 없이 `_job_data(job)`로 끝나고 매치/실행도 스킵. `collectors=[]`(Trainer의 Predictor 경로 — Trainer도 Collector가 없음)는 실제 리스트와 같은 코드 경로를 타되 매치될 게 없을 뿐이라 결과는 동일 — `None`은 그 스킵만큼만 다름
     - 의존성 순서 `while True: ready = [...]` 루프(노드끼리 서로 참조 가능해서 필요)는 Trial에도 그대로 적용되지만, 그 안의 `get_missing_nodes` 게이트는 **노드 전용**(`collectors is None`일 때만 검사) — Trial의 edges는 항상 이미 빌드된 노드만 참조하므로 보통은 검사해도 즉시 빈 리스트가 되지만, Trial까지 이 게이트에 걸리게 하면 참조하는 노드가 끝내 안 빌드된 경우 그 Trial job이 (에러 하나 안 남기고) 조용히 영원히 대기만 하다 사라짐 — 원래 `_job_inputs`가 `TrainDataFlow._resolve_typ`에서 `KeyError`를 내고 그게 prep error로 잡혀 기록되던 것과 다른 동작이 되어버림(2026-08-01, `_execute_single` 첫 병합 때 들어간 버그, 이번에 `_execute_multi`와 함께 수정)
     - `job.flow.set_objs`는 노드/Trial 구분 없이 완료된 job마다 호출됨 — 안 하면 그 job이 `ready`에서 절대 빠지지 않아(다른 무엇도 "완료"로 표시 안 하므로) 루프가 영원히 재실행함
     - `store`(그 run의 `NodeStore`)를 명시적으로 받아 `store.write_objs(node_name, outer_idx, inner_idx, obj, result)`를 호출 — `NodeStore`를 import해서 정적으로 부르던 방식(2026-08-01 이전)을 대체
-    - 내부 `errors`는 항상 `(outer_idx, inner_idx, name)`로 키잉(실패한 job이 ready-루프에서 영원히 재시도되는 걸 막으려면 fold까지 포함한 식별자가 필요) — 반환값은 기존 호출부 계약에 맞춰 분기: `collectors=None`(노드)은 그대로, 아니면(Trial) `(outer_idx, name)`로 축약해 `_execute_multi`와 모양을 맞춤(같은 outer fold의 다른 inner fold 에러를 덮어쓸 수 있음 — 이 병합 이전부터 있던 충돌이라 여기서 고치지 않음)
-  - **`_execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, tracker=None, ...)`(2026-08-01, `_build_flow_multi`/`_experiment_multi` 통합)** — 워커 풀로 `Job` 리스트를 실행. `_execute_single`과 같은 `collectors` 분기(`None`=노드/build, 리스트=Trial/experiment — Trainer의 Predictor 경로는 Collector가 없어도 `[]`를 명시로 넘김, 반환 키 축약 분기를 타야 해서)
+    - **반환값은 job 종류와 무관하게 항상 `{(outer_idx, inner_idx, name): error_info}`(2026-08-03 개정)** — 실패한 job이 ready-루프에서 영원히 재시도되는 걸 막으려면 키가 fold까지 포함한 job 신원이어야 하고, 반환도 그 신원 그대로. 예전엔 Trial 경로만 `(outer_idx, name)`로 축약했는데 (a) 같은 outer fold의 서로 다른 inner fold에서 같은 trial이 실패하면 에러가 하나 사라졌고 (b) 호출부가 `len(jobs) - len(errors)`를 성공 수로 찍는 바람에 모든 fold에서 실패한 노드 하나가 "하나 빼고 전부 성공"으로 보고됐음. 호출부(`Experimenter.build`/`exp`, `Trainer.train`)는 이름만 필요할 때 `{n for _, _, n in errors}`로 뽑음
+  - **`_execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, tracker=None, ...)`(2026-08-01, `_build_flow_multi`/`_experiment_multi` 통합)** — 워커 풀로 `Job` 리스트를 실행. `_execute_single`과 같은 `collectors` 분기(`None`=노드/build, 리스트=Trial/experiment — Trainer의 Predictor 경로는 Collector가 없어도 `[]`를 명시로 넘김). 반환 모양도 `_execute_single`과 동일
     - **완료 결과는 `job.flow`가 아니라 인자로 받은 `store`에서 되읽음(2026-08-02 수정)** — 워커는 이 호출이 지정한 store에 쓰는데, 부모는 `job.flow.load_objs(...)`로 *flow 자신의* store에서 읽고 있었음. 둘이 항상 같은 인스턴스였을 땐 안 드러났지만, Trainer가 Predictor를 노드 flow로 먹이면서 별도 store에 저장하게 되자 `n_jobs>1`에서 `FileNotFoundError`로 터짐. 지금은 `store.get_objs(...)` → `flow.set_objs(...)`
     - **ready-job 계산은 매 dispatch 사이클마다 처음부터 다시 스캔**(`_collect_ready()`, 옛 `_build_flow_multi` 방식) — 옛 `_experiment_multi`처럼 `gpu_jobs`/`cpu_jobs` 두 리스트를 한 번만 만들어두고 dispatch/에러 때마다 지워나가는 방식(`_drop` 헬퍼, 이번에 제거됨)은 노드에 안 맞음 — 노드는 형제 노드가 끝나야 readiness가 바뀌기 때문. 재스캔 방식은 Trial에도 그대로 맞음(Trial끼리는 서로 의존 안 하니 한 번 ready면 계속 ready). `get_missing_nodes` 게이트는 여기서도 노드 전용(위 `_execute_single`과 같은 이유)
     - **워커 배정 fallback 정책은 옛 `_experiment_multi` 쪽을 채택**(노드에도 동일 적용) — "내 타입" job이 아직 남아있으면 그 타입 몫 worker를 다른 타입에 안 뺏기는 정책(`elif free_cpu and not cpu_ready and gpu_fallback_cpu`)이 옛 `_build_flow_multi`의 무조건 fallback보다 나음. 단, ready 목록을 매 사이클 재계산하는 탓에 같은 `_try_dispatch()` 호출 안에서 GPU pass가 막 dispatch한 job이 CPU pass의 "내 타입 남았나" 판정에는 그 사이클 안에서 반영 안 됨(다음 'done'/'error' 이벤트에서 바로잡힘) — 무시할 만한 수준의 부정확
@@ -577,7 +587,7 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
 - **_logger.py**: BaseLogger, DefaultLogger (start/update/end_progress, adhoc_progress, rename_progress)
 - **col.py**: `@name` column-selector 레지스트리 — 위 "col.py" 섹션 참조
 - **_connector.py**: Connector (노드 매칭)
-- **collector/**: Collector, MetricCollector, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector
+- **collector/**: Collector, Collectors, CollectorStore/CollectorEntity, MetricCollector, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector
 - **filter/**: DataFilter, RandomFilter(n/frac/random_state), IndexFilter(index)
 - **adapter/**: sklearn, xgboost, lightgbm, catboost, keras, `_nn.py` (NNAdapter)
 - **processor/**: CatConverter, CatPairCombiner, CatOOVFilter, FrequencyEncoder, TypeConverter, CrossFitTransformer (`ColSelector`는 `_pipeline.py`에 있음 — processor/ 소속 아님)
@@ -605,11 +615,13 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
     v{n}.pkl                        # 버전별 빌드 결과 Pipeline (형식은 PipelineStore.save_version 뒤에 숨어 있음)
 
   collectors/
-    __collectors.json               # name → 클래스 ref + path
-    {name}/                         # Collector가 소유하는 저장 위치
-      __config.pkl
+    collectors.db                   # CollectorStore — collectors(name PK, collector,
+                                    #   connector, path). 정의의 평문 절반
+    __params/{name}.pkl             #   정의의 나머지 절반 — 생성자 params (산 객체가
+                                    #   들어올 수 있어 pickle). 이 둘로 재조립
+    {name}/                         # Collector가 소유하는 저장 위치 — 데이터만
       metrics.db                    # MetricCollector (node, idx, inner_idx, split, value)
-      {node}.pkl                    # StackingCollector
+      {node}.pkl                    # StackingCollector — {'folds': [[inner 결과...], ...]}
       {node}/{idx}_{inner_idx}.pkl  # OutputCollector
 
   exp/{name}/                       # Experimenter — 이름이 곧 식별자, 디렉토리 하나로 자족

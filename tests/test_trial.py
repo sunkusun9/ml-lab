@@ -1,6 +1,6 @@
 import pytest
 
-from mllabs import Collectors, Connector, PipelineBuilder
+from mllabs import CollectorStore, Collectors, Connector, PipelineBuilder
 from mllabs import Trial, make_trials
 
 
@@ -264,17 +264,96 @@ class TestCollectorsRegistry:
         spec = swept[0].get_spec()
         assert [c.name for c in reg.match(spec, names=['a'])] == ['a']
 
-    def test_save_load_roundtrip(self, tmp_path):
-        reg = self._reg(tmp_path)
-        self._set(reg, 'a')
-        reg.save()
-        loaded = Collectors.load(tmp_path)
+    def test_registration_persists_without_an_explicit_save(self, tmp_path):
+        """set_collector writes through — there is no Collectors.save()."""
+        self._set(self._reg(tmp_path), 'a')
+        loaded = Collectors(tmp_path)
         assert loaded.names() == ['a']
         assert loaded.get_collector('a').path == tmp_path / 'a'
 
-    def test_load_missing_index_is_empty(self, tmp_path):
-        assert Collectors.load(tmp_path / 'nothing').names() == []
+    def test_empty_store_is_an_empty_registry(self, tmp_path):
+        assert Collectors(tmp_path / 'nothing').names() == []
 
-    def test_save_without_path_raises(self, tmp_path):
-        with pytest.raises(ValueError, match='no path'):
-            Collectors().save()
+    def test_remove_clears_the_stored_row(self, tmp_path):
+        reg = self._reg(tmp_path)
+        self._set(reg, 'a')
+        reg.remove_collector('a')
+        assert Collectors(tmp_path).names() == []
+
+    def test_pathless_registry_persists_nothing(self, tmp_path):
+        reg = Collectors()
+        reg.set_collector('m', 'mllabs.MetricCollector', Connector(),
+                          path=tmp_path / 'm', params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'}, 'output_var': '*'})
+        assert reg.names() == ['m']
+        assert not (tmp_path / 'collectors.db').exists()
+
+
+class TestCollectorStore:
+    """The entity columns describe a row without unpickling its instance —
+    that is the whole reason they are columns and not part of the blob."""
+
+    def _reg(self, tmp_path):
+        reg = Collectors(tmp_path)
+        reg.set_collector('m', 'mllabs.MetricCollector',
+                          Connector(node_query='^dt', processor='mock.DummyHead'),
+                          params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'}, 'output_var': '*'})
+        return reg
+
+    def test_entity_keeps_the_string_form_as_given(self, tmp_path):
+        self._reg(tmp_path)
+        entity = CollectorStore(tmp_path).get_entity('m')
+        assert entity.collector == 'mllabs.MetricCollector'
+        assert entity.path == str(tmp_path / 'm')
+
+    def test_entity_describes_the_connector(self, tmp_path):
+        self._reg(tmp_path)
+        entity = CollectorStore(tmp_path).get_entity('m')
+        assert entity.connector == {
+            '__ref__': 'mllabs._connector.Connector',
+            '__params__': {'node_query': '^dt', 'edges': None,
+                           'processor': 'mock.DummyHead'},
+        }
+
+    def test_a_class_argument_is_recorded_as_its_ref(self, tmp_path):
+        from mllabs import MetricCollector
+        reg = Collectors(tmp_path)
+        reg.set_collector('c', MetricCollector, Connector(), params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'}, 'output_var': '*'})
+        assert CollectorStore(tmp_path).get_entity('c').collector == \
+            'mllabs.collector._metric.MetricCollector'
+
+    def test_list_entities_is_registration_ordered(self, tmp_path):
+        reg = self._reg(tmp_path)
+        reg.set_collector('z', 'mllabs.MetricCollector', Connector(), params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'}, 'output_var': '*'})
+        assert [e.name for e in CollectorStore(tmp_path).list_entities()] == ['m', 'z']
+
+    def test_unknown_name_reads_as_none(self, tmp_path):
+        store = CollectorStore(tmp_path)
+        assert store.build('nope') is None and store.get_entity('nope') is None
+
+    def test_build_reassembles_from_entity_and_params(self, tmp_path):
+        reg = self._reg(tmp_path)
+        rebuilt = CollectorStore(tmp_path).build('m')
+        assert type(rebuilt) is type(reg.get_collector('m'))
+        assert rebuilt.output_var == '*'
+        assert rebuilt.connector.node_query == '^dt'
+        assert rebuilt.path == tmp_path / 'm'
+
+    def test_params_are_stored_as_given(self, tmp_path):
+        """The ref spec is what is written — resolution happens on build,
+        the same way it happens on set_collector."""
+        self._reg(tmp_path)
+        assert CollectorStore(tmp_path).get_params('m')['metric_func'] == \
+            {'__callable__': 'sklearn.metrics.accuracy_score'}
+
+    def test_no_instance_state_survives(self, tmp_path):
+        """Nothing about a live Collector is stored — only the two halves it
+        was built from — so run-time state cannot leak into the next build."""
+        reg = self._reg(tmp_path)
+        reg.get_collector('m')._buf['dt'] = {0: {0: 'x'}}
+        assert CollectorStore(tmp_path).build('m')._buf == {}
+
+    def test_remove_drops_the_params_file(self, tmp_path):
+        reg = self._reg(tmp_path)
+        reg.remove_collector('m')
+        store = CollectorStore(tmp_path)
+        assert store.get_params('m') is None and store.build('m') is None

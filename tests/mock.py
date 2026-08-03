@@ -6,6 +6,7 @@ need a real importable module path. Centralized here instead of duplicated
 per test file.
 """
 import numpy as np
+from mllabs.collector._base import Collector
 
 
 class DummyStage:
@@ -107,3 +108,10 @@ class WarnPredictor:
         import warnings
         warnings.warn("PREDICT_WARN_XYZ")
         return np.zeros(len(X), dtype=int)
+
+
+class BrokenCollector(Collector):
+    """Raises inside collect — must be module-level so a path-backed
+    Collectors registry can pickle it at registration time."""
+    def collect(self, context):
+        raise RuntimeError("collect error")

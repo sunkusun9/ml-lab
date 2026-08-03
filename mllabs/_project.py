@@ -90,7 +90,7 @@ class Project:
 
     def collectors(self):
         """The project's :class:`~mllabs.Collectors` registry, restored if saved."""
-        return Collectors.load(self.collectors_path())
+        return Collectors(self.collectors_path())
 
     def experimenter(self, name, data, pipeline_name='pipeline', pipeline_version=None, **kwargs):
         """Create an Experimenter named *name* under ``{project}/exp/{name}``.

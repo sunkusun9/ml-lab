@@ -1,7 +1,6 @@
-import json
 from pathlib import Path
 
-from .._serialize import resolve_processor, resolve_instance, resolve_ref_values, _obj_to_ref, _ref_to_obj
+from ._store import CollectorEntity, CollectorStore, build_collector
 
 
 class Collectors:
@@ -11,14 +10,22 @@ class Collectors:
     runs can share one registry and their metrics land in the same place, where
     they stay comparable.
 
+    Registration persists immediately when the registry has a path: a
+    :class:`CollectorEntity` row goes into ``{path}/collectors.db`` and the
+    constructor params into ``{path}/__params/{name}.pkl``. Constructing a
+    registry over that path rebuilds every Collector registered before from
+    those two halves — the instance itself is never stored.
+
     Args:
         path (str | Path, optional): Base directory. A Collector registered
-            without an explicit ``path`` gets ``{path}/{name}``.
+            without an explicit ``path`` gets ``{path}/{name}``. Without a path
+            the registry is memory-only — nothing is persisted.
     """
 
     def __init__(self, path=None):
         self.path = Path(path) if path is not None else None
-        self.collectors = {}
+        self._store = CollectorStore(self.path) if self.path is not None else None
+        self.collectors = {c.name: c for c in self._store.load_all()} if self._store else {}
 
     # ------------------------------------------------------------------
     # registration
@@ -60,17 +67,19 @@ class Collectors:
                 )
             path = self.path / name
 
-        cls = resolve_processor(collector)
-        connector = resolve_instance(connector)
-        obj = cls(name, connector, **resolve_ref_values(params or {}))
-        obj.path = Path(path)
+        entity = CollectorEntity.of(name, collector, connector, path)
+        obj = build_collector(entity, params)
         self.collectors[name] = obj
+        if self._store is not None:
+            self._store.register(entity, params)
         return obj
 
     def get_collector(self, name):
         return self.collectors.get(name)
 
     def remove_collector(self, name):
+        if self._store is not None:
+            self._store.remove(name)
         return self.collectors.pop(name, None)
 
     def names(self):
@@ -106,37 +115,6 @@ class Collectors:
     def match(self, node_attrs, names=None):
         """Collectors among *names* whose Connector matches *node_attrs*."""
         return [c for c in self.resolve(names) if c.connector.match(node_attrs)]
-
-    # ------------------------------------------------------------------
-    # persistence
-    # ------------------------------------------------------------------
-
-    def save(self):
-        """Persist each Collector plus an index of name → class ref and path."""
-        if self.path is None:
-            raise ValueError("Collectors has no path to save into")
-        self.path.mkdir(parents=True, exist_ok=True)
-        index = {}
-        for name, collector in self.collectors.items():
-            collector.save()
-            index[name] = {'cls': _obj_to_ref(type(collector)), 'path': str(collector.path)}
-        with open(self.path / '__collectors.json', 'w') as f:
-            json.dump(index, f, ensure_ascii=False, indent=2)
-
-    @classmethod
-    def load(cls, path):
-        """Restore a registry saved by :meth:`save`."""
-        path = Path(path)
-        registry = cls(path)
-        index_path = path / '__collectors.json'
-        if not index_path.exists():
-            return registry
-        with open(index_path) as f:
-            index = json.load(f)
-        for name, entry in index.items():
-            collector_cls = _ref_to_obj(entry['cls'])
-            registry.collectors[name] = collector_cls.load(Path(entry['path']))
-        return registry
 
     def __repr__(self):
         return f"<Collectors {sorted(self.collectors)} path={self.path}>"

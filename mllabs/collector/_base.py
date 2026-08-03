@@ -1,7 +1,3 @@
-import pickle
-from pathlib import Path
-
-
 class Collector:
     _SAVE_EXCLUDE = {'_buf': dict}  # {attr: factory} — load 시 factory()로 초기화
 
@@ -61,23 +57,6 @@ class Collector:
         for attr, factory in self._SAVE_EXCLUDE.items():
             setattr(self, attr, factory())
         self._experimenter = None
-
-    def save(self):
-        self.path.mkdir(parents=True, exist_ok=True)
-        exclude = set(self._SAVE_EXCLUDE.keys()) | {'_experimenter'}
-        state = {k: v for k, v in self.__dict__.items() if k not in exclude}
-        with open(self.path / '__config.pkl', 'wb') as f:
-            pickle.dump(state, f)
-
-    @classmethod
-    def load(cls, path):
-        with open(Path(path) / '__config.pkl', 'rb') as f:
-            state = pickle.load(f)
-        obj = cls.__new__(cls)
-        obj.__dict__.update(state)
-        for attr, factory in cls._SAVE_EXCLUDE.items():
-            setattr(obj, attr, factory())
-        return obj
 
     def get_properties(self):
         return {

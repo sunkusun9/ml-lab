@@ -1,12 +1,10 @@
 import pickle
 import re
-import shutil
 
 import numpy as np
 
 from ._base import Collector
 from .._edge_dsl import parse, eval_expr
-from .._data_wrapper import DataWrapper
 
 
 class StackingCollector(Collector):
@@ -16,12 +14,7 @@ class StackingCollector(Collector):
         super().__init__(name, connector)
         self.output_var = output_var
         self.method = method
-        self._outer_buf = {}  # {node: {outer_idx: aggregated_DataWrapper}}
-
-    def _on_attach(self, experimenter):
-        self._data_cls = type(experimenter.data)
-        self._index = self._build_index(experimenter)
-        self._target, self._target_columns = self._build_target(experimenter)
+        self._outer_buf = {}  # {node: {outer_idx: [inner results]}}
 
     def _build_index(self, experimenter):
         all_valid_idx = np.concatenate([
@@ -58,13 +51,13 @@ class StackingCollector(Collector):
             return None
         return output_test.select_columns(cols)
 
-    def _aggregate(self, iterator):
+    def _aggregate(self, data_cls, iterator):
         if self.method == 'simple':
-            return self._data_cls.simple(iterator)
+            return data_cls.simple(iterator)
         elif self.method == 'mean':
-            return self._data_cls.mean(iterator)
+            return data_cls.mean(iterator)
         elif self.method == 'mode':
-            return self._data_cls.mode(iterator)
+            return data_cls.mode(iterator)
         else:
             raise ValueError(f"Unsupported method: {self.method}")
 
@@ -72,25 +65,16 @@ class StackingCollector(Collector):
         valid_results = [r for r in inner_list if r is not None]
         if not valid_results:
             return
-        aggregated = self._aggregate(iter(valid_results))
-        self._outer_buf.setdefault(node, {})[outer_idx] = aggregated
+        self._outer_buf.setdefault(node, {})[outer_idx] = valid_results
         if self._n_outer is not None and len(self._outer_buf[node]) == self._n_outer:
             self._save_node(node)
 
     def _save_node(self, node):
         outer_buf = self._outer_buf.pop(node)
-        arrays, columns = [], None
-        for outer_idx in range(self._n_outer):
-            agg = outer_buf[outer_idx]
-            if columns is None:
-                columns = agg.get_columns()
-                if type(columns) is str:
-                    columns = [columns]
-            arrays.append(agg.to_array())
-        all_data = np.concatenate(arrays, axis=0)
+        folds = [outer_buf[outer_idx] for outer_idx in range(self._n_outer)]
         self.path.mkdir(parents=True, exist_ok=True)
         with open(self.path / f'{node}.pkl', 'wb') as f:
-            pickle.dump({'data': all_data, 'columns': columns}, f)
+            pickle.dump({'folds': folds}, f)
 
     def has_node(self, node):
         if self.path is None:
@@ -109,7 +93,7 @@ class StackingCollector(Collector):
     def _get_saved_nodes(self):
         if self.path is None:
             return []
-        return [f.stem for f in self.path.glob('*.pkl') if f.name != '__config.pkl']
+        return [f.stem for f in self.path.glob('*.pkl')]
 
     def _get_nodes(self, nodes, available):
         if nodes is None:
@@ -118,23 +102,43 @@ class StackingCollector(Collector):
             return [n for n in nodes if n in set(available)]
         return [n for n in available if re.search(nodes, n)]
 
-    def get_dataset(self, nodes=None, include_target=True):
+    def _load_node(self, node, data_cls, n_splits):
+        with open(self.path / f'{node}.pkl', 'rb') as f:
+            folds = pickle.load(f)['folds']
+        if len(folds) != n_splits:
+            raise ValueError(
+                f"Collector '{self.name}': node '{node}' was collected over "
+                f"{len(folds)} outer fold(s), but this experimenter has {n_splits}"
+            )
+        arrays, columns = [], None
+        for inner_list in folds:
+            agg = self._aggregate(data_cls, iter(inner_list))
+            if columns is None:
+                columns = agg.get_columns()
+                if type(columns) is str:
+                    columns = [columns]
+            arrays.append(agg.to_array())
+        return np.concatenate(arrays, axis=0), columns
+
+    def get_dataset(self, experimenter, nodes=None, include_target=True):
+        data_cls = type(experimenter.data)
+        n_splits = experimenter.get_n_splits()
+        index = self._build_index(experimenter)
         node_names = self._get_nodes(nodes, self._get_saved_nodes())
 
         arrays, columns = [], []
         for node in node_names:
-            with open(self.path / f'{node}.pkl', 'rb') as f:
-                saved = pickle.load(f)
-            arrays.append(saved['data'])
-            columns.extend(saved['columns'])
+            node_data, node_columns = self._load_node(node, data_cls, n_splits)
+            arrays.append(node_data)
+            columns.extend(node_columns)
 
-        all_data = np.concatenate(arrays, axis=1)
-        wrapped = self._data_cls.from_output(all_data, columns, self._index)
+        wrapped = data_cls.from_output(np.concatenate(arrays, axis=1), columns, index)
 
-        if include_target and self._target is not None:
-            wrapped = self._data_cls.concat([
+        target, target_columns = self._build_target(experimenter) if include_target else (None, None)
+        if target is not None:
+            wrapped = data_cls.concat([
                 wrapped,
-                self._data_cls.from_output(self._target, self._target_columns, self._index)
+                data_cls.from_output(target, target_columns, index)
             ], axis=1)
 
         return wrapped.to_native()

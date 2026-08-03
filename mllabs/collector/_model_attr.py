@@ -72,7 +72,7 @@ class ModelAttrCollector(Collector):
     def _get_saved_nodes(self):
         if self.path is None:
             return list(self._cache.keys())
-        return [f.stem for f in self.path.glob('*.pkl') if f.name != '__config.pkl']
+        return [f.stem for f in self.path.glob('*.pkl')]
 
     def _get_nodes(self, nodes, available):
         if nodes is None:

@@ -10,7 +10,7 @@ from ._trial_store import TrialStore
 from ._predictor import Predictor
 from ._predictor_store import PredictorStore
 from ._project import Project
-from .collector import Collector, Collectors, MetricCollector, ProbToLabel, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector, ProcessCollector
+from .collector import Collector, Collectors, CollectorEntity, CollectorStore, MetricCollector, ProbToLabel, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector, ProcessCollector
 from .filter import DataFilter, RandomFilter, IndexFilter
 
 __all__ = [
@@ -19,6 +19,8 @@ __all__ = [
     'Connector',
     'Collector',
     'Collectors',
+    'CollectorEntity',
+    'CollectorStore',
     'MetricCollector',
     'ProbToLabel',
     'StackingCollector',

@@ -276,8 +276,7 @@ class TestMetricCollector:
         mc = built_exp.project.collectors().set_collector(
             'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
         _run(built_exp, collectors=[mc])
-        mc.save()
-        loaded = MetricCollector.load(mc.path)
+        loaded = built_exp.project.collectors().get_collector('acc')
         assert loaded.has_node('dt')
         result_orig = mc.get_metric('dt')
         result_loaded = loaded.get_metric('dt')
@@ -347,7 +346,7 @@ class TestStackingCollector:
         sc = built_exp.project.collectors().set_collector(
             'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
         _run(built_exp, collectors=[sc])
-        ds = sc.get_dataset()
+        ds = sc.get_dataset(built_exp.e)
         assert isinstance(ds, pd.DataFrame)
         assert len(ds) == int(len(built_exp.e.data.data) * 0.2) * 2  # ShuffleSplit, n_splits = 2, test_size = 0.2
         assert 'target' in ds.columns
@@ -355,7 +354,7 @@ class TestStackingCollector:
     def test_get_dataset_no_target(self, built_exp):
         sc = built_exp.project.collectors().set_collector('stk', StackingCollector, Connector(), params={'output_var': None})
         _run(built_exp, collectors=[sc])
-        ds = sc.get_dataset(include_target=False)
+        ds = sc.get_dataset(built_exp.e, include_target=False)
         assert isinstance(ds, pd.DataFrame)
         assert 'target' not in ds.columns
 
@@ -363,14 +362,14 @@ class TestStackingCollector:
         sc = multi_head_exp.project.collectors().set_collector(
             'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[sc])
-        ds = sc.get_dataset()
+        ds = sc.get_dataset(multi_head_exp.e)
         assert ds.shape[1] > 2
 
     def test_get_dataset_node_filter(self, multi_head_exp):
         sc = multi_head_exp.project.collectors().set_collector(
             'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[sc])
-        ds = sc.get_dataset(nodes=['dt1'])
+        ds = sc.get_dataset(multi_head_exp.e, nodes=['dt1'])
         assert isinstance(ds, pd.DataFrame)
 
     def test_method_mean(self, built_exp_inner):
@@ -390,18 +389,17 @@ class TestStackingCollector:
         sc = built_exp.project.collectors().set_collector(
             'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
         _run(built_exp, collectors=[sc])
-        sc.save()
-        loaded = StackingCollector.load(sc.path)
+        loaded = built_exp.project.collectors().get_collector('stk')
         assert loaded.has_node('dt')
-        ds_orig = sc.get_dataset()
-        ds_loaded = loaded.get_dataset()
+        ds_orig = sc.get_dataset(built_exp.e)
+        ds_loaded = loaded.get_dataset(built_exp.e)
         pd.testing.assert_frame_equal(ds_orig, ds_loaded)
 
     def test_index_preserved(self, built_exp):
         sc = built_exp.project.collectors().set_collector(
             'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
         _run(built_exp, collectors=[sc])
-        ds = sc.get_dataset()
+        ds = sc.get_dataset(built_exp.e)
         all_valid_idx = np.concatenate([
             built_exp.e.outer_folds[i].test_idx
             for i in range(built_exp.e.get_n_splits())
@@ -499,8 +497,7 @@ class TestModelAttrCollector:
             'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
             params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
         _run(built_exp, collectors=[mac])
-        mac.save()
-        loaded = ModelAttrCollector.load(mac.path)
+        loaded = built_exp.project.collectors().get_collector('fi')
         assert loaded.has_node('dt')
 
     def test_auto_adapter(self):
@@ -573,8 +570,7 @@ class TestOutputCollector:
     def test_save_load(self, built_exp):
         oc = built_exp.project.collectors().set_collector('out', OutputCollector, Connector(), params={'output_var': None})
         _run(built_exp, collectors=[oc])
-        oc.save()
-        loaded = OutputCollector.load(oc.path)
+        loaded = built_exp.project.collectors().get_collector('out')
         assert loaded.has_node('dt')
         result_orig = oc.get_output('dt', 0, 0)
         result_loaded = loaded.get_output('dt', 0, 0)
@@ -603,14 +599,13 @@ class TestCollectorWithExperimenter:
         metric_after = mc.get_metric('dt')
         pd.testing.assert_series_equal(metric_before, metric_after)
 
-    def test_collectors_save_load_roundtrip(self, built_exp):
-        """Collector state lives in the project's Collectors registry, not
-        the Experimenter — save/reload the registry, not the Experimenter."""
+    def test_collectors_reload_from_the_store(self, built_exp):
+        """Collector state lives in the project's Collectors registry, not the
+        Experimenter. Registration writes through, so there is nothing to save."""
         collectors = built_exp.project.collectors()
         mc = collectors.set_collector(
             'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
         _run(built_exp, collectors=[mc])
-        collectors.save()
 
         reloaded = built_exp.project.collectors()
         loaded_mc = reloaded.get_collector('acc')
@@ -717,9 +712,7 @@ class TestSHAPCollector:
 
     def test_save_load(self, built_exp):
         sc = self._make_sc(built_exp)
-        sc.save()
-        from mllabs import SHAPCollector
-        loaded = SHAPCollector.load(sc.path)
+        loaded = built_exp.project.collectors().get_collector('shap')
         assert loaded.has_node('dt')
         orig = sc.get_feature_importance_agg('dt')
         loaded_result = loaded.get_feature_importance_agg('dt')
@@ -754,17 +747,8 @@ class TestBaseCollector:
 
 
 class TestCollectorErrorHandling:
-    def _make_broken_collector(self):
-        from mllabs.collector._base import Collector
-
-        class BrokenCollector(Collector):
-            def collect(self, context):
-                raise RuntimeError("collect error")
-
-        return BrokenCollector
-
     def test_exp_warning_contains_traceback(self, built_exp):
-        bc = built_exp.project.collectors().set_collector('broken', self._make_broken_collector(), Connector())
+        bc = built_exp.project.collectors().set_collector('broken', 'mock.BrokenCollector', Connector())
         _run(built_exp, collectors=[bc])
         w = bc.warnings[0]
         assert 'traceback' in w
@@ -773,7 +757,7 @@ class TestCollectorErrorHandling:
 
     def test_exp_continues_other_collectors_after_error(self, built_exp):
         collectors = built_exp.project.collectors()
-        bc = collectors.set_collector('broken', self._make_broken_collector(), Connector())
+        bc = collectors.set_collector('broken', 'mock.BrokenCollector', Connector())
         mc = collectors.set_collector('acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
         _run(built_exp, collectors=[bc, mc])
         assert mc.has_node('dt')
@@ -884,8 +868,7 @@ class TestProcessCollector:
     def test_save_load(self, built_exp, ext_data):
         pc = built_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
         _run(built_exp, collectors=[pc])
-        pc.save()
-        loaded = ProcessCollector.load(pc.path)
+        loaded = built_exp.project.collectors().get_collector('proc')
         assert loaded.has_node('dt')
         result_orig = pc.get_output()
         result_loaded = loaded.get_output()
