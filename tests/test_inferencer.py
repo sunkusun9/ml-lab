@@ -56,8 +56,7 @@ def trained_trainer(tmp_path, pipeline, sample_data):
     trainer = _make_trainer(pipeline, 't1', sample_data, tmp_path / 'trainer_t1',
                             splitter=KFold(n_splits=2, shuffle=True, random_state=0))
     trainer.set_pipeline(pipeline.build())
-    trainer.set_predictors([_dt()])
-    trainer.train()
+    trainer.train([_dt()])
     return trainer
 
 
@@ -87,7 +86,9 @@ class TestToInferencer:
     def test_not_trained_raises(self, tmp_path, pipeline, sample_data):
         trainer = _make_trainer(pipeline, 't_no_train', sample_data, tmp_path / 'trainer_t_no_train')
         trainer.set_pipeline(pipeline.build())
-        trainer.set_predictors([_dt()])
+        # Registered but never trained — train() is the only path that does
+        # both, so the definition goes in directly.
+        trainer.predictor_defs.register_all([_dt()])
         with pytest.raises(RuntimeError, match="not built"):
             trainer.to_inferencer()
 
@@ -121,8 +122,7 @@ class TestProcess:
     def test_v_parameter(self, tmp_path, pipeline, sample_data):
         trainer = _make_trainer(pipeline, 't_proba', sample_data, tmp_path / 'trainer_t_proba')
         trainer.set_pipeline(pipeline.build())
-        trainer.set_predictors([_dt('dt_proba', method='predict_proba')])
-        trainer.train()
+        trainer.train([_dt('dt_proba', method='predict_proba')])
         inf = trainer.to_inferencer(v='-1:')
         result = inf.process(sample_data)
         assert result.shape[1] == 1
@@ -131,8 +131,7 @@ class TestProcess:
         trainer = _make_trainer(pipeline, 't_nosplit', sample_data,
                                 tmp_path / 'trainer_nosplit', splitter=None)
         trainer.set_pipeline(pipeline.build())
-        trainer.set_predictors([_dt()])
-        trainer.train()
+        trainer.train([_dt()])
         inf = trainer.to_inferencer()
         result = inf.process(sample_data)
         assert result.shape[0] == len(sample_data)

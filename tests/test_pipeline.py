@@ -1182,7 +1182,8 @@ class TestCheckDataCompatibility:
         pl.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
                    method='transform', edges={'X': '{f1, f2}'})
         pl.set_node('scaler', grp='scale')
-        e = Experimenter(name='e1', data=sample_data, path=tmp_path / 'exp', pipeline=pl.build())
+        e = Experimenter(name='e1', data=sample_data, path=tmp_path / 'exp')
+        e.set_pipeline(pl.build())
         with pytest.raises(ValueError, match='missing_col'):
             e.build()
 

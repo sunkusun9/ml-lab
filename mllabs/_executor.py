@@ -18,8 +18,8 @@ def _prep_error_info(edges, exc):
 
     Builds the same 'error' info shape a fit-time failure produces (see
     ``_process``), so callers can hand it to a tracker's ``error(...)``
-    uniformly regardless of which stage the failure happened at. Not
-    persisted here — recording is the tracker's job now (``NodeInfoTracker``/
+    uniformly regardless of where the failure happened. Not persisted here —
+    recording belongs to the tracker (``NodeInfoTracker``/
     ``TrialHistTracker``), not ``NodeStore``.
     """
     return {
@@ -271,20 +271,18 @@ class _TrackerRouter(ProgressMonitor):
 class Job:
     """One unit of build/experiment work, fully resolved before dispatch.
 
-    Unifies what used to be two near-identical classes (StageJob, TrialJob)
-    — a Stage build and a Trial fit dispatch the same way once name/spec/
-    fold/flow/need_gpu are known. The caller builds the list and settles
-    what's already done (Experimenter/Trainer's ``_make_node_jobs`` for
-    Stages, ``_make_jobs``/``_make_trial_jobs`` for Trials); the executor
-    never walks ``outer_folds``/``pipeline`` or decides what to skip. Stages
-    still need the executor to order dispatch (via
-    ``flow.get_missing_nodes``, since Stages depend on each other) — Trials
-    are leaves and don't.
+    A node build and a Trial fit dispatch the same way once name/spec/fold/
+    flow/need_gpu are known, so both are this one class. The caller builds
+    the list and settles what's already done (``_make_node_jobs`` for nodes,
+    ``_make_jobs``/``_make_trial_jobs`` for Trials); the executor never walks
+    ``outer_folds``/``pipeline`` or decides what to skip. Nodes still need the
+    executor to order dispatch (via ``flow.get_missing_nodes``, since nodes
+    can feed each other) — Trials are leaves and don't.
 
     Attributes:
         name (str): Node/Trial name — also its artifact directory.
         spec (ProcessorSpec): What to build and what to feed it — the same
-            shape whether a Stage or a Trial produced it.
+            shape whether a node or a Trial produced it.
         outer_idx, inner_idx (int): Fold coordinates — also the
             NodeStore/DataCache key.
         flow (TrainDataFlow): Supplies train/valid/test inputs and owns the
@@ -312,8 +310,8 @@ class Job:
 def _job_data(job):
     """``(train, valid, test)`` for *job*, raising like any prep failure.
 
-    No ``ext_data``/collectors here — Collectors belong to an Experiment and
-    run against Trials, never Stages (see ``Experimenter.build``).
+    No ``ext_data``/collectors here — Collectors run against Trials, never
+    nodes (see ``Experimenter.build``).
     """
     edges = job.spec.edges
     train_data = job.flow.get_train(edges)
@@ -325,43 +323,31 @@ def _job_data(job):
 def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None):
     """Run *jobs* to completion, single-process.
 
-    Unifies what used to be two near-identical functions (``_build_flow_single``
-    for Stages, ``_experiment_single`` for Trials) — both dispatch a ready job
-    through ``_process`` and persist the result the same way; the only real
-    difference was Stage jobs never having Collectors. ``collectors=None`` is
-    that Stage/build case: input prep skips ``ext_data`` and nothing is
-    matched/run. Passing ``collectors=[]`` (Trainer's Trial path, which also
-    never has Collectors) takes the same code path as a real list, just with
-    nothing to match — functionally identical, ``None`` only worth it for the
-    minor skip.
+    Nodes and Trials dispatch identically — both go through ``_process`` and
+    persist the same way — so *collectors* is what tells the two apart:
 
-    The dependency-order ``while True: ready = [...]`` loop (needed because
-    Stages can depend on each other) works unchanged for Trials too, but the
-    ``get_missing_nodes`` gate inside it is Stage-only (``collectors is
-    None``) — a Trial's edges only ever reference already-built Stages, so
-    in the normal case that check would be immediately empty for it anyway,
-    but gating Trials on it too meant one referencing a Stage that never got
-    built would silently vanish (never dispatched, never an error) instead
-    of failing loudly the way ``_job_inputs`` used to (a ``KeyError`` from
-    ``TrainDataFlow._resolve_typ``, caught and recorded as a prep error).
-    ``job.flow.set_objs`` is called for every completed job regardless of
-    kind: without it, a Trial job would never leave ``ready`` (nothing else
-    marks it done), and the loop would redispatch it forever.
+    - ``None`` is the node/build case. Input prep skips ``ext_data``, nothing
+      is matched or run, and the dependency gate below applies.
+    - A list (empty is fine — a Trainer has no Collectors) is the Trial case.
+      ``[]`` and ``None`` differ only in those three things, so a Trial path
+      with no Collectors must still pass ``[]``.
 
-    *store* is the run's ``NodeStore`` (shared by every job's ``flow`` in a
-    single call) — passed explicitly instead of importing the class and
-    calling its write methods statically, now that ``NodeStore`` is a plain,
-    lightweight object rather than something only reachable via a fold.
+    Jobs are dispatched in dependency order by a ``while True: ready = [...]``
+    loop, needed because nodes can feed each other. The ``get_missing_nodes``
+    gate inside it is node-only: a Trial's edges only ever reference
+    already-built nodes, and gating Trials on it would make one whose node
+    never built vanish silently — never dispatched, never an error — instead
+    of raising a ``KeyError`` from ``TrainDataFlow._resolve_typ`` that gets
+    caught and recorded as a prep error. ``job.flow.set_objs`` runs for every
+    completed job regardless of kind; nothing else marks a job done, so
+    without it the job would stay in ``ready`` and be redispatched forever.
 
-    Internally, ``errors`` is always keyed ``(outer_idx, inner_idx, name)`` —
-    a job identity, needed so a failed job doesn't get redispatched forever
-    by the ready-loop. What's returned differs to match each existing
-    caller's contract: Stage callers (``collectors=None``) get that key
-    as-is; Trial callers (``Experimenter.exp``/``Trainer.train``) get it
-    collapsed to ``(outer_idx, name)``, matching ``_execute_multi``'s
-    shape — note this collapse can overwrite one inner fold's error with
-    another's if the same trial fails on more than one inner fold of the
-    same outer fold; that collision predates this merge and isn't fixed here.
+    *store* is the run's ``NodeStore``, shared by every job's ``flow`` in a
+    single call, and is where fitted obj/result are written.
+
+    Returns ``{(outer_idx, inner_idx, name): error_info}`` for every kind of
+    job — the key is a job identity, which the ready-loop needs to keep a
+    failed job from being redispatched forever.
     """
     gpu_id_list = gpu_id_list or []
     errors = {}  # {(outer_idx, inner_idx, name): error_info}
@@ -425,56 +411,37 @@ def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None
                 for w in collect_warns:
                     router.message(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}", typ='warning')
 
-    if collectors is None:
-        return errors
-    return {(o, n): info for (o, i, n), info in errors.items()}
+    return errors
 
 
 def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, tracker=None,
                    gpu_fallback_cpu=True, cpu_fallback_gpu=True, log_dir=None):
     """Run *jobs* to completion with a worker pool.
 
-    Unifies what used to be two near-identical functions (``_build_flow_multi``
-    for Stages, ``_experiment_multi`` for Trials) — same split as
-    ``_execute_single``: ``collectors=None`` is the Stage/build case (workers
-    get an empty collectors list, input prep skips ``ext_data`` and nothing
-    is matched); a list (possibly empty — Trainer's Trial path never has
-    Collectors either) is the Trial/experiment case.
+    *collectors* splits node from Trial exactly as in ``_execute_single``:
+    ``None`` is the node/build case (workers get an empty collectors list,
+    input prep skips ``ext_data``, nothing is matched, and the dependency
+    gate applies); a list — empty is fine, a Trainer has no Collectors — is
+    the Trial case.
 
     Readiness is recomputed from scratch every dispatch cycle
-    (``_collect_ready``, ``_build_flow_multi``'s old style) rather than
-    tracked as two mutable lists trimmed on dispatch/error
-    (``_experiment_multi``'s old style, via a now-gone ``_drop`` helper) —
-    recompute is the only one of the two that's correct for Stages, whose
-    readiness changes as sibling Stages complete; it works for Trials too,
-    since a Trial's edges only ever reference already-built Stages, so
-    nothing about its readiness actually changes once ``jobs`` is fixed.
-    The dependency-order check itself (``flow.get_missing_nodes``) stays
-    Stage-only (``collectors is None``) — gating Trials on it too was a
-    latent bug introduced when ``_execute_single`` was first merged: a
-    Trial referencing a Stage that never got built would silently vanish
-    (never dispatched, never an error) instead of failing loudly the way
-    ``_job_inputs`` used to (a ``KeyError`` from
-    ``TrainDataFlow._resolve_typ``, caught and recorded as a prep error).
-    Fixed here and in ``_execute_single`` at the same time.
+    (``_collect_ready``) rather than tracked in mutable lists, because a
+    node's readiness changes as the nodes it reads complete. The dependency
+    check itself (``flow.get_missing_nodes``) is node-only for the same
+    reason as in ``_execute_single``: gating Trials on it would make one
+    whose node never built vanish silently instead of being recorded as a
+    prep error.
 
-    The worker-assignment fallback policy adopted here is
-    ``_experiment_multi``'s old one — a free worker of the "wrong" type is
-    only handed to a ready job if nothing of its own type is waiting — which
-    is strictly better than ``_build_flow_multi``'s old unconditional-steal
-    version; applied uniformly to Stage dispatch too now. One minor
-    imprecision from recomputing readiness fresh each cycle rather than
-    mutating shared lists: within a single ``_try_dispatch`` call, a job
-    dispatched from the GPU pass isn't reflected in the CPU pass's "is
-    anything of my own type still waiting" check (both passes read the same
-    snapshot) — worst case this delays an opportunistic cross-type dispatch
-    by one cycle, corrected on the next 'done'/'error' event.
+    Worker assignment prefers matching type: a free worker of the "wrong"
+    type is handed to a ready job only when nothing of its own type is
+    waiting. Because readiness is a fresh snapshot per cycle, a job
+    dispatched by the GPU pass isn't visible to the CPU pass's "is anything
+    of my own type still waiting" check within that same ``_try_dispatch``
+    call — at worst an opportunistic cross-type dispatch is delayed one
+    cycle, corrected on the next 'done'/'error' event.
 
-    Internal ``errors`` keys are always ``(outer_idx, inner_idx, name)``,
-    same reason as ``_execute_single``; the return value collapses this to
-    ``(outer_idx, name)`` for the Trial/experiment case to match
-    ``Experimenter.exp``/``Trainer.train``'s existing unpacking (same
-    same-outer/different-inner collision caveat as ``_execute_single``).
+    Returns ``{(outer_idx, inner_idx, name): error_info}``, same shape and
+    same reason as ``_execute_single``.
     """
     gpu_id_list = gpu_id_list or []
     n_gpu = min(len(gpu_id_list), n_jobs)
@@ -484,7 +451,7 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
     workers = []  # [(process, parent_conn)]
     for i in range(n_jobs):
         parent_conn, child_conn = _mp_ctx.Pipe()
-        # Stage jobs (collectors=None) never have Collectors to run, so the
+        # Node jobs (collectors=None) never have Collectors to run, so the
         # worker always gets an empty list in that case.
         w = ProcessWorker(child_conn, collectors or [], store,
                           gpu_id=gpu_id_list[i] if i < n_gpu else None,
@@ -614,10 +581,6 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
         w.join()
     for _, conn in workers:
         conn.close()
-
-    if collectors is None:
-        return errors
-    return {(o, n): info for (o, i, n), info in errors.items()}
 
     return errors
 

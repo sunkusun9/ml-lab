@@ -10,6 +10,7 @@ from sklearn.model_selection import ShuffleSplit
 from ._data_wrapper import wrap, unwrap, DataWrapperProvider
 from ._flow import TrainDataFlow
 from ._store import NodeStore
+from ._experimenter_store import ExperimenterStore, DB_NAME as _EXP_DB
 from ._describer import desc_spec
 from ._logger import resolve_logger
 
@@ -121,20 +122,22 @@ class Experimenter():
     """Executes and manages a Pipeline experiment on a single dataset.
 
     Splits data using *sp* (outer) and optionally *sp_v* (inner), then runs
-    Stage builds and Head experiments fold-by-fold.
+    node builds and Trial experiments fold-by-fold.
 
-    No ``Project`` dependency — this class only ever sees the narrow pieces
-    it actually needs (``path``, ``cache``, ``experimenter_store``, an
-    already-loaded ``pipeline``), each handed in explicitly by whoever
-    constructs it. ``Project.experimenter()``/``load_experimenter()`` is the
-    usual caller: it resolves a ``(pipeline_name, pipeline_version)`` pair
-    into a loaded Pipeline via its own ``load_pipeline``, and supplies its
-    own ``cache``/``experimenters`` (:class:`~mllabs.ExperimenterStore`)
-    instances — but nothing stops constructing this directly, standalone.
+    No ``Project`` dependency, and nothing to inject but a ``cache``: the run
+    owns its own :class:`~mllabs.ExperimenterStore`, built from ``path``, and
+    everything needed to reopen it lives in that directory. ``Project`` only
+    supplies the path and records the name in its index.
+
+    Constructing is *creating*. It splits the data and writes a fresh state,
+    so pointing it at an existing directory starts that run over rather than
+    resuming it — :meth:`load_experimenter` is how an existing one comes back.
+    A Pipeline is never a constructor argument either way; adopt one with
+    :meth:`set_pipeline`, which saves it as this run's ``pipeline.pkl``.
 
     Args:
         path: This run's own base directory (``{project}/exp/{name}`` when
-            created via a Project) — must already exist.
+            created via a Project), created if it does not exist.
         name (str): Experimenter name. This is its identity — the directory
             above and the key used in TrialStore history.
         data: Input dataset (pandas DataFrame, polars DataFrame, or numpy array).
@@ -148,38 +151,29 @@ class Experimenter():
         data_key (str, optional): Identifier verified on reload to prevent
             data mismatch.
         cache (DataCache, optional): Shared LRU cache.
-        experimenter_store (ExperimenterStore, optional): Where this
-            Experimenter's own meta row (name/data_key/title/pipeline
-            pointer) is persisted. ``None`` means meta is never saved.
-        pipeline (Pipeline, optional): Already-loaded Pipeline to adopt
-            immediately; equivalent to calling :meth:`set_pipeline` right
-            after construction.
-        pipeline_name (str): Name this Experimenter records its Pipeline
-            under (purely for its own persisted meta — this class never
-            loads a Pipeline by name itself). Default ``'pipeline'``.
 
     Attributes:
         cache (DataCache): Shared LRU cache, or ``None``.
-        pipeline (Pipeline): The adopted Pipeline. Not stored here — only the
-            ``(pipeline_name, pipeline_version)`` pointer is, so the Pipeline
-            itself lives once, wherever the caller keeps its versions.
+        pipeline (Pipeline): The adopted Pipeline, kept as this run's own
+            ``pipeline.pkl``. The ``(pipeline_name, pipeline_version)``
+            pointer is recorded too, but only as provenance — it names the
+            project version this copy was taken from.
 
     Note:
         ``build``, ``exp`` and other node-graph-aware methods use
-        ``self.pipeline`` — call :meth:`set_pipeline` first (or pass
-        ``pipeline`` to the constructor).
+        ``self.pipeline`` — call :meth:`set_pipeline` first.
     """
 
     def __init__(
             self, path, name, data, data_names = None,
             sp = ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
             splitter_params=None, title=None, data_key=None,
-            aug_data=None, cache=None, experimenter_store=None,
-            pipeline=None, pipeline_name='pipeline', _save=True
+            aug_data=None, cache=None
         ):
         self.name = name
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
+        self._store = ExperimenterStore(self.path)
         data_native = data
         self.data = wrap(data)
         self.aug_data = wrap(aug_data) if aug_data is not None else None
@@ -227,14 +221,64 @@ class Experimenter():
             for i, (test_idx, inner_folds) in enumerate(raw_splits)
         ]
         self.pipeline = None
-        self.pipeline_name = pipeline_name
+        self.pipeline_name = 'pipeline'
         self.pipeline_version = None
         self._os_log_state = None
-        self._store = experimenter_store
+        self._save()
+
+    @staticmethod
+    def load_experimenter(path, data, data_key=None, aug_data=None, cache=None):
+        """Reopen the Experimenter rooted at *path*.
+
+        Everything comes out of that directory — meta and splitters from its
+        ``__exp.db``, the Pipeline from its ``pipeline.pkl`` — so no Project
+        is involved and no ``(pipeline_name, pipeline_version)`` is resolved.
+        The name is the directory's own.
+
+        Args:
+            path: The Experimenter's base directory.
+            data: Dataset to attach. Must match the original data shape.
+            data_key (str, optional): Must match the saved value, if one was
+                given when the Experimenter was created.
+            aug_data (optional): External data appended to inner train splits.
+            cache (DataCache, optional): Shared LRU cache.
+
+        Returns:
+            Experimenter: The reopened run.
+
+        Raises:
+            KeyError: If *path* holds no saved Experimenter.
+            ValueError: If *data_key* does not match the saved value.
+        """
+        path = Path(path)
+        # Checked before building the store, which would otherwise create the
+        # directory and an empty db for a run that does not exist.
+        if not (path / f'{_EXP_DB}.db').exists():
+            raise KeyError(f"No experimenter saved at {path}")
+        store = ExperimenterStore(path)
+        meta = store.fetch()
+        if meta is None:
+            raise KeyError(f"No experimenter saved at {path}")
+
+        saved_data_key = meta.get('data_key')
+        if saved_data_key is not None and saved_data_key != data_key:
+            raise ValueError(
+                f"data_key mismatch: saved='{saved_data_key}', provided='{data_key}'"
+            )
+
+        splitters = store.load_splitters() or {}
+        # 'sp' has a non-None default; passing the stored None through would
+        # break the split rather than fall back to it.
+        split_kwargs = {k: v for k, v in splitters.items() if v is not None}
+        exp = Experimenter(
+            path, meta['name'], data,
+            title=meta.get('title'), data_key=saved_data_key,
+            aug_data=aug_data, cache=cache, **split_kwargs,
+        )
+        pipeline = store.load_pipeline()
         if pipeline is not None:
-            self.set_pipeline(pipeline, pipeline_name)
-        if _save:
-            self._save()
+            exp.set_pipeline(pipeline, meta.get('pipeline_name') or 'pipeline')
+        return exp
 
     def open_os_log(self, log_path=None):
         """Start capturing this process's OS-level stdout/stderr — native
@@ -293,10 +337,16 @@ class Experimenter():
 
         Takes the Pipeline object directly rather than a version number —
         this class has no way to load one by name/version itself (see the
-        class docstring); ``Project.experimenter()``/``load_experimenter()``
-        resolve that before calling this. ``self.pipeline_version`` is read
-        straight off *pipeline* (its ``.version``), so it's never tracked as
-        a separate, possibly-diverging value.
+        class docstring); ``Project.experimenter()`` resolves that before
+        calling this. ``self.pipeline_version`` is read straight off
+        *pipeline* (its ``.version``), so it's never tracked as a separate,
+        possibly-diverging value.
+
+        The Pipeline is written to this Experimenter's own ``pipeline.pkl``,
+        which is what the constructor reads back — reopening needs only this
+        directory, never a Project. Persisting requires an
+        ``experimenter_store``; without one this Experimenter keeps the
+        Pipeline in memory only, the same way it skips saving its meta.
 
         Moving between versions diffs the two Pipelines (:meth:`Pipeline.diff_from`)
         and drops exactly the Stage artifacts the change invalidates: Stages
@@ -325,9 +375,9 @@ class Experimenter():
                 self.reset_nodes(sorted(stale))
         self.pipeline = pipeline
         self.pipeline_version = pipeline.version
-        if self._store is not None:
-            self._store.set(self.name, 'pipeline_name', self.pipeline_name)
-            self._store.set(self.name, 'pipeline_version', self.pipeline_version)
+        self._store.save_pipeline(pipeline)
+        self._store.set(self.name, 'pipeline_name', self.pipeline_name)
+        self._store.set(self.name, 'pipeline_version', self.pipeline_version)
         return pipeline
 
     def _require_pipeline(self):
@@ -469,10 +519,10 @@ class Experimenter():
         finally:
             tracker.close()
 
-        error_names = list({n for _, _, n in errors})
-        n_ok = len(jobs) - len(error_names)
-        if error_names:
-            logger.info(f"Build complete: {n_ok}/{len(jobs)} job(s), {len(error_names)} error(s): {error_names}")
+        error_names = sorted({n for _, _, n in errors})
+        n_ok = len(jobs) - len(errors)
+        if errors:
+            logger.info(f"Build complete: {n_ok}/{len(jobs)} job(s), {len(errors)} error(s): {error_names}")
         else:
             logger.info(f"Build complete: {len(jobs)} job(s)")
 
@@ -562,11 +612,11 @@ class Experimenter():
         finally:
             tracker.close()
 
-        error_names = list({n for _, n in errors})
-        n_ok = len(jobs) - len(error_names)
-        if error_names:
+        error_names = sorted({n for _, _, n in errors})
+        n_ok = len(jobs) - len(errors)
+        if errors:
             logger.info(f"Exp complete: {n_ok}/{len(jobs)} job(s), "
-                        f"{len(error_names)} error(s): {error_names}")
+                        f"{len(errors)} error(s): {error_names}")
         else:
             logger.info(f"Exp complete: {len(jobs)} job(s)")
 
@@ -685,23 +735,18 @@ class Experimenter():
         return logs
 
     def _save(self):
-        if self._store is not None:
-            self._store.save({
-                'name': self.name,
-                'data_key': self.data_key,
-                'title': self.title,
-                'pipeline_name': self.pipeline_name,
-                'pipeline_version': self.pipeline_version,
-            })
-        self._save_splitters()
-
-    def _save_splitters(self):
-        with open(self.path / '__splitters.pkl', 'wb') as f:
-            pkl.dump({
-                'sp': self.sp,
-                'sp_v': self.sp_v,
-                'splitter_params': self.splitter_params,
-            }, f)
+        self._store.save({
+            'name': self.name,
+            'data_key': self.data_key,
+            'title': self.title,
+            'pipeline_name': self.pipeline_name,
+            'pipeline_version': self.pipeline_version,
+        })
+        self._store.save_splitters(self.name, {
+            'sp': self.sp,
+            'sp_v': self.sp_v,
+            'splitter_params': self.splitter_params,
+        })
 
     def desc_spec(self):
         return desc_spec(self)

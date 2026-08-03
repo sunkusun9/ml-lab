@@ -56,13 +56,14 @@ def pipeline():
 
 @pytest.fixture
 def exp(tmp_path, sample_data, pipeline):
-    return Experimenter(
+    e = Experimenter(
         name='e1',
         data=sample_data,
         path=tmp_path / 'exp',
         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
-        pipeline=pipeline.build(),
     )
+    e.set_pipeline(pipeline.build())
+    return e
 
 
 @pytest.fixture
@@ -384,6 +385,47 @@ class TestDataPrepErrors:
                 assert store.status('dt') == 'built'
 
 
+class TestErrorKeyShape:
+    """Both executors key errors by full job identity ``(outer_idx, inner_idx,
+    name)``, for Trials as well as nodes. The Trial path used to collapse this
+    to ``(outer_idx, name)`` on the way out, which dropped an error whenever
+    the same trial failed on more than one inner fold of the same outer fold."""
+
+    @pytest.fixture
+    def exp_inner(self, tmp_path, sample_data, pipeline):
+        """Two outer folds x two inner folds — the layout the collapse lost."""
+        e = Experimenter(
+            name='e_inner',
+            data=sample_data,
+            path=tmp_path / 'exp_inner',
+            sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
+            sp_v=KFold(n_splits=2),
+        )
+        e.set_pipeline(pipeline.build())
+        return e
+
+    def _bad_jobs(self, exp_inner, pipeline, trial_store):
+        _setup_full(pipeline, exp_inner)
+        exp_inner.build(n_jobs=1)
+        bad = _dt('bad_dt', {'X': 'scaler:([)', 'y': '{target}'})
+        return exp_inner._make_jobs(_folds([bad], exp_inner), trial_store)
+
+    _EXPECTED = {(o, i, 'bad_dt') for o in range(2) for i in range(2)}
+
+    def test_single_keys_every_failed_job(self, exp_inner, pipeline, trial_store):
+        from mllabs._executor import _execute_single
+        jobs = self._bad_jobs(exp_inner, pipeline, trial_store)
+        assert len(jobs) == 4
+        errors = _execute_single(jobs, exp_inner.node_store, collectors=[])
+        assert set(errors) == self._EXPECTED
+
+    def test_multi_keys_every_failed_job(self, exp_inner, pipeline, trial_store):
+        from mllabs._executor import _execute_multi
+        jobs = self._bad_jobs(exp_inner, pipeline, trial_store)
+        errors = _execute_multi(jobs, 2, exp_inner.node_store, collectors=[])
+        assert set(errors) == self._EXPECTED
+
+
 class TestExperimentMulti:
     """Exercise _experiment_multi's worker-pool dispatch (ProcessWorker, n_jobs>1)."""
 
@@ -413,9 +455,7 @@ class TestTrainerMulti:
             splitter_params={}, cache=DataCache(),
         )
         t.set_pipeline(pipeline.build())
-        t.set_predictors([Predictor.from_trial(t_) for t_ in _model()])
-
-        t.train(n_jobs=2)
+        t.train([Predictor.from_trial(t_) for t_ in _model()], n_jobs=2)
 
         assert t.get_status('scaler') == 'built'
         assert t.get_status('dt') == 'built'

@@ -1,4 +1,32 @@
 """Shared helpers between Experimenter and Trainer."""
+import pickle as pkl
+from pathlib import Path
+
+PIPELINE_FILE = 'pipeline.pkl'
+
+
+def save_pipeline(path, pipeline):
+    """Write *pipeline* to ``{path}/pipeline.pkl``.
+
+    A run keeps its own copy of the Pipeline it is working against, so that
+    reopening it needs nothing but its directory — no Project to resolve a
+    ``(pipeline_name, pipeline_version)`` pointer into an object. The pointer
+    is still recorded alongside, as provenance for which project version this
+    copy came from.
+    """
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    with open(path / PIPELINE_FILE, 'wb') as f:
+        pkl.dump(pipeline, f)
+
+
+def load_pipeline(path):
+    """The Pipeline saved at ``{path}/pipeline.pkl``, or ``None`` if absent."""
+    file = Path(path) / PIPELINE_FILE
+    if not file.exists():
+        return None
+    with open(file, 'rb') as f:
+        return pkl.load(f)
 
 
 def require_built_pipeline(pipeline):

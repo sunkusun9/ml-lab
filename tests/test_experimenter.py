@@ -385,14 +385,37 @@ class TestSetPipeline:
         assert exp.pipeline.pipeline_id == pipeline.pipeline_id
 
     def test_builder_is_rejected(self, tmp_path, sample_data, pipeline):
+        e = Experimenter(path=tmp_path / 'reject', name='e1', data=sample_data)
         with pytest.raises(TypeError, match='built Pipeline'):
-            Experimenter(path=tmp_path / 'reject', name='e1', data=sample_data, pipeline=pipeline)
+            e.set_pipeline(pipeline)
 
-    def test_set_pipeline_does_not_copy_pipeline_pkl(self, exp, pipeline):
-        """Only the (pipeline_name, pipeline_version) pointer is persisted —
-        the Pipeline itself lives once, wherever the caller keeps its
-        versions, never copied into the run's own directory."""
-        assert not (exp.path / 'pipeline.pkl').exists()
+    def test_set_pipeline_keeps_a_copy_in_the_run(self, exp, pipeline):
+        """The run owns the Pipeline it works against, so reopening it needs
+        only its directory. The (pipeline_name, pipeline_version) pointer is
+        recorded alongside as provenance."""
+        exp.set_pipeline(pipeline.build())
+        assert (exp.path / 'pipeline.pkl').exists()
+
+    def test_pipeline_is_restored_from_the_run_directory(self, exp, pipeline, sample_data):
+        """load_experimenter picks the Pipeline back up from the directory —
+        nothing resolves a version."""
+        _setup_stage(pipeline, exp)
+        exp.build()
+
+        reopened = Experimenter.load_experimenter(exp.path, sample_data)
+        assert reopened.pipeline is not None
+        assert reopened.pipeline.get_node_names() == exp.pipeline.get_node_names()
+        assert reopened.get_status('scaler') == 'built'
+
+    def test_a_standalone_run_persists_its_own_pipeline(self, tmp_path, sample_data, pipeline):
+        """No Project, no injected store — the run still keeps its Pipeline."""
+        e = Experimenter(tmp_path / 'bare', 'bare', sample_data)
+        e.set_pipeline(pipeline.build())
+        assert (e.path / 'pipeline.pkl').exists()
+
+        reopened = Experimenter.load_experimenter(e.path, sample_data)
+        assert reopened.name == 'bare'
+        assert reopened.pipeline is not None
 
     def test_set_pipeline_resets_stale_nodes(self, exp, pipeline):
         _setup_stage(pipeline, exp)
@@ -407,10 +430,6 @@ class TestSetPipeline:
 
 
 class TestSaveLoad:
-    def test_save_creates_splitters_file(self, exp, pipeline):
-        _setup_stage(pipeline, exp)
-        assert (exp.path / '__splitters.pkl').exists()
-
     def test_load_restores(self, project, exp, pipeline, sample_data):
         _setup_stage(pipeline, exp)
         exp.build()
@@ -446,15 +465,23 @@ class TestSaveLoad:
         assert loaded.get_n_splits_inner() == exp.get_n_splits_inner()
 
     def test_persistence_layout(self, exp, pipeline):
+        """Everything the run needs sits in the run's own directory."""
         _setup_stage(pipeline, exp)
-        assert (exp.path / '__splitters.pkl').exists()
-        assert not (exp.path / '__exp.db').exists()
-        assert not (exp.path / 'pipeline.pkl').exists()
+        assert (exp.path / '__exp.db').exists()
+        assert (exp.path / 'pipeline.pkl').exists()
+        assert not (exp.path / '__splitters.pkl').exists()
 
-    def test_meta_lives_in_project_wide_table(self, project, exp):
-        meta = project.experimenters.fetch(exp.name)
+    def test_meta_lives_in_the_runs_own_store(self, exp):
+        meta = exp._store.fetch()
         assert meta['name'] == exp.name
         assert set(meta.keys()) == {'name', 'data_key', 'title', 'pipeline_name', 'pipeline_version'}
+
+    def test_splitters_live_in_the_store(self, exp):
+        """Not a side file — the store owns them, as a blob (sklearn splitters
+        are arbitrary objects, so columns are not an option)."""
+        splitters = exp._store.load_splitters()
+        assert splitters['sp'] is exp.sp or splitters['sp'].get_n_splits() == exp.get_n_splits()
+        assert set(splitters) == {'sp', 'sp_v', 'splitter_params'}
 
 
 class TestGetStatus:

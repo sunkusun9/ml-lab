@@ -9,12 +9,11 @@ own version counter in its own db (see :meth:`build_pipeline`).
 Components still work standalone — a Project is a convenience over them, not a
 requirement.
 """
-import pickle as pkl
 from pathlib import Path
 
 from ._cache import DataCache
 from ._trial_store import TrialStore
-from ._experimenter_store import ExperimenterStore
+from ._project_store import ProjectStore
 from .collector import Collectors
 
 
@@ -24,20 +23,21 @@ class Project:
     Layout::
 
         {path}/
-          experimenters.db    Experimenter registry, keyed by name
+          project.db          ProjectStore — which Experimenters and Trainers exist
           trials.db           TrialStore (definitions + run history)
           pipelines/{name}/   PipelineBuilder db (incl. its own version counter),
                                and v{n}.pkl per built version
           collectors/         Collectors registry
-          exp/{name}/         Experimenter artifacts, keyed by its name
-                               (incl. its own NodeStore — see _store.py)
-          trainers/{name}/    Trainer artifacts (same, own NodeStore)
+          exp/{name}/         Experimenter — its own store, Pipeline copy and
+                               NodeStore, all self-contained
+          trainers/{name}/    Trainer (same, own NodeStore)
           inferencers/{name}/ saved Inferencers
 
-    Note: Stage run-history (formerly a project-wide NodeInfoStore) is now
-    part of each run's own NodeStore (``_store.py``) — an Experimenter or
-    Trainer owns one, at its own base path, rather than Project owning a
-    single store shared/disambiguated by a run-name column.
+    Project holds only what is genuinely project-wide: the pipelines, the
+    Collectors, the TrialStore, the shared cache, and the index of run names.
+    Everything about an individual run — its splitters, its data key, the
+    Pipeline it adopted, its node artifacts and history — belongs to that
+    run's own directory, so it can be reopened without a Project at all.
 
     Args:
         path (str | Path): Project root. Created if missing.
@@ -51,7 +51,7 @@ class Project:
         self.cache = DataCache(maxsize=cache_maxsize)
         self.path.mkdir(parents=True, exist_ok=True)
         self.trials = TrialStore(self.path)
-        self.experimenters = ExperimenterStore(self.path)
+        self.store = ProjectStore(self.path)
 
     # ------------------------------------------------------------------
     # paths
@@ -96,23 +96,28 @@ class Project:
         """Create an Experimenter named *name* under ``{project}/exp/{name}``.
 
         Its name is its identity: it is both the directory and the key used in
-        :class:`~mllabs.TrialStore` history. Experimenter has no Project
-        dependency of its own (see its class docstring) — this factory is
-        what resolves *pipeline_version* into a loaded Pipeline via
-        :meth:`load_pipeline`, and supplies ``cache``/``experimenter_store``.
+        :class:`~mllabs.TrialStore` history. Creating one *starts* a run — use
+        :meth:`load_experimenter` to reopen an existing one.
+
+        All this factory adds to a bare ``Experimenter(...)`` is the path, the
+        shared cache, a name in this project's index, and — when
+        *pipeline_version* is given — resolving that version into a Pipeline
+        for the new run to adopt.
         """
         from ._experimenter import Experimenter
-        pipeline = None
+        exp = Experimenter(self.exp_path(name), name, data, cache=self.cache, **kwargs)
+        self.store.register_experimenter(name)
         if pipeline_version is not None:
-            pipeline = self.load_pipeline(pipeline_name, pipeline_version)
-        return Experimenter(
-            self.exp_path(name), name, data,
-            cache=self.cache, experimenter_store=self.experimenters,
-            pipeline=pipeline, pipeline_name=pipeline_name, **kwargs,
-        )
+            exp.set_pipeline(self.load_pipeline(pipeline_name, pipeline_version),
+                             pipeline_name)
+        return exp
 
     def load_experimenter(self, name, data, data_key=None, aug_data=None):
         """Reopen a previously created Experimenter by name.
+
+        Delegates to :meth:`Experimenter.load_experimenter`, which reads
+        everything out of that run's own directory — no Pipeline version is
+        resolved here.
 
         Args:
             name (str): Experimenter name — its directory under ``exp/``.
@@ -125,64 +130,42 @@ class Project:
             ValueError: If *data_key* does not match the saved value.
         """
         from ._experimenter import Experimenter
-        path = self.exp_path(name)
-        meta = self.experimenters.fetch(name)
-        if meta is None:
-            raise KeyError(f"No experimenter named {name!r} in this project")
-
-        saved_data_key = meta.get('data_key')
-        if saved_data_key is not None and saved_data_key != data_key:
-            raise ValueError(
-                f"data_key mismatch: saved='{saved_data_key}', provided='{data_key}'"
-            )
-
-        with open(path / '__splitters.pkl', 'rb') as f:
-            splitters = pkl.load(f)
-
-        pipeline_name = meta.get('pipeline_name', 'pipeline')
-        version = meta.get('pipeline_version')
-        pipeline = self.load_pipeline(pipeline_name, version) if version is not None else None
-
-        return Experimenter(
-            path, name, data,
-            sp=splitters['sp'], sp_v=splitters['sp_v'],
-            splitter_params=splitters['splitter_params'],
-            title=meta.get('title'), data_key=saved_data_key, aug_data=aug_data,
-            cache=self.cache, experimenter_store=self.experimenters,
-            pipeline=pipeline, pipeline_name=pipeline_name, _save=False,
+        return Experimenter.load_experimenter(
+            self.exp_path(name), data, data_key=data_key,
+            aug_data=aug_data, cache=self.cache,
         )
 
     def trainer(self, name, data, pipeline_name='pipeline', pipeline_version=None, **kwargs):
         """Create a Trainer named *name* under ``{project}/trainers/{name}``.
 
-        Same shape as :meth:`experimenter`: Trainer has no Project dependency
-        of its own — this factory resolves *pipeline_version* and supplies
-        ``cache``.
+        Same shape as :meth:`experimenter`: the path, the shared cache, a name
+        in this project's index, and version resolution.
         """
         from ._trainer import Trainer
-        pipeline = None
+        trainer = Trainer(self.trainer_path(name), name, data, cache=self.cache, **kwargs)
+        self.store.register_trainer(name)
         if pipeline_version is not None:
-            pipeline = self.load_pipeline(pipeline_name, pipeline_version)
-        return Trainer(
-            self.trainer_path(name), name, data, cache=self.cache,
-            pipeline=pipeline, pipeline_name=pipeline_name, **kwargs,
-        )
+            trainer.set_pipeline(self.load_pipeline(pipeline_name, pipeline_version),
+                                 pipeline_name)
+        return trainer
 
     def load_trainer(self, name, data, aug_data=None):
-        """Reopen a previously created Trainer by name."""
+        """Reopen a previously created Trainer by name.
+
+        Delegates to :meth:`Trainer.load_trainer`, which reads everything out
+        of that Trainer's own directory — no Pipeline version is resolved here.
+        """
         from ._trainer import Trainer
-        path = self.trainer_path(name)
-        save_data = Trainer._read_save_data(path)
-        version = save_data.get('pipeline_version')
-        pipeline = None
-        if version is not None:
-            pipeline = self.load_pipeline(save_data.get('pipeline_name', 'pipeline'), version)
-        return Trainer.load(path, data, save_data=save_data, cache=self.cache,
-                            pipeline=pipeline, aug_data=aug_data)
+        return Trainer.load_trainer(self.trainer_path(name), data,
+                                    aug_data=aug_data, cache=self.cache)
 
     def list_experimenters(self):
-        """Names of every Experimenter registered in this project."""
-        return self.experimenters.list_names()
+        """Names of every Experimenter created through this project."""
+        return self.store.list_experimenters()
+
+    def list_trainers(self):
+        """Names of every Trainer created through this project."""
+        return self.store.list_trainers()
 
     # ------------------------------------------------------------------
     # pipeline versions

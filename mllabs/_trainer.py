@@ -1,4 +1,3 @@
-import pickle as pkl
 from pathlib import Path
 import numpy as np
 
@@ -6,6 +5,7 @@ from ._data_wrapper import wrap, unwrap, DataWrapperProvider
 from ._flow import TrainDataFlow
 from ._store import NodeStore
 from ._predictor_store import PredictorStore
+from ._trainer_store import TrainerStore, DB_NAME as _TRAINER_DB
 from ._trial import Trial
 from ._edge_dsl import parse, eval_expr, referenced_nodes
 from ._logger import resolve_logger
@@ -48,18 +48,21 @@ class TrainFold:
 class Trainer:
     """Runs cross-validation training on a subset of Pipeline nodes.
 
-    No ``Project`` dependency — like :class:`~mllabs.Experimenter`, this
-    class only sees the narrow pieces it needs (``path``, ``cache``, an
-    already-loaded ``pipeline``), each handed in explicitly.
-    ``Project.trainer()``/``load_trainer()`` is the usual caller: it
-    resolves ``(pipeline_name, pipeline_version)`` into a loaded Pipeline via
-    its own ``load_pipeline`` and supplies its own ``cache`` — but nothing
-    stops constructing this directly, standalone.
+    No ``Project`` dependency, and nothing to inject but a ``cache``: like
+    :class:`~mllabs.Experimenter`, the run owns its own store — here a
+    :class:`~mllabs._trainer_store.TrainerStore`, built from ``path`` — and
+    everything needed to reopen it lives in that directory. ``Project``
+    supplies the path and records the name in its index.
 
-    Uses ``self.pipeline`` — set via the constructor or :meth:`set_pipeline`.
-    Trains the Predictors supplied via :meth:`set_predictors` plus the
-    Pipeline nodes they depend on; the node selection is recomputed whenever
-    either is set.
+    Constructing is *creating*: it splits the data and writes fresh state, so
+    pointing it at an existing directory starts that Trainer over rather than
+    resuming it. :meth:`load_trainer` is how an existing one comes back, on
+    exactly the splits it was trained with.
+
+    Adopt a Pipeline with :meth:`set_pipeline` (never a constructor argument),
+    and pass the Predictors to :meth:`train`. There is no separate "select"
+    step: what you train is what you asked to train, and the Pipeline nodes
+    those Predictors read are pulled in with them.
 
     Two artifact stores, not one. Pipeline nodes keep the Trainer's own base
     path; Predictors get their own directory underneath it. They are the same
@@ -73,12 +76,14 @@ class Trainer:
 
     Attributes:
         name (str): Trainer name.
-        pipeline (Pipeline): The adopted Pipeline. Only the
-            ``(pipeline_name, pipeline_version)`` pointer is persisted — the
-            Pipeline itself lives once, wherever the caller keeps its versions.
-        selected_nodes (list[str]): Pipeline nodes included in training.
-        predictors (list[Predictor]): Predictors to train (set via
-            :meth:`set_predictors`).
+        pipeline (Pipeline): The adopted Pipeline, kept as this Trainer's own
+            ``pipeline.pkl``. The ``(pipeline_name, pipeline_version)``
+            pointer is persisted too, but only as provenance — it names the
+            project version this copy was taken from.
+        predictors (list[Predictor]): Everything :meth:`train` has been given,
+            read from ``predictor_defs``.
+        selected_nodes (list[str]): Pipeline nodes those Predictors read,
+            topologically ordered. Derived, not stored.
         node_store (NodeStore): Artifacts + history for Pipeline nodes.
         predictor_store (NodeStore): Artifacts + history for Predictors.
         predictor_defs (PredictorStore): The Predictor definitions themselves.
@@ -86,7 +91,7 @@ class Trainer:
     """
 
     def __init__(self, path, name, data, splitter=None, splitter_params=None,
-                 aug_data=None, cache=None, pipeline=None, pipeline_name='pipeline'):
+                 aug_data=None, cache=None):
         self.name = name
         self.data = data
         self.path = Path(path)
@@ -94,24 +99,76 @@ class Trainer:
         self.splitter = splitter
         self.splitter_params = splitter_params if splitter_params is not None else {}
         self.cache = cache
+        self._store = TrainerStore(self.path)
         self.node_store = NodeStore(self.path)
         self.predictor_path = self.path / '__predictors'
         self.predictor_store = NodeStore(self.predictor_path)
         self.predictor_defs = PredictorStore(self.predictor_path)
         self.aug_data = wrap(aug_data) if aug_data is not None else None
 
-        self.selected_nodes = []
-        self.predictors = []
         self.pipeline = None
-        self.pipeline_name = pipeline_name
+        self.pipeline_name = 'pipeline'
         self.pipeline_version = None
 
         split_indices = self._make_splits()
         self.train_folds = self._make_train_folds(split_indices)
+        self.save()
+
+    @staticmethod
+    def load_trainer(path, data, aug_data=None, cache=None):
+        """Reopen the Trainer rooted at *path*.
+
+        Everything comes out of that directory — meta and splits from its
+        ``__trainer.db``, the Pipeline from its ``pipeline.pkl``, the
+        Predictors from ``__predictors/``. The splits come back as the stored
+        indices rather than being recomputed, so the folds are exactly the
+        ones that were trained.
+
+        Args:
+            path: The Trainer's base directory.
+            data: Dataset to attach.
+            aug_data (optional): External data appended to train splits.
+            cache (DataCache, optional): Shared LRU cache.
+
+        Returns:
+            Trainer: The reopened Trainer.
+
+        Raises:
+            KeyError: If *path* holds no saved Trainer.
+        """
+        path = Path(path)
+        # Checked before building the store, which would otherwise create the
+        # directory and an empty db for a Trainer that does not exist.
+        if not (path / f'{_TRAINER_DB}.db').exists():
+            raise KeyError(f"No trainer saved at {path}")
+        store = TrainerStore(path)
+        meta = store.fetch()
+        if meta is None:
+            raise KeyError(f"No trainer saved at {path}")
+        splits = store.load_splits() or {}
+
+        trainer = object.__new__(Trainer)
+        trainer.name = meta['name']
+        trainer.data = data
+        trainer.path = path
+        trainer.splitter = splits.get('splitter')
+        trainer.splitter_params = splits.get('splitter_params') or {}
+        trainer.cache = cache
+        trainer._store = store
+        trainer.node_store = NodeStore(path)
+        trainer.predictor_path = path / '__predictors'
+        trainer.predictor_store = NodeStore(trainer.predictor_path)
+        trainer.predictor_defs = PredictorStore(trainer.predictor_path)
+        trainer.aug_data = wrap(aug_data) if aug_data is not None else None
+        trainer.pipeline = None
+        trainer.pipeline_name = meta.get('pipeline_name') or 'pipeline'
+        trainer.pipeline_version = None
+        trainer.train_folds = trainer._make_train_folds(splits.get('split_indices'))
+
+        pipeline = store.load_pipeline()
         if pipeline is not None:
-            self.set_pipeline(pipeline, pipeline_name)
-        else:
-            self.save()
+            trainer.set_pipeline(pipeline, trainer.pipeline_name)
+        return trainer
 
     # ------------------------------------------------------------------
     # split / fold setup
@@ -155,12 +212,16 @@ class Trainer:
 
         Takes the Pipeline object directly rather than a version number —
         this class has no way to load one by name/version itself (see the
-        class docstring); ``Project.trainer()``/``load_trainer()`` resolve
-        that before calling this. ``self.pipeline_version`` is read straight
-        off *pipeline* (its ``.version``), never tracked separately.
+        class docstring); ``Project.trainer()`` resolves that before calling
+        this. ``self.pipeline_version`` is read straight off *pipeline* (its
+        ``.version``), never tracked separately.
 
-        Which nodes are actually selected depends on the Predictors — call
-        :meth:`set_predictors` to supply them.
+        The Pipeline is written to this Trainer's own ``pipeline.pkl``, which
+        :meth:`load` reads back — reopening needs only this directory, never
+        a Project.
+
+        Which nodes are actually selected depends on the Predictors — pass
+        them to :meth:`train`.
 
         Diffs the two Pipelines (:meth:`Pipeline.diff_from`) and resets the
         node artifacts the change invalidated via :meth:`reset_nodes`, which
@@ -184,62 +245,50 @@ class Trainer:
                 self.reset_nodes(sorted(stale))
         self.pipeline = pipeline
         self.pipeline_version = pipeline.version
-        self._recompute_selection()
+        self._store.save_pipeline(pipeline)
         self.save()
         return pipeline
 
-    def set_predictors(self, predictors):
-        """Select the Predictors to train, plus the nodes they depend on.
+    @property
+    def predictors(self):
+        """Every Predictor this Trainer has been asked to train.
 
-        The selection is persisted (``predictor_defs``), so a reloaded
-        Trainer keeps it without this having to be called again.
-
-        Args:
-            predictors (list[Predictor]): Predictors to train. A
-                :class:`~mllabs.Trial` is rejected — promote it explicitly
-                with ``Predictor.from_trial(trial)`` so the provenance it
-                came from is recorded rather than guessed.
+        Read from ``predictor_defs`` rather than held as state: :meth:`train`
+        registers what it is given, so this is what has actually been trained
+        (or attempted) here, and it survives a reload for free.
         """
-        predictors = list(predictors)
-        for p in predictors:
-            if isinstance(p, Trial):
-                raise TypeError(
-                    f"set_predictors() got a Trial ({p.name!r}); promote it with "
-                    f"Predictor.from_trial(trial, experimenter=...) first"
-                )
-        self.predictors = predictors
-        self.predictor_defs.replace_all(self.predictors)
-        self._recompute_selection()
-        self.reset_nodes(self.selected_nodes + self.predictor_names())
-        self.save()
+        return self.predictor_defs.list_predictors()
+
+    @property
+    def selected_nodes(self):
+        """Pipeline nodes the registered Predictors read, topologically ordered."""
+        return self._nodes_for(self.predictors)
 
     def predictor_names(self):
         return [p.name for p in self.predictors]
 
     def predictor_specs(self):
-        """``{name: ProcessorSpec}`` for the selected Predictors."""
+        """``{name: ProcessorSpec}`` for the registered Predictors."""
         return {p.name: p.get_spec() for p in self.predictors}
 
-    def _recompute_selection(self):
-        """Pipeline nodes needed by the selected Predictors, topologically ordered.
+    def _nodes_for(self, predictors):
+        """Pipeline nodes *predictors* need, topologically ordered.
 
-        With no Predictors set yet, every node is selected — training the
-        whole preprocessing graph is still meaningful on its own.
+        With no Predictors at all, every node is selected — training the whole
+        preprocessing graph is still meaningful on its own.
         """
         if self.pipeline is None:
-            self.selected_nodes = []
-            return
-        if not self.predictors:
-            self.selected_nodes = list(self.pipeline.topo_order())
-            return
+            return []
+        if not predictors:
+            return list(self.pipeline.topo_order())
         needed = set()
-        for predictor in self.predictors:
+        for predictor in predictors:
             for dsl_string in predictor.edges.values():
                 for name in referenced_nodes(dsl_string):
                     if name is not None and name not in needed:
                         needed.add(name)
                         self._collect_upstream(self.pipeline, name, needed)
-        self.selected_nodes = [n for n in self.pipeline.topo_order() if n in needed]
+        return [n for n in self.pipeline.topo_order() if n in needed]
 
     def _require_pipeline(self):
         if self.pipeline is None:
@@ -332,7 +381,7 @@ class Trainer:
     # train
     # ------------------------------------------------------------------
 
-    def _make_predictor_jobs(self, spec_map):
+    def _make_predictor_jobs(self, predictors):
         """One Job per (Predictor, split) still needing training.
 
         A Trainer has a single flow per split, so the fold coordinate is
@@ -351,8 +400,8 @@ class Trainer:
 
         gpu_cache = {}
         jobs = []
-        for predictor in self.predictors:
-            spec = spec_map[predictor.name]
+        for predictor in predictors:
+            spec = predictor.get_spec()
             if predictor.name not in gpu_cache:
                 adapter = resolve_node_adapter(spec.processor, spec.adapter)
                 gpu_cache[predictor.name] = adapter.get_gpu_usage(spec.params) != GPU_NO
@@ -392,14 +441,28 @@ class Trainer:
                 jobs.append(Job(name, spec, split_idx, 0, flow, need_gpu=need_gpu))
         return jobs
 
-    def train(self, n_jobs=1, gpu_id_list=None, logger=None):
-        """Train all unbuilt selected nodes across all splits.
+    def train(self, predictors=None, n_jobs=1, gpu_id_list=None, logger=None):
+        """Train *predictors* and the Pipeline nodes they read, across all splits.
 
-        Pipeline nodes are trained first (topological order), then
-        Predictors. Node staleness is settled when a Pipeline is adopted
-        (:meth:`set_pipeline`); Predictor staleness is checked per job.
+        Nodes go first (topological order), then the Predictors. Only what is
+        not already built on disk is run, so calling this again after adding a
+        Predictor trains just that one — nothing already trained is discarded.
+        Node staleness is settled when a Pipeline is adopted
+        (:meth:`set_pipeline`), which does reset what it invalidates.
+
+        The Predictors are registered in ``predictor_defs``, which is what
+        :attr:`predictors`, :meth:`process` and :meth:`to_inferencer` read, and
+        what a reopened Trainer comes back with. Registering is an upsert: a
+        Predictor trained by an earlier call keeps its definition and its
+        artifacts.
 
         Args:
+            predictors (list[Predictor], optional): What to train. A
+                :class:`~mllabs.Trial` is rejected — promote it explicitly with
+                ``Predictor.from_trial(trial, experimenter=...)`` so where it
+                came from is recorded rather than guessed. Omit to train the
+                Pipeline nodes alone (or to resume the already-registered
+                Predictors, which are used when this is ``None``).
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
             gpu_id_list (list, optional): GPU IDs for GPU-enabled nodes.
             logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
@@ -410,11 +473,23 @@ class Trainer:
         logger = resolve_logger(logger)
         pipeline = self._require_pipeline()
         pipeline.check_data_compatibility(self.data)
-        spec_map = self.predictor_specs()
+
+        if predictors is None:
+            predictors = self.predictors
+        else:
+            predictors = list(predictors)
+            for p in predictors:
+                if isinstance(p, Trial):
+                    raise TypeError(
+                        f"train() got a Trial ({p.name!r}); promote it with "
+                        f"Predictor.from_trial(trial, experimenter=...) first"
+                    )
+            self.predictor_defs.register_all(predictors)
+
         # Node staleness is settled when a Pipeline is adopted
         # (set_pipeline); Predictor staleness is checked per job below.
-        node_jobs = self._make_node_jobs(pipeline, self.selected_nodes, gpu_id_list)
-        predictor_jobs = self._make_predictor_jobs(spec_map)
+        node_jobs = self._make_node_jobs(pipeline, self._nodes_for(predictors), gpu_id_list)
+        predictor_jobs = self._make_predictor_jobs(predictors)
 
         if not node_jobs and not predictor_jobs:
             logger.info("No nodes to train")
@@ -441,8 +516,10 @@ class Trainer:
 
             if predictor_jobs:
                 # No Collectors here (a Trainer isn't an Experimenter) — pass
-                # [] rather than the default None so the returned error keys
-                # match the (outer_idx, name) shape expected below.
+                # [] rather than the default None, which the executor reads as
+                # the node/build path and would gate these on
+                # flow.get_missing_nodes, silently dropping a Predictor whose
+                # node never built instead of recording a prep error.
                 if n_jobs > 1:
                     predictor_errors = _execute_multi(
                         predictor_jobs, n_jobs, self.predictor_store, gpu_id_list=gpu_id_list,
@@ -452,7 +529,7 @@ class Trainer:
                     predictor_errors = _execute_single(
                         predictor_jobs, self.predictor_store, gpu_id_list=gpu_id_list,
                         collectors=[], tracker=predictor_tracker)
-                error_nodes.update(n for _, n in predictor_errors)
+                error_nodes.update(n for _, _, n in predictor_errors)
         finally:
             base_tracker.close()
 
@@ -559,9 +636,7 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def save(self):
-        if self.path is None:
-            return
-        self.path.mkdir(parents=True, exist_ok=True)
+        """Persist meta and splits. Artifacts and Predictors save themselves."""
         if self.splitter is None:
             split_indices = None
         else:
@@ -570,74 +645,13 @@ class Trainer:
                  fold.train_data_flows[0].data_source.valid_idx)
                 for fold in self.train_folds
             ]
-        save_data = {
+        self._store.save({
             'name': self.name,
+            'pipeline_name': self.pipeline_name,
+            'pipeline_version': self.pipeline_version,
+        })
+        self._store.save_splits(self.name, {
             'splitter': self.splitter,
             'splitter_params': self.splitter_params,
             'split_indices': split_indices,
-            'pipeline_name': self.pipeline_name,
-            'pipeline_version': self.pipeline_version,
-        }
-        with open(self.path / '__trainer.pkl', 'wb') as f:
-            pkl.dump(save_data, f)
-
-    @staticmethod
-    def _read_save_data(path):
-        """The raw ``__trainer.pkl`` dict for the Trainer at *path*.
-
-        Split out from :meth:`load` so a caller (``Project.load_trainer``)
-        can read ``pipeline_name``/``pipeline_version`` to resolve a Pipeline
-        object *before* calling :meth:`load`, without reading the file twice.
-        """
-        with open(Path(path) / '__trainer.pkl', 'rb') as f:
-            return pkl.load(f)
-
-    @classmethod
-    def load(cls, path, data, save_data=None, cache=None, pipeline=None, aug_data=None):
-        """Reopen a saved Trainer from *path*.
-
-        Args:
-            path: This Trainer's base directory.
-            data: Dataset to attach.
-            save_data (dict, optional): Already-read ``__trainer.pkl``
-                contents — pass this if the caller already read it (e.g. to
-                resolve *pipeline*) to avoid reading the file twice. ``None``
-                reads it here via :meth:`_read_save_data`.
-            cache (DataCache, optional): Shared LRU cache.
-            pipeline (Pipeline, optional): Already-loaded Pipeline matching
-                this Trainer's saved ``(pipeline_name, pipeline_version)`` —
-                this class has no way to load one itself (see the class
-                docstring). ``None`` leaves the Trainer without a pipeline
-                (matching a Trainer that was saved before one was ever set).
-        """
-        path = Path(path)
-        if save_data is None:
-            save_data = cls._read_save_data(path)
-
-        trainer = object.__new__(cls)
-        trainer.name = save_data['name']
-        trainer.data = data
-        trainer.path = path
-        trainer.splitter = save_data['splitter']
-        trainer.splitter_params = save_data['splitter_params']
-        trainer.cache = cache
-        trainer.node_store = NodeStore(path)
-        trainer.predictor_path = path / '__predictors'
-        trainer.predictor_store = NodeStore(trainer.predictor_path)
-        trainer.predictor_defs = PredictorStore(trainer.predictor_path)
-        trainer.aug_data = wrap(aug_data) if aug_data is not None else None
-        trainer.pipeline = None
-        trainer.pipeline_name = save_data.get('pipeline_name', 'pipeline')
-        trainer.pipeline_version = None
-        trainer.selected_nodes = []
-        trainer.predictors = trainer.predictor_defs.list_predictors()
-
-        split_indices = save_data['split_indices']
-        trainer.train_folds = trainer._make_train_folds(split_indices)
-
-        if pipeline is not None:
-            # Recomputes the node selection off the restored Predictors —
-            # set_predictors() does not need calling again.
-            trainer.set_pipeline(pipeline)
-
-        return trainer
+        })

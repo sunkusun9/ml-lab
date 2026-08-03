@@ -41,8 +41,8 @@ class TestProjectLayout:
     def test_trial_store_created(self, project):
         assert (project.path / 'trials.db').exists()
 
-    def test_experimenter_store_created(self, project):
-        assert (project.path / 'experimenters.db').exists()
+    def test_project_store_created(self, project):
+        assert (project.path / 'project.db').exists()
 
     def test_paths_are_under_root(self, project):
         for p in (project.pipeline_path('a'), project.exp_path('b'),
@@ -294,10 +294,38 @@ class TestExperimenterUnderProject:
         assert e.pipeline_version == built.version
         assert e.pipeline.build_id == built.build_id
 
-    def test_pipeline_is_not_copied_into_the_run(self, project, builder, sample_data):
-        """Only the pointer is stored — the Pipeline lives once, under Project."""
+    def test_pipeline_is_kept_beside_the_run(self, project, builder, sample_data):
+        """The run owns its Pipeline copy; the version stays as provenance."""
         e = self._exp(project, builder, sample_data)
-        assert not (e.path / 'pipeline.pkl').exists()
+        assert (e.path / 'pipeline.pkl').exists()
+        assert e._store.fetch()['pipeline_version'] == e.pipeline_version
+
+    def test_reopens_without_a_project(self, project, builder, sample_data):
+        """The directory alone is enough — no Project, no version resolution,
+        and the splitters come back with it."""
+        from mllabs._experimenter import Experimenter
+        e = self._exp(project, builder, sample_data)
+        e.build()
+
+        reopened = Experimenter.load_experimenter(e.path, sample_data)
+        assert reopened.name == 'run_a'
+        assert reopened.get_n_splits() == e.get_n_splits()
+        assert reopened.pipeline is not None
+        assert reopened.pipeline_version == e.pipeline_version
+        assert reopened.pipeline.get_node_names() == e.pipeline.get_node_names()
+        assert reopened.get_status('scaler') == 'built'
+
+    def test_reload_survives_the_version_being_gone(self, project, builder, sample_data):
+        """The run reads its own copy, so it reopens even if the project's
+        stored version can no longer be loaded."""
+        e = self._exp(project, builder, sample_data)
+        e.build()
+        for f in (project.pipeline_path('main')).glob('v*.pkl'):
+            f.unlink()
+
+        loaded = project.load_experimenter('run_a', sample_data)
+        assert loaded.pipeline is not None
+        assert loaded.get_status('scaler') == 'built'
 
     def test_no_pipeline_until_a_version_is_set(self, project, sample_data):
         e = project.experimenter('bare', sample_data)
@@ -363,25 +391,39 @@ class TestExperimenterUnderProject:
         self._exp(project, builder, sample_data, name='b', version=version)
         assert project.list_experimenters() == ['a', 'b']
 
-    def test_meta_lives_in_one_project_table(self, project, builder, sample_data):
-        """Listing runs is a query, not a directory scan — and no per-run db."""
+    def test_project_indexes_names_run_holds_the_rest(self, project, builder, sample_data):
+        """ProjectStore answers 'which runs exist'; everything about a run
+        lives in the run's own store."""
         e = self._exp(project, builder, sample_data)
-        assert not (e.path / '__exp.db').exists()
-        rows = project.experimenters.list_all()
-        assert [r['name'] for r in rows] == ['run_a']
-        assert rows[0]['pipeline_version'] == e.pipeline_version
+        assert project.store.list_experimenters() == ['run_a']
+        assert (e.path / '__exp.db').exists()
+        assert e._store.fetch()['pipeline_version'] == e.pipeline_version
 
     def test_load_unknown_name_raises(self, project, sample_data):
         with pytest.raises(KeyError, match='No experimenter'):
             project.load_experimenter('nope', sample_data)
 
-    def test_unknown_meta_column_rejected(self, project):
-        with pytest.raises(ValueError, match='Unknown experimenter meta column'):
-            project.experimenters.save({'name': 'x', 'bogus': 1})
+    def test_load_unknown_name_leaves_no_directory_behind(self, project, sample_data):
+        with pytest.raises(KeyError):
+            project.load_experimenter('nope', sample_data)
+        assert not (project.path / 'exp' / 'nope' / '__exp.db').exists()
 
-    def test_remove_experimenter_row(self, project, builder, sample_data):
+    def test_unknown_meta_column_rejected(self, project, builder, sample_data):
+        e = self._exp(project, builder, sample_data)
+        with pytest.raises(ValueError, match='Unknown experimenter meta column'):
+            e._store.save({'name': 'run_a', 'bogus': 1})
+
+    def test_remove_experimenter_from_the_index(self, project, builder, sample_data):
         self._exp(project, builder, sample_data)
-        project.experimenters.remove('run_a')
+        project.store.remove_experimenter('run_a')
+        assert project.list_experimenters() == []
+
+    def test_trainers_are_indexed_too(self, project, builder, sample_data):
+        from mllabs._data_wrapper import wrap
+        version = project.build_pipeline(builder).version
+        project.trainer('t1', wrap(sample_data),
+                        pipeline_name='main', pipeline_version=version)
+        assert project.list_trainers() == ['t1']
         assert project.list_experimenters() == []
 
     def test_reload_restores_name_and_version(self, project, builder, sample_data):
@@ -490,9 +532,8 @@ class TestTrainerUnderProject:
 
         t = project.trainer('trained_chain', wrap(sample_data),
                             pipeline_name='trainer_chain', pipeline_version=version)
-        t.set_predictors([Predictor('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
-                                    params={'max_depth': 3, 'random_state': 0})])
-        t.train()
+        t.train([Predictor('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
+                           params={'max_depth': 3, 'random_state': 0})])
         assert t.get_status('s1') == 'built'
         assert t.get_status('s2') == 'built'
         assert t.get_status('dt') == 'built'
@@ -512,9 +553,8 @@ class TestTrainerUnderProject:
 
         t = project.trainer('trained_chain_multi', wrap(sample_data),
                             pipeline_name='trainer_chain_multi', pipeline_version=version)
-        t.set_predictors([Predictor('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
-                                    params={'max_depth': 3, 'random_state': 0})])
-        t.train(n_jobs=2)
+        t.train([Predictor('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
+                           params={'max_depth': 3, 'random_state': 0})], n_jobs=2)
         assert t.get_status('s1') == 'built'
         assert t.get_status('s2') == 'built'
         assert t.get_status('dt') == 'built'
@@ -540,8 +580,7 @@ class TestTrainerUnderProject:
                               params={'max_depth': 3, 'random_state': 0})
         t = project.trainer('trainer_reload', wrap(sample_data),
                             pipeline_name='trainer_reload_chain', pipeline_version=version)
-        t.set_predictors([predictor])
-        t.train()
+        t.train([predictor])
 
         loaded = project.load_trainer('trainer_reload', wrap(sample_data))
         flow = loaded.train_folds[0].train_data_flows[0]
@@ -549,8 +588,7 @@ class TestTrainerUnderProject:
         assert 's2' in flow.node_objs
 
         # The selection comes back from PredictorStore, so nothing needs
-        # re-supplying — and nothing gets reset, which set_predictors() would
-        # have done to the very artifacts this is testing.
+        # re-supplying and nothing is reset by reopening.
         assert loaded.predictor_names() == ['dt']
         assert loaded.selected_nodes == ['s1', 's2']
         assert loaded.get_status('dt') == 'built'
@@ -559,3 +597,28 @@ class TestTrainerUnderProject:
         # routes data through s1 -> s2, not just that obj.pkl happened to load.
         train_data = flow.get_train({'X': 's2:(*)', 'y': '{target}'})
         assert train_data['X'].get_shape()[0] > 0
+
+    def test_trainer_reopens_without_a_project(self, project, sample_data):
+        """Trainer.load_trainer() reads the Pipeline the Trainer itself saved
+        — the caller resolves no version."""
+        from mllabs._data_wrapper import wrap
+        from mllabs._trainer import Trainer
+
+        p = project.pipeline_builder('trainer_standalone')
+        p.set_datasource({'f1': 'numerical', 'target': 'binary'})
+        p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+                  method='transform', edges={'X': '{f1}'})
+        p.set_node('s1', grp='scale')
+        version = project.build_pipeline(p).version
+
+        t = project.trainer('t_standalone', wrap(sample_data),
+                            pipeline_name='trainer_standalone', pipeline_version=version)
+        t.train([Predictor('dt', TREE, {'X': 's1:(*)', 'y': '{target}'},
+                           params={'max_depth': 3, 'random_state': 0})])
+        assert (t.path / 'pipeline.pkl').exists()
+
+        reopened = Trainer.load_trainer(t.path, wrap(sample_data))
+        assert reopened.pipeline is not None
+        assert reopened.pipeline_version == version
+        assert reopened.selected_nodes == ['s1']
+        assert reopened.get_status('dt') == 'built'

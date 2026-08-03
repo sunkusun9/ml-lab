@@ -1,60 +1,77 @@
-"""Project-level registry of Experimenter metadata, keyed by name.
+"""One Experimenter's own persisted state, living in its own directory.
 
-One table for the whole project rather than an ``__exp.db`` per run directory:
-an Experimenter's name is its identity now, so listing or comparing runs should
-be a query, not a directory scan.
+An Experimenter owns this — it builds one from its ``path`` rather than being
+handed one, so everything needed to reopen a run is inside that directory and
+nothing has to be resolved from a Project. The project-wide question of *which*
+runs exist is a different one, answered by
+:class:`~mllabs._project_store.ProjectStore`.
 
-The columns are typed rather than the key/value JSON the per-run store used —
-that shape existed because the value set was open-ended, and it no longer is.
+Three kinds of state live here:
 
-Two things deliberately stay outside this table:
-
-- the splitters, which are not ref-serializable and remain in each run's
-  ``__splitters.pkl``
-- the Pipeline, which lives once under the Project as a version. Only the
-  ``(pipeline_name, pipeline_version)`` pointer is stored here.
+- the meta row (data_key, title, and the ``(pipeline_name, pipeline_version)``
+  pointer, which is provenance for the Pipeline copy — see below)
+- the splitters, as a pickle blob rather than columns: they are arbitrary
+  sklearn objects and not ref-serializable
+- the Pipeline, written beside the db as ``pipeline.pkl`` rather than into it,
+  via :meth:`save_pipeline`
 """
+import pickle as pkl
 import sqlite3
 from pathlib import Path
 
+from ._run_common import load_pipeline, save_pipeline
+
 _SCHEMA_SQL = """
-    CREATE TABLE IF NOT EXISTS experimenters (
+    CREATE TABLE IF NOT EXISTS experimenter (
         name             TEXT PRIMARY KEY,
         data_key         TEXT,
         title            TEXT,
         pipeline_name    TEXT,
-        pipeline_version INTEGER
+        pipeline_version INTEGER,
+        splitters        BLOB
     );
 """
 
-_COLUMNS = ('name', 'data_key', 'title',
-            'pipeline_name', 'pipeline_version')
+_COLUMNS = ('name', 'data_key', 'title', 'pipeline_name', 'pipeline_version')
+
+#: Basename of the per-run db, without the ``.db`` suffix.
+DB_NAME = '__exp'
 
 
 class ExperimenterStore:
-    """SQLite-backed registry of every Experimenter in one project."""
+    """SQLite-backed state for the single Experimenter rooted at *path*."""
 
-    def __init__(self, path, name='experimenters'):
-        self.db_path = Path(path) / f'{name}.db'
+    def __init__(self, path, name=DB_NAME):
+        self.path = Path(path)
+        self.db_path = self.path / f'{name}.db'
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.executescript(_SCHEMA_SQL)
 
     def save(self, meta):
-        """Insert or replace one Experimenter's row from a ``{column: value}`` dict."""
+        """Insert or replace the meta row from a ``{column: value}`` dict.
+
+        Leaves ``splitters`` alone — it is written by :meth:`save_splitters`,
+        and an ``INSERT OR REPLACE`` naming only the meta columns would blank
+        it out.
+        """
         unknown = set(meta) - set(_COLUMNS)
         if unknown:
             raise ValueError(f"Unknown experimenter meta column(s): {sorted(unknown)}")
         if 'name' not in meta:
             raise ValueError("experimenter meta requires 'name'")
         columns = [c for c in _COLUMNS if c in meta]
-        placeholders = ', '.join('?' for _ in columns)
+        assignments = ', '.join(f"{c} = ?" for c in columns if c != 'name')
+        values = [meta[c] for c in columns if c != 'name']
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
-                f"INSERT OR REPLACE INTO experimenters ({', '.join(columns)}) "
-                f"VALUES ({placeholders})",
-                [meta[c] for c in columns],
+                f"INSERT OR IGNORE INTO experimenter (name) VALUES (?)", (meta['name'],)
             )
+            if assignments:
+                conn.execute(
+                    f"UPDATE experimenter SET {assignments} WHERE name = ?",
+                    values + [meta['name']],
+                )
 
     def set(self, name, column, value):
         """Update a single column without touching the rest of the row."""
@@ -62,35 +79,68 @@ class ExperimenterStore:
             raise ValueError(f"Cannot set experimenter column {column!r}")
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
-                f"UPDATE experimenters SET {column} = ? WHERE name = ?", (value, name)
+                f"UPDATE experimenter SET {column} = ? WHERE name = ?", (value, name)
             )
 
-    def fetch(self, name):
-        """One Experimenter's row as a dict, or ``None``."""
+    def fetch(self, name=None):
+        """The meta row as a dict (without ``splitters``), or ``None``.
+
+        *name* is optional: there is only ever one row, so omitting it reads
+        whichever run this directory holds.
+        """
+        query = "SELECT * FROM experimenter"
+        params = ()
+        if name is not None:
+            query += " WHERE name = ?"
+            params = (name,)
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT * FROM experimenters WHERE name = ?", (name,)
-            ).fetchone()
-        return dict(row) if row else None
+            row = conn.execute(query, params).fetchone()
+        if row is None:
+            return None
+        return {k: row[k] for k in _COLUMNS}
 
-    def exists(self, name):
+    def exists(self, name=None):
         return self.fetch(name) is not None
 
-    def list_names(self):
+    def save_splitters(self, name, splitters):
+        """Store ``{'sp', 'sp_v', 'splitter_params'}`` as a pickle blob."""
         with sqlite3.connect(str(self.db_path)) as conn:
-            return [r[0] for r in conn.execute(
-                "SELECT name FROM experimenters ORDER BY name").fetchall()]
+            conn.execute("INSERT OR IGNORE INTO experimenter (name) VALUES (?)", (name,))
+            conn.execute(
+                "UPDATE experimenter SET splitters = ? WHERE name = ?",
+                (pkl.dumps(splitters), name),
+            )
 
-    def list_all(self):
+    def load_splitters(self, name=None):
+        """The stored splitters dict, or ``None`` if this run has none."""
+        query = "SELECT splitters FROM experimenter"
+        params = ()
+        if name is not None:
+            query += " WHERE name = ?"
+            params = (name,)
         with sqlite3.connect(str(self.db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            return [dict(r) for r in conn.execute(
-                "SELECT * FROM experimenters ORDER BY name").fetchall()]
+            row = conn.execute(query, params).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return pkl.loads(row[0])
 
-    def remove(self, name):
+    def save_pipeline(self, pipeline):
+        """Write the Pipeline this Experimenter adopted, beside the db."""
+        save_pipeline(self.path, pipeline)
+
+    def load_pipeline(self):
+        """The Pipeline saved beside the db, or ``None`` if there is none."""
+        return load_pipeline(self.path)
+
+    def remove(self, name=None):
+        query = "DELETE FROM experimenter"
+        params = ()
+        if name is not None:
+            query += " WHERE name = ?"
+            params = (name,)
         with sqlite3.connect(str(self.db_path)) as conn:
-            conn.execute("DELETE FROM experimenters WHERE name = ?", (name,))
+            conn.execute(query, params)
 
     def __repr__(self):
         return f"<ExperimenterStore {self.db_path}>"
