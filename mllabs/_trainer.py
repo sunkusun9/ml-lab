@@ -93,7 +93,7 @@ class Trainer:
     def __init__(self, path, name, data, splitter=None, splitter_params=None,
                  aug_data=None, cache=None):
         self.name = name
-        self.data = data
+        self.data = wrap(data)
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
         self.splitter = splitter
@@ -149,7 +149,7 @@ class Trainer:
 
         trainer = object.__new__(Trainer)
         trainer.name = meta['name']
-        trainer.data = data
+        trainer.data = wrap(data)
         trainer.path = path
         trainer.splitter = splits.get('splitter')
         trainer.splitter_params = splits.get('splitter_params') or {}

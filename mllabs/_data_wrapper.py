@@ -137,6 +137,8 @@ class DataWrapper(ABC):
         """
         if data is None:
             return None
+        if isinstance(data, DataWrapper):
+            return data
 
         # Check type and return appropriate wrapper
         type_name = type(data).__name__

@@ -180,7 +180,7 @@ class Experimenter():
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
         self._store = ExperimenterStore(self.path)
-        data_native = data
+        data_native = unwrap(data)
         self.data = wrap(data)
         self.aug_data = wrap(aug_data) if aug_data is not None else None
         self.title = title

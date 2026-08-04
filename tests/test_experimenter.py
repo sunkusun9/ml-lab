@@ -176,6 +176,17 @@ class TestExperimenterInit:
         e = Experimenter(path=tmp_path / 'dk', name='e_dk', data=sample_data, data_key='test_key')
         assert e.data_key == 'test_key'
 
+    def test_accepts_already_wrapped_data(self, tmp_path, sample_data):
+        """The mirror of Trainer's native-data case: the splitter is fed
+        ``data_native``, which has to be unwrapped whichever form came in."""
+        from mllabs._data_wrapper import wrap
+        e = Experimenter(
+            path=tmp_path / 'wrapped', name='e_wrapped', data=wrap(sample_data),
+            sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
+        )
+        assert e.get_n_splits() == 2
+        assert e.data.get_shape()[0] == len(sample_data)
+
 
 class TestBuild:
     def test_build_stage(self, exp, pipeline):

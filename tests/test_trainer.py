@@ -58,9 +58,13 @@ def sp_v():
     return KFold(n_splits=3, shuffle=True, random_state=42)
 
 
+def _trainer_path(pipeline, name):
+    return pipeline._store.db_path.parent / '__trainers' / name
+
+
 def _make_trainer(pipeline, sample_data, splitter, name='t1', path=None):
     if path is None:
-        path = pipeline._store.db_path.parent / '__trainers' / name
+        path = _trainer_path(pipeline, name)
     return Trainer(name=name, data=wrap(sample_data), path=path,
                    splitter=splitter, splitter_params={}, cache=DataCache())
 
@@ -87,6 +91,30 @@ class TestTrainerConstruction:
         trainer = _make_trainer(pipeline, sample_data, None)
         assert trainer.splitter is None
         assert trainer.get_n_splits() == 1
+
+    def test_accepts_native_data(self, pipeline, sample_data):
+        """``Project.trainer()`` passes the caller's DataFrame straight through,
+        so the constructor has to wrap it — ``Experimenter`` already does."""
+        trainer = Trainer(name='native', data=sample_data,
+                          path=_trainer_path(pipeline, 'native'),
+                          splitter=None, cache=DataCache())
+        assert trainer.get_n_splits() == 1
+        assert trainer.data.get_shape()[0] == len(sample_data)
+
+    def test_accepts_native_data_with_splitter(self, pipeline, sample_data, sp_v):
+        """The splitter path reads ``self.data.select_columns`` for
+        splitter_params, so it needs the wrapper just as much."""
+        trainer = Trainer(name='native_sp', data=sample_data,
+                          path=_trainer_path(pipeline, 'native_sp'),
+                          splitter=sp_v, splitter_params={'y': 'target'},
+                          cache=DataCache())
+        assert trainer.get_n_splits() == sp_v.get_n_splits()
+
+    def test_accepts_already_wrapped_data(self, pipeline, sample_data):
+        trainer = Trainer(name='wrapped', data=wrap(sample_data),
+                          path=_trainer_path(pipeline, 'wrapped'),
+                          splitter=None, cache=DataCache())
+        assert trainer.data.get_shape()[0] == len(sample_data)
 
     def test_two_stores_at_separate_paths(self, pipeline, sample_data, sp_v):
         """Predictors get their own NodeStore — same class, own directory, so
@@ -231,6 +259,15 @@ class TestTrain:
 
     def test_train_no_splitter(self, pipeline, sample_data):
         trainer = _make_trainer(pipeline, sample_data, None, name='t_nosplit')
+        trainer.set_pipeline(pipeline.build())
+        trainer.train(_predictors())
+        assert trainer.get_status('scaler') == 'built'
+        assert trainer.get_status('dt') == 'built'
+
+    def test_train_with_native_data(self, pipeline, sample_data):
+        trainer = Trainer(name='native_train', data=sample_data,
+                          path=_trainer_path(pipeline, 'native_train'),
+                          splitter=None, cache=DataCache())
         trainer.set_pipeline(pipeline.build())
         trainer.train(_predictors())
         assert trainer.get_status('scaler') == 'built'
@@ -483,6 +520,15 @@ class TestSaveLoad:
         with pytest.raises(KeyError, match='No trainer'):
             Trainer.load_trainer(tmp_path / 'nope', wrap(sample_data))
         assert not (tmp_path / 'nope' / '__trainer.db').exists()
+
+    def test_load_accepts_native_data(self, pipeline, sample_data):
+        trainer = Trainer(name='native_load', data=sample_data,
+                          path=_trainer_path(pipeline, 'native_load'),
+                          splitter=None, cache=DataCache())
+        trainer.set_pipeline(pipeline.build())
+        reopened = Trainer.load_trainer(trainer.path, sample_data)
+        assert reopened.get_n_splits() == 1
+        assert reopened.data.get_shape()[0] == len(sample_data)
 
     def test_save_load_roundtrip(self, pipeline, sample_data, sp_v):
         trainer, _ = self._trained(pipeline, sample_data, sp_v)

@@ -224,6 +224,7 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
 
 ### Experimenter (`_experimenter.py`)
 - **Project 의존성 없음. 주입받는 건 `cache` 하나(2026-08-03 개정)** — 생성자: `Experimenter(path, name, data, data_names=, sp=, sp_v=, splitter_params=, title=, data_key=, aug_data=, cache=)`. `experimenter_store`/`pipeline`/`pipeline_name`/`_save`는 **인자가 아님** — store는 `ExperimenterStore(self.path)`로 **자기가 만들고**, Pipeline은 `set_pipeline()`으로만 채택
+  - `data`는 native/`DataWrapper` 아무거나(2026-08-05) — `self.data = wrap(data)`, splitter에 넘기는 `data_native = unwrap(data)`
   - **생성자 = 신규 생성**. split을 다시 계산하고 상태를 새로 씀 → 기존 디렉토리에 대고 부르면 재개가 아니라 처음부터 다시 시작. 복원은 **`Experimenter.load_experimenter(path, data, data_key=None, aug_data=None, cache=None)`** staticmethod
   - `load_experimenter`는 `{path}/__exp.db`가 없으면 `KeyError` — store를 만들기 **전에** 검사한다(안 그러면 없는 run의 디렉토리와 빈 db를 만들어놓고 실패함)
   - `Project.experimenter(name, data, pipeline_name=, pipeline_version=)`가 하는 일은 경로 + `cache` + ProjectStore 이름 등록 + (버전을 줬으면) `set_pipeline` 뿐
@@ -295,6 +296,7 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
 
 ### Trainer (`_trainer.py`)
 - **Project 의존성 없음. 주입받는 건 `cache` 하나(2026-08-03 개정, Experimenter와 동형)** — 생성자: `Trainer(path, name, data, splitter=None, splitter_params=None, aug_data=None, cache=None)`. `pipeline`/`pipeline_name`은 **인자가 아님** — store(`TrainerStore(self.path)`)는 자기가 만들고, Pipeline은 `set_pipeline()`으로만
+  - **`data`는 native/`DataWrapper` 아무거나 — 생성자와 `load_trainer()` 둘 다 `wrap(data)`(2026-08-05 수정)**. 예전엔 `self.data = data`라 wrapped만 받았고, `Project.trainer(name, df)`처럼 native를 넘기면 `_make_train_folds`의 `self.data.get_shape()`에서 `AttributeError`가 났음(splitter_params가 있으면 `_make_splits`의 `select_columns`에서도). 테스트 헬퍼가 `data=wrap(...)`로 미리 감싸 넘기고 있어 안 잡혔던 것 — Experimenter는 raw를, Trainer는 wrapped를 요구하는 정반대 계약이 고정돼 있었음
   - **생성자 = 신규 생성**, 복원은 **`Trainer.load_trainer(path, data, aug_data=None, cache=None)`** staticmethod(구 `load()`). `{path}/__trainer.db`가 없으면 `KeyError`이고, Experimenter와 같은 이유로 **store를 만들기 전에** 검사
   - 복원 시 split은 **재계산이 아니라 저장된 `split_indices`를 그대로** 씀 — splitter가 아예 없는 Trainer(단일 full-data fold)도 있고, 학습된 fold와 정확히 같아야 하므로
 - 경로 `{project}/trainers/{name}`
@@ -574,6 +576,7 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
 
 ## 보조 모듈
 - **_data_wrapper.py**: DataWrapper (wrap/unwrap/squeeze/mean/mode/simple) — pandas/polars/cudf/numpy 통합
+  - **`wrap()`은 멱등(2026-08-05)** — 이미 `DataWrapper`면 그대로 반환. `unwrap()`이 native에 대해 원래 멱등이었던 것과 대칭이고, 덕분에 `Experimenter`/`Trainer`가 native든 wrapped든 받을 수 있음(아래 두 섹션 참조)
   - `PolarsWrapper.get_columns()`: `pl.DataFrame`이면 `.columns`, `pl.Series`이면 `.name` 반환
   - `select_by_dtype(kind)`: `'category'|'numeric'|'int'|'float'|'str'|'bool'`에 해당하는 컬럼명(numpy는 정수 offset) 리스트 반환 — `col.py`의 `@numeric` 등 dtype selector가 사용하는 primitive. (예전 `get_column_list(ColSelector(col_type=, pattern=))`는 제거됨 — pattern 부분은 이제 DSL의 `Pattern` 노드가 담당)
 - **_edge_dsl.py**: edges DSL 파서/평가기 — 위 "Edge DSL" 섹션 참조
