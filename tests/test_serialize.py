@@ -7,6 +7,7 @@ from sklearn.tree import DecisionTreeClassifier
 from mllabs._serialize import (
     serialize_value, deserialize_value,
     serialize_to_json, deserialize_from_json,
+    resolve_processor, resolve_adapter, resolve_ref_values,
     _obj_to_ref, _ref_to_obj,
 )
 
@@ -33,6 +34,107 @@ class TestObjRef:
     def test_ref_invalid_raises(self):
         with pytest.raises(Exception):
             _ref_to_obj("not.a.real.module.Thing")
+
+
+# ---------------------------------------------------------------------------
+# resolve_processor / resolve_adapter
+# ---------------------------------------------------------------------------
+
+class TestResolveProcessor:
+    def test_string_ref(self):
+        ref = _obj_to_ref(StandardScaler)
+        assert resolve_processor(ref) is StandardScaler
+
+    def test_class_passthrough(self):
+        assert resolve_processor(StandardScaler) is StandardScaler
+
+    def test_none_passthrough(self):
+        assert resolve_processor(None) is None
+
+
+class TestResolveAdapter:
+    def test_none_passthrough(self):
+        assert resolve_adapter(None) is None
+
+    def test_instance_passthrough(self):
+        pytest.importorskip("lightgbm")
+        from mllabs.adapter import LightGBMAdapter
+        adapter = LightGBMAdapter(eval_mode='valid')
+        assert resolve_adapter(adapter) is adapter
+
+    def test_string_ref_instantiates_with_defaults(self):
+        pytest.importorskip("lightgbm")
+        from mllabs.adapter._lightgbm import LightGBMAdapter
+        ref = _obj_to_ref(LightGBMAdapter)
+        result = resolve_adapter(ref)
+        assert type(result) is LightGBMAdapter
+        assert result.eval_mode == 'both'
+
+    def test_ref_dict_with_params(self):
+        pytest.importorskip("lightgbm")
+        from mllabs.adapter._lightgbm import LightGBMAdapter
+        ref = _obj_to_ref(LightGBMAdapter)
+        result = resolve_adapter({"__ref__": ref, "__params__": {"eval_mode": "valid", "verbose": 0.25}})
+        assert type(result) is LightGBMAdapter
+        assert result.eval_mode == 'valid'
+        assert result.verbose == pytest.approx(0.25)
+
+    def test_ref_dict_without_params(self):
+        pytest.importorskip("lightgbm")
+        from mllabs.adapter._lightgbm import LightGBMAdapter
+        ref = _obj_to_ref(LightGBMAdapter)
+        result = resolve_adapter({"__ref__": ref})
+        assert type(result) is LightGBMAdapter
+        assert result.eval_mode == 'both'
+
+
+class TestResolveRefValues:
+    def test_scalars_and_strings_untouched(self):
+        params = {'n': 50, 'metric': 'AUC', 'flag': True, 'rate': 0.1, 'none': None}
+        assert resolve_ref_values(params) == params
+
+    def test_ref_dict_instantiated(self):
+        from mllabs import ColSelector
+        params = {'cat_features': {'__ref__': 'mllabs.ColSelector',
+                                   '__params__': {'dsl_string': '*@categorical'}}}
+        out = resolve_ref_values(params)
+        assert isinstance(out['cat_features'], ColSelector)
+        assert out['cat_features'].dsl_string == '*@categorical'
+
+    def test_ref_dict_in_list(self):
+        from mllabs import ColSelector
+        out = resolve_ref_values({'sel': [{'__ref__': 'mllabs.ColSelector',
+                                           '__params__': {'dsl_string': '^cat_'}}]})
+        assert isinstance(out['sel'][0], ColSelector)
+        assert out['sel'][0].dsl_string == '^cat_'
+
+    def test_plain_dict_recursed_not_instantiated(self):
+        params = {'nested': {'a': 1, 'b': 'x'}}
+        assert resolve_ref_values(params) == params
+
+    def test_bad_params_type_raises(self):
+        with pytest.raises(ValueError, match='kwargs dict'):
+            resolve_ref_values({'sel': {'__ref__': 'mllabs.ColSelector',
+                                        '__params__': '*@categorical'}})
+
+    def test_callable_ref_not_invoked(self):
+        from sklearn.metrics import balanced_accuracy_score
+        out = resolve_ref_values(
+            {'metric_func': {'__callable__': 'sklearn.metrics.balanced_accuracy_score'}})
+        assert out['metric_func'] is balanced_accuracy_score
+
+    def test_callable_ref_to_class_not_instantiated(self):
+        out = resolve_ref_values({'cls': {'__callable__': _obj_to_ref(StandardScaler)}})
+        assert out['cls'] is StandardScaler
+
+    def test_callable_nested_in_plain_dict_and_list(self):
+        from sklearn.metrics import accuracy_score
+        out = resolve_ref_values({
+            'metrics': [{'__callable__': 'sklearn.metrics.accuracy_score'}],
+            'cfg': {'fn': {'__callable__': 'sklearn.metrics.accuracy_score'}},
+        })
+        assert out['metrics'][0] is accuracy_score
+        assert out['cfg']['fn'] is accuracy_score
 
 
 # ---------------------------------------------------------------------------

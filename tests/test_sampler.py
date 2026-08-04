@@ -6,10 +6,13 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import ShuffleSplit, KFold
 
 from mllabs.sampler import Sampler, ImbLearnSampler
-from mllabs._data_wrapper import PandasWrapper
+from mllabs._data_wrapper import PandasWrapper, wrap
 from mllabs._node_processor import TransformProcessor, PredictProcessor
+from mllabs import Project
 from mllabs._experimenter import Experimenter
-from mllabs._pipeline import Pipeline
+from mllabs._trainer import Trainer
+from mllabs._cache import DataCache
+from mllabs._pipeline import PipelineBuilder
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -30,14 +33,26 @@ def make_data(X=None, y=None):
     return d
 
 
-def make_exp(path, data, aug_data=None):
-    return Experimenter(
-        data=data,
-        path=path,
-        sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=42),
-        sp_v=KFold(n_splits=3, shuffle=True, random_state=42),
-        aug_data=aug_data,
-    )
+SPLITTERS = dict(
+    sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=42),
+    sp_v=KFold(n_splits=3, shuffle=True, random_state=42),
+)
+
+
+def make_exp(path, data, aug_data=None, name='e1'):
+    return Experimenter(path, name, data, aug_data=aug_data, **SPLITTERS)
+
+
+def make_project_exp(root, data, aug_data=None, name='e1'):
+    """An Experimenter created through a Project, so it can be reloaded.
+
+    Reloading goes through ``Project.load_experimenter`` — the Experimenter
+    itself has no ``load()``, since it holds no Project reference to resolve
+    its saved meta/pipeline pointer with.
+    """
+    project = Project(root)
+    project.experimenter(name, data, aug_data=aug_data, **SPLITTERS)
+    return project
 
 
 class MockResampler:
@@ -270,17 +285,15 @@ class TestExperimenterAugData:
         assert 'f2' in train.get_columns()
 
     def test_load_passes_aug_data(self, tmp_path, base_data, aug_df):
-        path = tmp_path / 'exp'
-        make_exp(path, base_data, aug_data=aug_df)
-        exp2 = Experimenter.load(path, data=base_data, aug_data=aug_df)
+        project = make_project_exp(tmp_path / 'proj', base_data, aug_data=aug_df)
+        exp2 = project.load_experimenter('e1', base_data, aug_data=aug_df)
         assert exp2.aug_data is not None
         n = exp2.outer_folds[0].train_data_flows[0].data_source.get_train().get_shape()[0]
         assert n > 0
 
     def test_load_without_aug_data(self, tmp_path, base_data):
-        path = tmp_path / 'exp'
-        make_exp(path, base_data)
-        exp2 = Experimenter.load(path, data=base_data)
+        project = make_project_exp(tmp_path / 'proj', base_data)
+        exp2 = project.load_experimenter('e1', base_data)
         assert exp2.aug_data is None
 
 
@@ -288,51 +301,54 @@ class TestExperimenterAugData:
 
 class TestTrainerAugData:
     @pytest.fixture
-    def exp(self, tmp_path, base_data):
-        p = Pipeline(path=tmp_path / 'pipeline')
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
+    def pipeline(self, tmp_path):
+        p = PipelineBuilder(path=tmp_path / 'pipeline')
+        p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'target': 'binary'})
+        p.set_grp('model', processor='sklearn.tree.DecisionTreeClassifier',
                   method='predict',
-                  edges={'X': [(None, ['f1', 'f2'])], 'y': [(None, 'target')]},
+                  edges={'X': '{f1, f2}', 'y': '{target}'},
                   params={'max_depth': 3, 'random_state': 42})
         p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=base_data,
-                             sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=42),
-                             sp_v=KFold(n_splits=3, shuffle=True, random_state=42))
-        return e
+        return p
 
-    def test_add_trainer_stores_aug_data(self, tmp_path, exp, base_data, aug_df):
-        trainer = exp.pipeline.add_trainer('t1', data=base_data, path=tmp_path / 'tr_t1', aug_data=aug_df)
+    def _make_trainer(self, pipeline, name, data, path, splitter=None, aug_data=None):
+        return Trainer(name=name, data=wrap(data), path=path,
+                       splitter=splitter, splitter_params={}, cache=DataCache(),
+                       aug_data=aug_data)
+
+    def test_add_trainer_stores_aug_data(self, tmp_path, pipeline, base_data, aug_df):
+        trainer = self._make_trainer(pipeline, 't1', base_data, tmp_path / 'tr_t1', aug_data=aug_df)
         assert trainer.aug_data is not None
 
-    def test_add_trainer_no_aug_data(self, tmp_path, exp, base_data):
-        trainer = exp.pipeline.add_trainer('t1', data=base_data, path=tmp_path / 'tr_t1')
+    def test_add_trainer_no_aug_data(self, tmp_path, pipeline, base_data):
+        trainer = self._make_trainer(pipeline, 't1', base_data, tmp_path / 'tr_t1')
         assert trainer.aug_data is None
 
-    def test_trainer_inner_train_size_increased(self, tmp_path, exp, base_data, aug_df):
-        trainer_with = exp.pipeline.add_trainer('t_with', data=base_data, path=tmp_path / 'tr_with', aug_data=aug_df)
-        trainer_without = exp.pipeline.add_trainer('t_without', data=base_data, path=tmp_path / 'tr_without')
+    def test_trainer_inner_train_size_increased(self, tmp_path, pipeline, base_data, aug_df):
+        trainer_with = self._make_trainer(pipeline, 't_with', base_data, tmp_path / 'tr_with', aug_data=aug_df)
+        trainer_without = self._make_trainer(pipeline, 't_without', base_data, tmp_path / 'tr_without')
         n_with = trainer_with.train_folds[0].train_data_flows[0].data_source.get_train().get_shape()[0]
         n_without = trainer_without.train_folds[0].train_data_flows[0].data_source.get_train().get_shape()[0]
         assert n_with == n_without + len(aug_df)
 
-    def test_trainer_valid_unchanged(self, tmp_path, exp, base_data, aug_df):
-        trainer_with = exp.pipeline.add_trainer('t_with', data=base_data, path=tmp_path / 'tr_with', aug_data=aug_df)
-        trainer_without = exp.pipeline.add_trainer('t_without', data=base_data, path=tmp_path / 'tr_without')
+    def test_trainer_valid_unchanged(self, tmp_path, pipeline, base_data, aug_df):
+        trainer_with = self._make_trainer(pipeline, 't_with', base_data, tmp_path / 'tr_with', aug_data=aug_df)
+        trainer_without = self._make_trainer(pipeline, 't_without', base_data, tmp_path / 'tr_without')
         for fold_with, fold_without in zip(trainer_with.train_folds, trainer_without.train_folds):
             v_with = fold_with.train_data_flows[0].data_source.get_valid()
             v_without = fold_without.train_data_flows[0].data_source.get_valid()
             if v_with is not None and v_without is not None:
                 assert v_with.get_shape()[0] == v_without.get_shape()[0]
 
-    def test_trainer_no_split_aug_data(self, tmp_path, exp, base_data, aug_df):
-        trainer_with = exp.pipeline.add_trainer('t_with', data=base_data, path=tmp_path / 'tr_with', splitter=None, aug_data=aug_df)
-        trainer_without = exp.pipeline.add_trainer('t_without', data=base_data, path=tmp_path / 'tr_without', splitter=None)
+    def test_trainer_no_split_aug_data(self, tmp_path, pipeline, base_data, aug_df):
+        trainer_with = self._make_trainer(pipeline, 't_with', base_data, tmp_path / 'tr_with', splitter=None, aug_data=aug_df)
+        trainer_without = self._make_trainer(pipeline, 't_without', base_data, tmp_path / 'tr_without', splitter=None)
         n_with = trainer_with.train_folds[0].train_data_flows[0].data_source.get_train().get_shape()[0]
         n_without = trainer_without.train_folds[0].train_data_flows[0].data_source.get_train().get_shape()[0]
         assert n_with == n_without + len(aug_df)
 
-    def test_trainer_column_filter_applied_to_aug(self, tmp_path, exp, base_data, aug_df):
-        trainer = exp.pipeline.add_trainer('t1', data=base_data, path=tmp_path / 'tr_t1', aug_data=aug_df)
+    def test_trainer_column_filter_applied_to_aug(self, tmp_path, pipeline, base_data, aug_df):
+        trainer = self._make_trainer(pipeline, 't1', base_data, tmp_path / 'tr_t1', aug_data=aug_df)
         train = trainer.train_folds[0].train_data_flows[0].data_source.get_train()
         selected = train.select_columns(['f1', 'f2'])
         assert selected.get_columns() == ['f1', 'f2']

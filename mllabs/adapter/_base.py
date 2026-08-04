@@ -4,9 +4,22 @@ Base adapter class for ML model frameworks
 
 from abc import ABC, abstractmethod
 
+import pandas as pd
+
 GPU_NO = 'no'
 GPU_POSSIBLE = 'possible'
 GPU_YES = 'yes'
+
+
+def stack_evals_result(evals_result):
+    if not evals_result:
+        return pd.Series(dtype='float64')
+    return pd.concat(
+        [pd.DataFrame({metric: pd.Series(curve) for metric, curve in split.items()})
+         .stack().rename(name)
+         for name, split in evals_result.items()],
+        axis=1,
+    ).stack().dropna()
 
 
 class ModelAdapter(ABC):

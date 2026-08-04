@@ -4,8 +4,13 @@ from ._logger import BaseLogger, DefaultLogger, ProgressSessionLogger, BaseProgr
 from ._experimenter import Experimenter
 from ._inferencer import Inferencer
 from ._connector import Connector
-from ._pipeline import ColSelector
-from .collector import Collector, MetricCollector, ProbToLabel, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector, ProcessCollector
+from ._pipeline import ColSelector, Pipeline, PipelineBuilder, ProcessorSpec
+from ._trial import Trial, make_trials
+from ._trial_store import TrialStore
+from ._predictor import Predictor
+from ._predictor_store import PredictorStore
+from ._project import Project
+from .collector import Collector, Collectors, CollectHist, CollectorEntity, CollectorStore, MetricCollector, ProbToLabel, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector, ProcessCollector
 from .filter import DataFilter, RandomFilter, IndexFilter
 
 __all__ = [
@@ -13,6 +18,10 @@ __all__ = [
     'Inferencer',
     'Connector',
     'Collector',
+    'Collectors',
+    'CollectHist',
+    'CollectorEntity',
+    'CollectorStore',
     'MetricCollector',
     'ProbToLabel',
     'StackingCollector',
@@ -24,6 +33,15 @@ __all__ = [
     'RandomFilter',
     'IndexFilter',
     'ColSelector',
+    'Pipeline',
+    'PipelineBuilder',
+    'ProcessorSpec',
+    'Trial',
+    'make_trials',
+    'TrialStore',
+    'Predictor',
+    'PredictorStore',
+    'Project',
     'BaseLogger',
     'DefaultLogger',
     'ProgressSessionLogger',

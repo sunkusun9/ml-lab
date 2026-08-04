@@ -10,52 +10,45 @@ class Connector:
     Args:
         node_query: Node name filter. A ``str`` is treated as a regex pattern;
             a ``list`` requires exact membership.
-        edges: Edge filter. ``{key: [(node_name, var_spec), ...]}`` — the node's
-            edges must contain all listed entries (contain-based matching).
-        processor: Processor class filter. The node's resolved processor must
-            be exactly this class.
+        edges: Edge filter. ``{key: dsl_string}`` — for each key, the node's
+            resolved ``edges[key]`` must equal this DSL string exactly.
+        processor: Processor filter as a ``"module.ClassName"`` string — not
+            a class. Compared directly (string equality) against the node's
+            stored ``processor`` value, which Pipeline also keeps unresolved
+            (whatever form ``set_grp``/``set_node`` was given). Use the same
+            string form there for the match to line up.
     """
 
-    def __init__(self, node_query=None, edges=None, processor=None, role=None):
+    def __init__(self, node_query=None, edges=None, processor=None):
         self.node_query = node_query
         self.edges = edges
         self.processor = processor
-        self.role = role
 
-    def match(self, node_attrs):
+    def match(self, spec):
         """Return True if the node satisfies all configured criteria.
 
         Args:
-            node_attrs (dict): Resolved node attributes from
-                ``Pipeline.get_node_attrs()``.
+            spec (ProcessorSpec): The node's resolved spec — from
+                ``Pipeline.get_node_spec()`` or ``Trial.get_spec()``.
 
         Returns:
             bool: True if all criteria match.
         """
-        node_name = node_attrs['name']
         if self.node_query is not None:
             if isinstance(self.node_query, str):
-                if not re.search(self.node_query, node_name):
+                if not re.search(self.node_query, spec.name):
                     return False
             elif isinstance(self.node_query, list):
-                if node_name not in self.node_query:
+                if spec.name not in self.node_query:
                     return False
 
         if self.processor is not None:
-            if node_attrs.get('processor') != self.processor:
-                return False
-
-        if self.role is not None:
-            if node_attrs.get('role') != self.role:
+            if spec.processor != self.processor:
                 return False
 
         if self.edges is not None:
-            node_edges = node_attrs.get('edges', {})
-            for key, required_edges in self.edges.items():
-                if key not in node_edges:
+            for key, required in self.edges.items():
+                if spec.edges.get(key) != required:
                     return False
-                for edge in required_edges:
-                    if edge not in node_edges[key]:
-                        return False
 
         return True

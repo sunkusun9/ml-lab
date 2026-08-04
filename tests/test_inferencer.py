@@ -4,11 +4,28 @@ import pandas as pd
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.model_selection import ShuffleSplit, KFold
+from sklearn.model_selection import KFold
 
-from mllabs._pipeline import Pipeline
+from mllabs._pipeline import PipelineBuilder
+from mllabs._trainer import Trainer
 from mllabs._inferencer import Inferencer
-from mllabs._data_wrapper import unwrap
+from mllabs import Predictor
+from mllabs._cache import DataCache
+from mllabs._data_wrapper import unwrap, wrap
+
+
+DT = 'sklearn.tree.DecisionTreeClassifier'
+DT_EDGES = {'X': 'scaler:(*)', 'y': '{target}'}
+
+
+def _make_trainer(pipeline, name, data, path, splitter=None):
+    return Trainer(name=name, data=wrap(data), path=path,
+                   splitter=splitter, splitter_params={}, cache=DataCache())
+
+
+def _dt(name='dt', method='predict'):
+    return Predictor(name, DT, DT_EDGES, method=method,
+                     params={'max_depth': 3, 'random_state': 42})
 
 
 @pytest.fixture
@@ -24,30 +41,22 @@ def sample_data():
 
 
 @pytest.fixture
-def exp(tmp_path, sample_data):
-    p = Pipeline(path=tmp_path / 'pipeline')
-    p.set_grp('scale', role='stage', processor=StandardScaler,
-              method='transform', edges={'X': [(None, ['f1', 'f2', 'f3'])]})
+def pipeline(tmp_path):
+    """Nodes only — the predicting end is a Predictor, outside the Pipeline."""
+    p = PipelineBuilder(path=tmp_path / 'pipeline')
+    p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
+    p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+              method='transform', edges={'X': '{f1, f2, f3}'})
     p.set_node('scaler', grp='scale')
-    p.set_grp('model', role='head', processor=DecisionTreeClassifier,
-              method='predict',
-              edges={'X': [('scaler', None)], 'y': [(None, 'target')]},
-              params={'max_depth': 3, 'random_state': 42})
-    p.set_node('dt', grp='model')
-    e = p.add_experiment('main', data=sample_data,
-                         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
-                         sp_v=KFold(n_splits=3, shuffle=True, random_state=42))
-    e.build()
-    e.exp()
-    return e
+    return p
 
 
 @pytest.fixture
-def trained_trainer(tmp_path, exp, sample_data):
-    trainer = exp.pipeline.add_trainer('t1', data=sample_data, path=tmp_path / 'trainer_t1',
-                                       splitter=KFold(n_splits=2, shuffle=True, random_state=0))
-    trainer.select_head(['dt'])
-    trainer.train()
+def trained_trainer(tmp_path, pipeline, sample_data):
+    trainer = _make_trainer(pipeline, 't1', sample_data, tmp_path / 'trainer_t1',
+                            splitter=KFold(n_splits=2, shuffle=True, random_state=0))
+    trainer.set_pipeline(pipeline.build())
+    trainer.train([_dt()])
     return trainer
 
 
@@ -56,8 +65,8 @@ class TestToInferencer:
         inf = trained_trainer.to_inferencer()
         assert isinstance(inf, Inferencer)
         assert inf.n_splits == trained_trainer.get_n_splits()
-        assert inf.selected_stages == trained_trainer.selected_stages
-        assert inf.selected_heads == trained_trainer.selected_heads
+        assert inf.selected_nodes == trained_trainer.selected_nodes
+        assert inf.selected_predictors == trained_trainer.predictor_names()
 
     def test_node_objs_are_processor_lists(self, trained_trainer):
         inf = trained_trainer.to_inferencer()
@@ -66,21 +75,26 @@ class TestToInferencer:
             assert len(objs) == inf.n_splits
             assert hasattr(objs[0], 'process')
 
-    def test_minimal_pipeline(self, trained_trainer):
+    def test_carries_specs_not_a_pipeline(self, trained_trainer):
+        """Only ``edges`` is needed at serve time, so an Inferencer holds
+        ProcessorSpecs for both kinds rather than a whole Pipeline."""
         inf = trained_trainer.to_inferencer()
-        assert 'scaler' in inf.pipeline.nodes
-        assert 'dt' in inf.pipeline.nodes
+        assert set(inf.node_specs) == {'scaler', 'dt'}
+        assert inf.node_specs['dt'].edges == DT_EDGES
+        assert not hasattr(inf, 'pipeline')
 
-    def test_not_trained_raises(self, tmp_path, exp, sample_data):
-        trainer = exp.pipeline.add_trainer('t_no_train', data=sample_data,
-                                           path=tmp_path / 'trainer_t_no_train')
-        trainer.select_head(['dt'])
+    def test_not_trained_raises(self, tmp_path, pipeline, sample_data):
+        trainer = _make_trainer(pipeline, 't_no_train', sample_data, tmp_path / 'trainer_t_no_train')
+        trainer.set_pipeline(pipeline.build())
+        # Registered but never trained — train() is the only path that does
+        # both, so the definition goes in directly.
+        trainer.predictor_defs.register_all([_dt()])
         with pytest.raises(RuntimeError, match="not built"):
             trainer.to_inferencer()
 
     def test_v_stored(self, trained_trainer):
-        inf = trained_trainer.to_inferencer(v=[0])
-        assert inf.v == [0]
+        inf = trained_trainer.to_inferencer(v='0')
+        assert inf.v == '0'
 
 
 class TestProcess:
@@ -105,28 +119,19 @@ class TestProcess:
         assert isinstance(results, list)
         assert len(results) == inf.n_splits
 
-    def test_v_parameter(self, tmp_path, exp, sample_data):
-        exp.pipeline.set_grp('model_proba', role='head', processor=DecisionTreeClassifier,
-                    method='predict_proba',
-                    edges={'X': [('scaler', None)], 'y': [(None, 'target')]},
-                    params={'max_depth': 3, 'random_state': 42})
-        exp.pipeline.set_node('dt_proba', grp='model_proba')
-        exp.build()
-        exp.exp()
-        trainer = exp.pipeline.add_trainer('t_proba', data=sample_data,
-                                           path=tmp_path / 'trainer_t_proba')
-        trainer.select_head(['dt_proba'])
-        trainer.train()
-        inf = trainer.to_inferencer(v=slice(-1, None))
+    def test_v_parameter(self, tmp_path, pipeline, sample_data):
+        trainer = _make_trainer(pipeline, 't_proba', sample_data, tmp_path / 'trainer_t_proba')
+        trainer.set_pipeline(pipeline.build())
+        trainer.train([_dt('dt_proba', method='predict_proba')])
+        inf = trainer.to_inferencer(v='-1:')
         result = inf.process(sample_data)
         assert result.shape[1] == 1
 
-    def test_single_split(self, tmp_path, exp, sample_data):
-        trainer = exp.pipeline.add_trainer('t_nosplit', data=sample_data,
-                                           path=tmp_path / 'trainer_nosplit',
-                                           splitter=None)
-        trainer.select_head(['dt'])
-        trainer.train()
+    def test_single_split(self, tmp_path, pipeline, sample_data):
+        trainer = _make_trainer(pipeline, 't_nosplit', sample_data,
+                                tmp_path / 'trainer_nosplit', splitter=None)
+        trainer.set_pipeline(pipeline.build())
+        trainer.train([_dt()])
         inf = trainer.to_inferencer()
         result = inf.process(sample_data)
         assert result.shape[0] == len(sample_data)
@@ -145,8 +150,8 @@ class TestSaveLoad:
 
         loaded = Inferencer.load(save_path)
         assert loaded.n_splits == inf.n_splits
-        assert loaded.selected_stages == inf.selected_stages
-        assert loaded.selected_heads == inf.selected_heads
+        assert loaded.selected_nodes == inf.selected_nodes
+        assert loaded.selected_predictors == inf.selected_predictors
         assert set(loaded.node_objs.keys()) == set(inf.node_objs.keys())
 
     def test_loaded_process_matches(self, trained_trainer, sample_data, tmp_path):
@@ -168,10 +173,10 @@ class TestSaveLoad:
         inf.save(save_path)
         assert (save_path / '__inferencer.pkl').exists()
 
-    def test_save_load_with_v(self, trained_trainer, sample_data, tmp_path):
-        inf = trained_trainer.to_inferencer(v=[0])
+    def test_save_load_with_v(self, trained_trainer, tmp_path):
+        inf = trained_trainer.to_inferencer(v='0')
         save_path = tmp_path / 'inferencer_v'
         inf.save(save_path)
 
         loaded = Inferencer.load(save_path)
-        assert loaded.v == [0]
+        assert loaded.v == '0'

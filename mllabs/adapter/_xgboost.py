@@ -3,7 +3,7 @@ XGBoost adapter
 """
 
 import pandas as pd
-from ._base import ModelAdapter, GPU_NO, GPU_YES
+from ._base import ModelAdapter, GPU_NO, GPU_YES, stack_evals_result
 
 from xgboost.callback import TrainingCallback
 
@@ -108,9 +108,7 @@ class XGBoostAdapter(ModelAdapter):
     def _get_evals_result(processor):
         obj = processor.obj
         evals_result = obj.evals_result() if hasattr(obj, 'evals_result') else {}
-        return pd.concat(
-            [pd.DataFrame(v).stack().rename(k) for k, v in evals_result.items()], axis=1
-        ).stack()
+        return stack_evals_result(evals_result)
 
     def _get_trees(processor):
         obj = processor.obj

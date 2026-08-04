@@ -60,12 +60,8 @@ class ModelAttrCollector(Collector):
             return False
         return (self.path / f'{node}.pkl').exists()
 
-    def has(self, node):
-        return self.has_node(node)
-
     def reset_nodes(self, nodes):
-        node_set = set(nodes)
-        self._buf = {k: v for k, v in self._buf.items() if k not in node_set}
+        super().reset_nodes(nodes)
         for node in nodes:
             self._cache.pop(node, None)
             if self.path is not None:
@@ -76,7 +72,7 @@ class ModelAttrCollector(Collector):
     def _get_saved_nodes(self):
         if self.path is None:
             return list(self._cache.keys())
-        return [f.stem for f in self.path.glob('*.pkl') if f.name != '__config.pkl']
+        return [f.stem for f in self.path.glob('*.pkl')]
 
     def _get_nodes(self, nodes, available):
         if nodes is None:

@@ -1,5 +1,7 @@
 import pandas as pd
 
+from ._edge_dsl import referenced_nodes, iter_segments, unparse
+
 def desc_spec(exp):
     """실험 스펙을 Markdown으로 반환"""
     lines = []
@@ -91,9 +93,9 @@ def desc_pipeline(pipeline, max_depth=None, direction='TD'):
         # current_node를 edge로 가지는 child 노드들 찾기
         for name in pipeline.nodes.keys():
             if name is not None:
-                node_attrs = pipeline.get_node_attrs(name)
-                for key, edge_list in node_attrs['edges'].items():
-                    for edge_name, _ in edge_list:
+                spec = pipeline.get_node_spec(name)
+                for dsl_string in spec.edges.values():
+                    for edge_name in referenced_nodes(dsl_string):
                         if (current_node == 'DataSource' and edge_name is None) or (edge_name == current_node):
                             # child 노드 발견
                             if name not in node_priorities:
@@ -240,9 +242,9 @@ def desc_pipeline(pipeline, max_depth=None, direction='TD'):
         # 각 노드의 edges 확인
         for node_name in nodes:
             if node_name in pipeline.nodes:
-                node_attrs = pipeline.get_node_attrs(node_name)
-                for key, edge_list in node_attrs['edges'].items():
-                    for edge_name, edge_var in edge_list:
+                spec = pipeline.get_node_spec(node_name)
+                for dsl_string in spec.edges.values():
+                    for edge_name in referenced_nodes(dsl_string):
                         if edge_name is None:
                             # DataSource 연결
                             incoming.add(('datasource', 'DataSource'))
@@ -316,12 +318,12 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
             for name in pipeline.nodes.keys():
                 if name is not None and name not in visited:
                     found = False
-                    node_attrs = pipeline.get_node_attrs(name)
-                    edges = node_attrs['edges']
-                    for key, edge_list in edges.items():
+                    spec = pipeline.get_node_spec(name)
+                    edges = spec.edges
+                    for dsl_string in edges.values():
                         if found:
                             break
-                        for edge_name, _ in edge_list:
+                        for edge_name in referenced_nodes(dsl_string):
                             if (current == 'DataSource' and edge_name is None) or (edge_name == current):
                                 new_path = path + [name]
                                 new_visited = visited | {name}
@@ -370,23 +372,23 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
     # 각 노드를 subgraph로 생성
     for name in sorted(all_nodes):
         if name in pipeline.nodes:
-            node_attrs = pipeline.get_node_attrs(name)
-            edges = node_attrs['edges']
+            spec = pipeline.get_node_spec(name)
+            edges = spec.edges
             display_name = get_grp_path(name)
             lines.append(f"    subgraph node_{name}[\"{display_name}\"]")
 
             if show_params:
                 # 파라미터 정보 포맷팅
-                processor_name = node_attrs['processor'].__name__ if node_attrs['processor'] else 'None'
-                method = node_attrs['method']
+                processor_name = spec.processor if spec.processor else 'None'
+                method = spec.method
 
                 info_parts = ["<table>"]
                 info_parts.append(f"<tr><td align='left'><b>processor</b></td><td align='left'>{processor_name}</td></tr>")
                 info_parts.append(f"<tr><td align='left'><b>method</b></td><td align='left'>{method}</td></tr>")
 
                 # params 정보
-                if node_attrs['params']:
-                    for key, value in node_attrs['params'].items():
+                if spec.params:
+                    for key, value in spec.params.items():
                         value_str = str(value)
                         if len(value_str) > 40:
                             value_str = value_str[:37] + '...'
@@ -413,10 +415,10 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
     edges_dict = {}
     for name in all_nodes:
         if name in pipeline.nodes:
-            node_attrs = pipeline.get_node_attrs(name)
-            edges = node_attrs['edges']
-            for key, edge_list in edges.items():
-                for edge_name, _ in edge_list:
+            spec = pipeline.get_node_spec(name)
+            edges = spec.edges
+            for key, dsl_string in edges.items():
+                for edge_name in referenced_nodes(dsl_string):
                     if edge_name is None:
                         source = "DataSource"
                     else:
@@ -444,98 +446,97 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
     lines.append(f"**Path from DataSource to '{target_display}' ({len(paths)} path(s) found)**")
 
     # Edge 정보 테이블 추가
-    node_attrs = pipeline.get_node_attrs(node_name)
-    edges = node_attrs['edges']
+    spec = pipeline.get_node_spec(node_name)
+    edges = spec.edges
     lines.append("")
     lines.append("### Edges")
     lines.append("")
     lines.append("| Key | Node | Var |")
     lines.append("|-----|------|-----|")
     for key in sorted(edges.keys()):
-        edge_list = edges[key]
-        for edge_name, var_spec in edge_list:
-            if edge_name is None:
-                node_display = "Data Source"
-            else:
-                if edge_name:
-                    node_display = get_grp_path(edge_name)
-                else:
-                    node_display = edge_name
-            var_display = "*" if var_spec is None else f"`{var_spec}`"
-            lines.append(f"| {key} | {node_display} | {var_display} |")
+        for edge_name, expr in iter_segments(edges[key]):
+            node_display = "Data Source" if edge_name is None else get_grp_path(edge_name)
+            lines.append(f"| {key} | {node_display} | `{unparse(expr)}` |")
 
     return "\n".join(lines)
 
-def desc_status(exp):
-    stage_nodes = []
-    head_nodes = []
-    for name in exp.pipeline.nodes.keys():
-        if name is None:
-            continue
-        node = exp.pipeline.get_node(name)
-        grp = exp.pipeline.get_grp(node.grp)
-        if grp.role == 'stage':
-            stage_nodes.append(name)
-        elif grp.role == 'head':
-            head_nodes.append(name)
+def compare_nodes(pipeline, nodes):
+    """Compare params and X-edges across nodes that share the same processor.
 
-    def _get_status(name):
-        if name not in exp.node_objs:
-            return 'init'
-        return exp.node_objs[name].status
+    Nodes are grouped by processor class. Within each group, only columns
+    that differ between nodes are included.
 
-    def _status_summary(nodes):
-        counts = {}
-        for name in nodes:
-            s = _get_status(name)
-            counts[s] = counts.get(s, 0) + 1
-        return counts
+    Args:
+        pipeline (Pipeline): Pipeline defining the node graph.
+        nodes (list[str]): Node names to compare.
 
-    lines = []
+    Returns:
+        dict[str, pd.DataFrame]: ``{processor_name: DataFrame}`` where the
+        DataFrame index is node names and columns are a MultiIndex of
+        ``('params', param_key)`` and ``('X', stage_label)``.
+    """
+    spec_map = {n: pipeline.get_node_spec(n) for n in nodes}
 
-    # Experiment status
-    exp_status = getattr(exp, 'status', 'open')
-    lines.append(f"**Experiment**: {exp_status}")
-    lines.append("")
+    groups = {}
+    for name in nodes:
+        proc = spec_map[name].processor
+        proc_name = proc if proc is not None else 'None'
+        groups.setdefault(proc_name, []).append(name)
 
-    # Stage Nodes
-    stage_counts = _status_summary(stage_nodes)
-    lines.append(f"**Stage Nodes** ({len(stage_nodes)})")
-    lines.append("")
-    if stage_nodes:
-        parts = [f"{s}: {c}" for s, c in sorted(stage_counts.items())]
-        lines.append(f"| {' | '.join(stage_counts.keys())} |")
-        lines.append(f"| {' | '.join(['---'] * len(stage_counts))} |")
-        lines.append(f"| {' | '.join(str(c) for c in stage_counts.values())} |")
-    lines.append("")
+    result = {}
+    for proc_name, group_nodes in groups.items():
+        rows = {name: {} for name in group_nodes}
 
-    # Head Nodes
-    head_counts = _status_summary(head_nodes)
-    lines.append(f"**Head Nodes** ({len(head_nodes)})")
-    lines.append("")
-    if head_nodes:
-        lines.append(f"| {' | '.join(head_counts.keys())} |")
-        lines.append(f"| {' | '.join(['---'] * len(head_counts))} |")
-        lines.append(f"| {' | '.join(str(c) for c in head_counts.values())} |")
-    lines.append("")
+        # params
+        all_param_keys = sorted({k for n in group_nodes for k in spec_map[n].params})
+        for name in group_nodes:
+            params = spec_map[name].params
+            for k in all_param_keys:
+                rows[name][('params', k)] = params.get(k, None)
 
-    # Error details
-    error_nodes = []
-    for name in stage_nodes + head_nodes:
-        if name in exp.node_objs and exp.node_objs[name].status == 'error':
-            error_nodes.append(name)
+        # edges (X only) - stage node별 변수 비교
+        source_vars = {}
+        for name in group_nodes:
+            x_entries = spec_map[name].edges.get('X')
+            if x_entries is None:
+                continue
+            for sn, expr in iter_segments(x_entries):
+                source_vars.setdefault(sn, {}).setdefault(name, []).append(unparse(expr))
 
-    if error_nodes:
-        lines.append(f"**Errors** ({len(error_nodes)})")
-        lines.append("")
-        for name in error_nodes:
-            err = exp.node_objs[name].error
-            node = exp.pipeline.get_node(name)
-            grp = exp.pipeline.get_grp(node.grp)
-            lines.append(f"### {name} ({grp.role})")
-            lines.append(f"- **fold**: {err['fold']}")
-            lines.append(f"- **{err['type']}**: {err['message']}")
-            lines.append(f"```\n{err['traceback']}```")
-            lines.append("")
+        for sn, node_vars in source_vars.items():
+            sn_str = str(sn) if sn is not None else 'DataSource'
+            for name in group_nodes:
+                if name not in node_vars:
+                    node_vars[name] = []
 
-    return "\n".join(lines)
+            repr_map = {}
+            var_sets = {}
+            for name in group_nodes:
+                s = set()
+                for v in node_vars[name]:
+                    r = repr(v)
+                    s.add(r)
+                    repr_map[r] = v
+                var_sets[name] = s
+
+            if len({frozenset(s) for s in var_sets.values()}) <= 1:
+                continue
+
+            non_empty = [s for s in var_sets.values() if s]
+            common_reprs = set.intersection(*non_empty) if non_empty else set()
+            common_vars = sorted([repr_map[r] for r in common_reprs], key=repr)
+            col_2 = f"{sn_str} [{', '.join(str(v) for v in common_vars)}]" if common_vars else sn_str
+
+            for name in group_nodes:
+                diff_reprs = var_sets[name] - common_reprs
+                diff_vars = sorted([repr_map[r] for r in diff_reprs], key=repr)
+                rows[name][('X', col_2)] = diff_vars if diff_vars else []
+
+        df = pd.DataFrame.from_dict(rows, orient='index')
+        if len(df.columns) > 0:
+            df.columns = pd.MultiIndex.from_tuples(df.columns)
+            diff_cols = [c for c in df.columns if len({repr(v) for v in df[c]}) > 1]
+            df = df[diff_cols]
+        result[proc_name] = df
+
+    return result

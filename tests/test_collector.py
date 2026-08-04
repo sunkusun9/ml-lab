@@ -1,22 +1,21 @@
 import pytest
 import numpy as np
 import pandas as pd
-from pathlib import Path
+from collections import namedtuple
 
-from sklearn.preprocessing import StandardScaler
-from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import ShuffleSplit, KFold
 
-from mllabs._pipeline import Pipeline
-from mllabs._experimenter import Experimenter
-from mllabs import Connector, MetricCollector, StackingCollector, ModelAttrCollector, OutputCollector, ProcessCollector
+from mllabs import (
+    Project, Trial, Connector, ProcessorSpec,
+    MetricCollector, StackingCollector, ModelAttrCollector, OutputCollector,
+    ProcessCollector, ProbToLabel,
+)
 
+TREE = 'sklearn.tree.DecisionTreeClassifier'
+EDGES = {'X': 'scaler:(*)', 'y': '{target}'}
 
-class FailPredictor:
-    __name__ = 'FailPredictor'
-    def __init__(self, **kwargs): pass
-    def fit(self, X, y=None): raise RuntimeError("fail")
-    def predict(self, X): pass
+Built = namedtuple('Built', ['project', 'e', 'trial'])
+MultiBuilt = namedtuple('MultiBuilt', ['project', 'e', 'trial1', 'trial2'])
 
 
 def accuracy_metric(y, pred):
@@ -39,109 +38,143 @@ def sample_data():
     })
 
 
+def _pipeline_version(project, name):
+    """A single-stage Pipeline (StandardScaler) — the model itself is a Trial,
+    not a pipeline node, since Pipeline is stage-only under the current
+    Project/Trial split."""
+    p = project.pipeline_builder(name)
+    p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
+    p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+              method='transform', edges={'X': '{f1, f2, f3}'})
+    p.set_node('scaler', grp='scale')
+    return project.build_pipeline(p).version
+
+
+def _all_folds(trial, e):
+    """(trial, outer_idx, inner_idx) for every fold of *e* — what Experimenter.exp expects."""
+    return [(trial, o, i) for o in range(e.get_n_splits()) for i in range(e.get_n_splits_inner())]
+
+
+def _run(built, *trials, collectors=None, collect_hist=None, n_jobs=1):
+    """Runs every fold of the given trials (default: the fixture's own) with *collectors*.
+
+    Collection happens during exp() dispatch only — a fold already recorded
+    'built' in TrialStore.experiment_hist is skipped without dispatch, so a
+    Collector attached to an already-exp()'d Trial never sees it. Fixtures
+    below therefore only build() the Stage graph; each test runs its own
+    Trial(s) through exp() together with whatever Collector it's testing.
+    """
+    trials = trials or (built.trial,)
+    folds = [f for t in trials for f in _all_folds(t, built.e)]
+    built.e.exp(folds, built.project.trials, collectors=collectors,
+                collect_hist=collect_hist, n_jobs=n_jobs)
+
+
 @pytest.fixture
 def built_exp(tmp_path, sample_data):
-    p = Pipeline(path=tmp_path / 'pipeline_built')
-    p.set_grp('scale', role='stage', processor=StandardScaler,
-              method='transform', edges={'X': [(None, ['f1', 'f2', 'f3'])]})
-    p.set_node('scaler', grp='scale')
-    p.set_grp('model', role='head', processor=DecisionTreeClassifier,
-              method='predict',
-              edges={'X': [('scaler', None)], 'y': [(None, 'target')]},
-              params={'max_depth': 3, 'random_state': 42})
-    p.set_node('dt', grp='model')
-    e = p.add_experiment('main', data=sample_data,
-                         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
+    """Stage built; Trial 'dt' defined but not yet exp()'d."""
+    project = Project(tmp_path / 'proj_built')
+    version = _pipeline_version(project, 'pipeline_built')
+    e = project.experimenter('exp_built', sample_data,
+                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
+                             pipeline_name='pipeline_built', pipeline_version=version)
     e.build()
-    e.exp()
-    return e
+    trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 42})
+    return Built(project=project, e=e, trial=trial)
 
 
 @pytest.fixture
 def built_exp_inner(tmp_path, sample_data):
-    p = Pipeline(path=tmp_path / 'pipeline_inner')
-    p.set_grp('model', role='head', processor=DecisionTreeClassifier,
-              method='predict',
-              edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
-              params={'max_depth': 3, 'random_state': 42})
-    p.set_node('dt', grp='model')
-    e = p.add_experiment('main', data=sample_data,
-                         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
-                         sp_v=KFold(n_splits=3, shuffle=True, random_state=42))
+    """Same as built_exp, plus an inner CV split (KFold, 3 folds)."""
+    project = Project(tmp_path / 'proj_inner')
+    version = _pipeline_version(project, 'pipeline_inner')
+    e = project.experimenter('exp_inner', sample_data,
+                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
+                             sp_v=KFold(n_splits=3, shuffle=True, random_state=42),
+                             pipeline_name='pipeline_inner', pipeline_version=version)
     e.build()
-    e.exp()
-    return e
+    trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 42})
+    return Built(project=project, e=e, trial=trial)
 
 
 @pytest.fixture
 def multi_head_exp(tmp_path, sample_data):
-    p = Pipeline(path=tmp_path / 'pipeline_multi')
-    p.set_grp('model', role='head', processor=DecisionTreeClassifier,
-              method='predict',
-              edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
-              params={'max_depth': 3, 'random_state': 42})
-    p.set_node('dt1', grp='model')
-    p.set_node('dt2', grp='model', params={'max_depth': 5})
-    e = p.add_experiment('main', data=sample_data,
-                         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
+    """Two Trials ('dt1', 'dt2') reading the same stage, neither exp()'d yet."""
+    project = Project(tmp_path / 'proj_multi')
+    version = _pipeline_version(project, 'pipeline_multi')
+    e = project.experimenter('exp_multi', sample_data,
+                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
+                             pipeline_name='pipeline_multi', pipeline_version=version)
     e.build()
-    e.exp()
-    return e
+    trial1 = Trial('dt1', TREE, EDGES, params={'max_depth': 3, 'random_state': 42})
+    trial2 = Trial('dt2', TREE, EDGES, params={'max_depth': 5, 'random_state': 42})
+    return MultiBuilt(project=project, e=e, trial1=trial1, trial2=trial2)
 
 
 class TestConnector:
+    """Connector matches against a ProcessorSpec now, not a plain attrs dict."""
+
+    @staticmethod
+    def _spec(name, processor=None, edges=None):
+        return ProcessorSpec(name=name, processor=processor, edges=edges or {})
+
     def test_match_all(self):
         c = Connector()
-        assert c.match({'name': 'any_node'}) is True
+        assert c.match(self._spec('any_node')) is True
 
     def test_match_node_query_str(self):
         c = Connector(node_query='dt')
-        assert c.match({'name': 'dt1'}) is True
-        assert c.match({'name': 'scaler'}) is False
+        assert c.match(self._spec('dt1')) is True
+        assert c.match(self._spec('scaler')) is False
 
     def test_match_node_query_regex(self):
         c = Connector(node_query='^dt')
-        assert c.match({'name': 'dt1'}) is True
-        assert c.match({'name': 'my_dt'}) is False
+        assert c.match(self._spec('dt1')) is True
+        assert c.match(self._spec('my_dt')) is False
 
     def test_match_node_query_list(self):
         c = Connector(node_query=['dt1', 'dt2'])
-        assert c.match({'name': 'dt1'}) is True
-        assert c.match({'name': 'dt3'}) is False
+        assert c.match(self._spec('dt1')) is True
+        assert c.match(self._spec('dt3')) is False
 
     def test_match_processor(self):
-        c = Connector(processor=DecisionTreeClassifier)
-        assert c.match({'name': 'dt', 'processor': DecisionTreeClassifier}) is True
-        assert c.match({'name': 'dt', 'processor': StandardScaler}) is False
+        # Connector.processor is a "module.ClassName" string, compared
+        # directly (string equality) against spec.processor, which
+        # PipelineBuilder/Trial also always store as that same string form.
+        c = Connector(processor='sklearn.tree.DecisionTreeClassifier')
+        assert c.match(self._spec('dt', 'sklearn.tree.DecisionTreeClassifier')) is True
+        assert c.match(self._spec('dt', 'sklearn.preprocessing.StandardScaler')) is False
 
     def test_match_edges(self):
-        edges_req = {'X': [(None, ['f1'])]}
-        c = Connector(edges=edges_req)
-        node_attrs = {'name': 'dt', 'edges': {'X': [(None, ['f1']), ('s', None)], 'y': [(None, 'target')]}}
-        assert c.match(node_attrs) is True
+        c = Connector(edges={'X': '{f1}'})
+        assert c.match(self._spec('dt', edges={'X': '{f1}', 'y': '{target}'})) is True
+
+    def test_match_edges_different_value(self):
+        c = Connector(edges={'X': '{f1}'})
+        assert c.match(self._spec('dt', edges={'X': '{f1, f2}'})) is False
 
     def test_match_edges_missing_key(self):
-        c = Connector(edges={'z': [(None, None)]})
-        assert c.match({'name': 'dt', 'edges': {'X': [(None, None)]}}) is False
+        c = Connector(edges={'z': '{f1}'})
+        assert c.match(self._spec('dt', edges={'X': '{f1}'})) is False
 
     def test_match_combined(self):
-        c = Connector(node_query='dt', processor=DecisionTreeClassifier)
-        assert c.match({'name': 'dt1', 'processor': DecisionTreeClassifier}) is True
-        assert c.match({'name': 'dt1', 'processor': StandardScaler}) is False
-        assert c.match({'name': 'scaler', 'processor': DecisionTreeClassifier}) is False
+        c = Connector(node_query='dt', processor='sklearn.tree.DecisionTreeClassifier')
+        assert c.match(self._spec('dt1', 'sklearn.tree.DecisionTreeClassifier')) is True
+        assert c.match(self._spec('dt1', 'sklearn.preprocessing.StandardScaler')) is False
+        assert c.match(self._spec('scaler', 'sklearn.tree.DecisionTreeClassifier')) is False
 
 
 class TestMetricCollector:
     def test_collect_basic(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
-        assert mc.has('dt')
+        mc = built_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=[mc])
+        assert mc.has_node('dt')
 
     def test_get_metric(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        mc = built_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=[mc])
         result = mc.get_metric('dt')
         assert isinstance(result, pd.Series)
         assert result.name == 'dt'
@@ -149,359 +182,396 @@ class TestMetricCollector:
         assert all(0 <= v <= 1 for v in result.values)
 
     def test_get_metrics(self, multi_head_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        multi_head_exp.add_collector(mc)
+        mc = multi_head_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[mc])
         result = mc.get_metrics()
         assert isinstance(result, pd.DataFrame)
         assert 'dt1' in result.index.get_level_values(0)
         assert 'dt2' in result.index.get_level_values(0)
 
     def test_get_metrics_with_node_filter(self, multi_head_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        multi_head_exp.add_collector(mc)
+        mc = multi_head_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[mc])
         result = mc.get_metrics(nodes=['dt1'])
         assert 'dt1' in result.index.get_level_values(0)
         assert 'dt2' not in result.index.get_level_values(0)
 
     def test_get_metrics_regex(self, multi_head_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        multi_head_exp.add_collector(mc)
+        mc = multi_head_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[mc])
         result = mc.get_metrics(nodes='dt1')
         assert len(result) > 0
 
     def test_get_metrics_agg(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        mc = built_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=[mc])
         mean, std = mc.get_metrics_agg()
         assert isinstance(mean, pd.DataFrame)
         assert std is None
 
     def test_get_metrics_agg_with_std(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        mc = built_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=[mc])
         mean, std = mc.get_metrics_agg(include_std=True)
         assert isinstance(mean, pd.DataFrame)
         assert isinstance(std, pd.DataFrame)
 
     def test_get_metrics_agg_inner_only(self, built_exp_inner):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp_inner.add_collector(mc)
+        mc = built_exp_inner.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp_inner, collectors=[mc])
         mean, std = mc.get_metrics_agg(inner_fold=True, outer_fold=False)
         assert isinstance(mean, pd.DataFrame)
 
     def test_get_metrics_agg_no_fold(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        mc = built_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=[mc])
         result = mc.get_metrics_agg(inner_fold=False, outer_fold=False)
         assert isinstance(result, pd.DataFrame)
 
     def test_get_metrics_agg_invalid(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        mc = built_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=[mc])
         with pytest.raises(ValueError):
             mc.get_metrics_agg(inner_fold=False, outer_fold=True)
 
     def test_include_train(self, built_exp):
-        mc = MetricCollector('acc_train', Connector(), output_var=None,
-                             metric_func=accuracy_metric, include_train=True)
-        built_exp.add_collector(mc)
+        mc = built_exp.project.collectors().set_collector(
+            'acc_train', MetricCollector, Connector(),
+            params={'output_var': None, 'metric_func': accuracy_metric, 'include_train': True})
+        _run(built_exp, collectors=[mc])
         result = mc.get_metric('dt')
         assert 'train' in result.index.get_level_values(-1)
 
     def test_inner_split_metrics(self, built_exp_inner):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp_inner.add_collector(mc)
+        mc = built_exp_inner.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp_inner, collectors=[mc])
         result = mc.get_metric('dt')
         assert len(result) > 2
 
     def test_connector_filter(self, multi_head_exp):
-        mc = MetricCollector('acc', Connector(node_query=['dt1']),
-                             output_var=None, metric_func=accuracy_metric)
-        multi_head_exp.add_collector(mc)
-        assert mc.has('dt1')
-        assert not mc.has('dt2')
+        mc = multi_head_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(node_query=['dt1']),
+            params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[mc])
+        assert mc.has_node('dt1')
+        assert not mc.has_node('dt2')
 
     def test_reset_nodes(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
-        assert mc.has('dt')
+        mc = built_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=[mc])
+        assert mc.has_node('dt')
         mc.reset_nodes(['dt'])
-        assert not mc.has('dt')
+        assert not mc.has_node('dt')
 
     def test_save_load(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
-        loaded = MetricCollector.load(mc.path)
-        assert loaded.has('dt')
+        mc = built_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=[mc])
+        loaded = built_exp.project.collectors().get_collector('acc')
+        assert loaded.has_node('dt')
         result_orig = mc.get_metric('dt')
         result_loaded = loaded.get_metric('dt')
         pd.testing.assert_series_equal(result_orig, result_loaded)
 
-    def test_ad_hoc_collect(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
-        mc2 = MetricCollector('acc2', Connector(), output_var=None,
-                              metric_func=dummy_metric)
-        built_exp.add_collector(mc2)
-        assert mc2.has('dt')
+    def test_second_collector_runs_on_rerun(self, built_exp):
+        """A Collector attached after a Trial is already 'built' does not see
+        it retroactively — collection only happens during exp() dispatch, and
+        ``_make_jobs`` skips a fold purely on ``TrialStore.experiment_hist``
+        status, not on-disk state. So ``Experimenter.reset_nodes`` (which only
+        touches NodeStore/cache) is not enough to force a rerun by itself —
+        the hist row also has to go; ``_make_jobs`` then resets the NodeStore
+        entry itself once it decides a job is needed."""
+        collectors = built_exp.project.collectors()
+        mc = collectors.set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=[mc])
+        assert mc.has_node('dt')
+
+        mc2 = collectors.set_collector(
+            'acc2', MetricCollector, Connector(), params={'output_var': None, 'metric_func': dummy_metric})
+        built_exp.project.trials.remove_hist(trial_name='dt', experimenter=built_exp.e.name)
+        _run(built_exp, collectors=[mc2])
+        assert mc2.has_node('dt')
         result = mc2.get_metric('dt')
         assert all(v == 0.5 for v in result.values)
 
 
+class TestProbToLabel:
+    """var is a DSL string (e.g. '{target}'), resolved via Experimenter.get_test_data —
+    same lazy-resolution path as MetricCollector.output_var."""
+
+    def test_on_attach_sets_classes(self, built_exp):
+        ptl = ProbToLabel(dummy_metric, '{target}')
+        ptl.on_attach(built_exp.e)
+        assert list(ptl._classes) == [0, 1]
+
+    def test_convert_binary_argmax(self, built_exp):
+        ptl = ProbToLabel(dummy_metric, '{target}')
+        ptl.on_attach(built_exp.e)
+        y_prob = np.array([[0.9, 0.1], [0.2, 0.8]])
+        assert list(ptl._convert(y_prob)) == [0, 1]
+
+    def test_call_uses_metric_func(self, built_exp):
+        calls = {}
+
+        def capture_metric(y_true, y_pred):
+            calls['y_true'] = y_true
+            calls['y_pred'] = y_pred
+            return 0.75
+
+        ptl = ProbToLabel(capture_metric, '{target}')
+        ptl.on_attach(built_exp.e)
+        y_true = np.array([0, 1])
+        y_prob = np.array([[0.9, 0.1], [0.2, 0.8]])
+        assert ptl(y_true, y_prob) == 0.75
+        assert list(calls['y_pred']) == [0, 1]
+
+
 class TestStackingCollector:
     def test_collect_basic(self, built_exp):
-        sc = StackingCollector('stk', Connector(), output_var=None)
-        built_exp.add_collector(sc)
+        sc = built_exp.project.collectors().set_collector('stk', StackingCollector, Connector(), params={'output_var': None})
+        _run(built_exp, collectors=[sc])
         assert sc.has_node('dt')
 
     def test_get_dataset(self, built_exp):
-        sc = StackingCollector('stk', Connector(
-            edges={'y': [(None, 'target')]}
-        ), output_var=None)
-        built_exp.add_collector(sc)
-        ds = sc.get_dataset()
+        sc = built_exp.project.collectors().set_collector(
+            'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
+        _run(built_exp, collectors=[sc])
+        ds = sc.get_dataset(built_exp.e)
         assert isinstance(ds, pd.DataFrame)
-        assert len(ds) == int(len(built_exp.data.data) * 0.2) * 2 # ShuffleSplit, n_splits = 2, test_size = 0.2
+        assert len(ds) == int(len(built_exp.e.data.data) * 0.2) * 2  # ShuffleSplit, n_splits = 2, test_size = 0.2
         assert 'target' in ds.columns
 
     def test_get_dataset_no_target(self, built_exp):
-        sc = StackingCollector('stk', Connector(), output_var=None)
-        built_exp.add_collector(sc)
-        ds = sc.get_dataset(include_target=False)
+        sc = built_exp.project.collectors().set_collector('stk', StackingCollector, Connector(), params={'output_var': None})
+        _run(built_exp, collectors=[sc])
+        ds = sc.get_dataset(built_exp.e, include_target=False)
         assert isinstance(ds, pd.DataFrame)
         assert 'target' not in ds.columns
 
     def test_get_dataset_multi_nodes(self, multi_head_exp):
-        sc = StackingCollector('stk', Connector(
-            edges={'y': [(None, 'target')]}
-        ), output_var=None)
-        multi_head_exp.add_collector(sc)
-        ds = sc.get_dataset()
+        sc = multi_head_exp.project.collectors().set_collector(
+            'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[sc])
+        ds = sc.get_dataset(multi_head_exp.e)
         assert ds.shape[1] > 2
 
     def test_get_dataset_node_filter(self, multi_head_exp):
-        sc = StackingCollector('stk', Connector(
-            edges={'y': [(None, 'target')]}
-        ), output_var=None)
-        multi_head_exp.add_collector(sc)
-        ds = sc.get_dataset(nodes=['dt1'])
+        sc = multi_head_exp.project.collectors().set_collector(
+            'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[sc])
+        ds = sc.get_dataset(multi_head_exp.e, nodes=['dt1'])
         assert isinstance(ds, pd.DataFrame)
 
     def test_method_mean(self, built_exp_inner):
-        sc = StackingCollector('stk_mean', Connector(
-            edges={'y': [(None, 'target')]}
-        ), output_var=None, method='mean')
-        built_exp_inner.add_collector(sc)
+        sc = built_exp_inner.project.collectors().set_collector(
+            'stk_mean', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None, 'method': 'mean'})
+        _run(built_exp_inner, collectors=[sc])
         assert sc.has_node('dt')
 
     def test_reset_nodes(self, built_exp):
-        sc = StackingCollector('stk', Connector(), output_var=None)
-        built_exp.add_collector(sc)
+        sc = built_exp.project.collectors().set_collector('stk', StackingCollector, Connector(), params={'output_var': None})
+        _run(built_exp, collectors=[sc])
         assert sc.has_node('dt')
         sc.reset_nodes(['dt'])
         assert not sc.has_node('dt')
 
     def test_save_load(self, built_exp):
-        sc = StackingCollector('stk', Connector(
-            edges={'y': [(None, 'target')]}
-        ), output_var=None)
-        built_exp.add_collector(sc)
-        loaded = StackingCollector.load(sc.path)
+        sc = built_exp.project.collectors().set_collector(
+            'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
+        _run(built_exp, collectors=[sc])
+        loaded = built_exp.project.collectors().get_collector('stk')
         assert loaded.has_node('dt')
-        ds_orig = sc.get_dataset()
-        ds_loaded = loaded.get_dataset()
+        ds_orig = sc.get_dataset(built_exp.e)
+        ds_loaded = loaded.get_dataset(built_exp.e)
         pd.testing.assert_frame_equal(ds_orig, ds_loaded)
 
     def test_index_preserved(self, built_exp):
-        sc = StackingCollector('stk', Connector(
-            edges={'y': [(None, 'target')]}
-        ), output_var=None)
-        built_exp.add_collector(sc)
-        ds = sc.get_dataset()
+        sc = built_exp.project.collectors().set_collector(
+            'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
+        _run(built_exp, collectors=[sc])
+        ds = sc.get_dataset(built_exp.e)
         all_valid_idx = np.concatenate([
-            built_exp.outer_folds[i].test_idx
-            for i in range(built_exp.get_n_splits())
+            built_exp.e.outer_folds[i].test_idx
+            for i in range(built_exp.e.get_n_splits())
         ])
-        expected_index = built_exp.data.data.index[all_valid_idx]
+        expected_index = built_exp.e.data.data.index[all_valid_idx]
         pd.testing.assert_index_equal(ds.index, expected_index)
 
 
 class TestModelAttrCollector:
     def test_collect_basic(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
-                                result_key='feature_importances',
-                                adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
-        assert mac.has('dt')
+        mac = built_exp.project.collectors().set_collector(
+            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
+            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        _run(built_exp, collectors=[mac])
+        assert mac.has_node('dt')
 
     def test_get_attr(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
-                                result_key='feature_importances',
-                                adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        mac = built_exp.project.collectors().set_collector(
+            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
+            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        _run(built_exp, collectors=[mac])
         result = mac.get_attr('dt')
         assert isinstance(result, list)
         assert len(result) == 2
 
     def test_get_attr_idx(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
-                                result_key='feature_importances',
-                                adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        mac = built_exp.project.collectors().set_collector(
+            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
+            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        _run(built_exp, collectors=[mac])
         result = mac.get_attr('dt', idx=0)
         assert isinstance(result, list)
 
     def test_get_attrs(self, multi_head_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
-                                result_key='feature_importances',
-                                adapter=DecisionTreeAdapter())
-        multi_head_exp.add_collector(mac)
+        mac = multi_head_exp.project.collectors().set_collector(
+            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
+            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[mac])
         result = mac.get_attrs()
         assert 'dt1' in result
         assert 'dt2' in result
 
     def test_get_attrs_agg(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
-                                result_key='feature_importances',
-                                adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        mac = built_exp.project.collectors().set_collector(
+            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
+            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        _run(built_exp, collectors=[mac])
         result = mac.get_attrs_agg('dt')
         assert isinstance(result, pd.Series)
 
     def test_get_attrs_agg_inner_only(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
-                                result_key='feature_importances',
-                                adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        mac = built_exp.project.collectors().set_collector(
+            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
+            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        _run(built_exp, collectors=[mac])
         result = mac.get_attrs_agg('dt', agg_inner=True, agg_outer=False)
         assert isinstance(result, pd.DataFrame)
 
     def test_get_attrs_agg_invalid(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
-                                result_key='feature_importances',
-                                adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        mac = built_exp.project.collectors().set_collector(
+            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
+            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        _run(built_exp, collectors=[mac])
         with pytest.raises(ValueError):
             mac.get_attrs_agg('dt', agg_inner=False, agg_outer=True)
 
     def test_not_mergeable(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = ModelAttrCollector('tree', Connector(processor=DecisionTreeClassifier),
-                                result_key='tree',
-                                adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        mac = built_exp.project.collectors().set_collector(
+            'tree', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
+            params={'result_key': 'tree', 'adapter': DecisionTreeAdapter()})
+        _run(built_exp, collectors=[mac])
         with pytest.raises(ValueError, match='not mergeable'):
             mac.get_attrs_agg('dt')
 
     def test_reset_nodes(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
-                                result_key='feature_importances',
-                                adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
+        mac = built_exp.project.collectors().set_collector(
+            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
+            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        _run(built_exp, collectors=[mac])
         mac.reset_nodes(['dt'])
-        assert not mac.has('dt')
+        assert not mac.has_node('dt')
 
     def test_save_load(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
-                                result_key='feature_importances',
-                                adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mac)
-        loaded = ModelAttrCollector.load(mac.path)
-        assert loaded.has('dt')
+        mac = built_exp.project.collectors().set_collector(
+            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
+            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        _run(built_exp, collectors=[mac])
+        loaded = built_exp.project.collectors().get_collector('fi')
+        assert loaded.has_node('dt')
 
     def test_auto_adapter(self):
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
+        mac = ModelAttrCollector('fi', Connector(processor='sklearn.tree.DecisionTreeClassifier'),
                                 result_key='feature_importances')
         assert mac.adapter is not None
 
     def test_auto_adapter_invalid_key(self):
         with pytest.raises(RuntimeError):
-            ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
+            ModelAttrCollector('fi', Connector(processor='sklearn.tree.DecisionTreeClassifier'),
                                result_key='nonexistent_key')
 
 
 class TestOutputCollector:
     def test_collect_basic(self, built_exp):
-        oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        oc = built_exp.project.collectors().set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        _run(built_exp, collectors=[oc])
         assert oc.has_node('dt')
 
     def test_get_output(self, built_exp):
-        oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        oc = built_exp.project.collectors().set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        _run(built_exp, collectors=[oc])
         result = oc.get_output('dt', 0, 0)
-        print(result)
         assert 'output_test' in result
         assert 'output_train' in result
         assert 'columns' in result
 
     def test_get_output_structure(self, built_exp):
-        oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        oc = built_exp.project.collectors().set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        _run(built_exp, collectors=[oc])
         result = oc.get_output('dt', 0, 0)
         assert isinstance(result['output_test'], np.ndarray)
         assert result['output_train'] is None or isinstance(result['output_train'], np.ndarray)
         assert result['output_valid'] is None or isinstance(result['output_valid'], np.ndarray)
 
     def test_get_outputs(self, built_exp):
-        oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        oc = built_exp.project.collectors().set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        _run(built_exp, collectors=[oc])
         results = oc.get_outputs('dt')
         assert isinstance(results, dict)
-        assert len(results) == built_exp.get_n_splits() * built_exp.get_n_splits_inner()
+        assert len(results) == built_exp.e.get_n_splits() * built_exp.e.get_n_splits_inner()
         for key in results:
             assert isinstance(key, tuple)
             assert len(key) == 2
 
     def test_get_outputs_inner_split(self, built_exp_inner):
-        oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp_inner.add_collector(oc)
+        oc = built_exp_inner.project.collectors().set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        _run(built_exp_inner, collectors=[oc])
         results = oc.get_outputs('dt')
-        n_expected = built_exp_inner.get_n_splits() * built_exp_inner.get_n_splits_inner()
+        n_expected = built_exp_inner.e.get_n_splits() * built_exp_inner.e.get_n_splits_inner()
         assert len(results) == n_expected
 
     def test_get_output_not_found(self, built_exp):
-        oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        oc = built_exp.project.collectors().set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        _run(built_exp, collectors=[oc])
         assert oc.get_output('dt', 99, 99) is None
 
     def test_get_outputs_node_not_found(self, built_exp):
-        oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        oc = built_exp.project.collectors().set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        _run(built_exp, collectors=[oc])
         assert oc.get_outputs('nonexistent') == {}
 
     def test_reset_nodes(self, built_exp):
-        oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
+        oc = built_exp.project.collectors().set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        _run(built_exp, collectors=[oc])
         assert oc.has_node('dt')
         oc.reset_nodes(['dt'])
         assert not oc.has_node('dt')
 
     def test_save_load(self, built_exp):
-        oc = OutputCollector('out', Connector(), output_var=None)
-        built_exp.add_collector(oc)
-        loaded = OutputCollector.load(oc.path)
+        oc = built_exp.project.collectors().set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        _run(built_exp, collectors=[oc])
+        loaded = built_exp.project.collectors().get_collector('out')
         assert loaded.has_node('dt')
         result_orig = oc.get_output('dt', 0, 0)
         result_loaded = loaded.get_output('dt', 0, 0)
@@ -509,8 +579,8 @@ class TestOutputCollector:
                                       result_loaded['output_valid'])
 
     def test_saved_nodes(self, multi_head_exp):
-        oc = OutputCollector('out', Connector(), output_var=None)
-        multi_head_exp.add_collector(oc)
+        oc = multi_head_exp.project.collectors().set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[oc])
         saved = oc._get_saved_nodes()
         assert 'dt1' in saved
         assert 'dt2' in saved
@@ -518,50 +588,60 @@ class TestOutputCollector:
 
 class TestCollectorWithExperimenter:
     def test_collect_skip_existing(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
+        """A fold already recorded 'built' is skipped by exp() without
+        dispatch, so a second exp() call with the same collector leaves its
+        result unchanged — this is exp()'s own skip logic, not a separate
+        exist='skip' collect() call (which no longer exists)."""
+        mc = built_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=[mc])
         metric_before = mc.get_metric('dt').copy()
-        built_exp.collect(mc, exist='skip')
+        _run(built_exp, collectors=[mc])
         metric_after = mc.get_metric('dt')
         pd.testing.assert_series_equal(metric_before, metric_after)
 
-    def test_experimenter_save_load_with_collectors(self, built_exp, sample_data):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
-        path = built_exp.path
+    def test_collectors_reload_from_the_store(self, built_exp):
+        """Collector state lives in the project's Collectors registry, not the
+        Experimenter. Registration writes through, so there is nothing to save."""
+        collectors = built_exp.project.collectors()
+        mc = collectors.set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=[mc])
 
-        loaded = Experimenter.load(path, sample_data)
-        assert loaded.get_collector('acc') is not None
-        loaded_mc = loaded.get_collector('acc')
-        assert loaded_mc.has('dt')
+        reloaded = built_exp.project.collectors()
+        loaded_mc = reloaded.get_collector('acc')
+        assert loaded_mc is not None
+        assert loaded_mc.has_node('dt')
         result_orig = mc.get_metric('dt')
         result_loaded = loaded_mc.get_metric('dt')
         pd.testing.assert_series_equal(result_orig, result_loaded)
 
-    def test_reset_nodes_clears_collectors(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        built_exp.add_collector(mc)
-        assert mc.has('dt')
-        built_exp.reset_nodes(['dt'])
-        assert not mc.has('dt')
+    def test_experimenter_reset_nodes_does_not_clear_collectors(self, built_exp):
+        """Collectors are no longer owned by Experimenter — they live in the
+        project's separate Collectors registry — so Experimenter.reset_nodes
+        (NodeStore + cache only) has no way to cascade into one. Clearing a
+        Collector's own state is a separate, explicit reset_nodes call on it."""
+        mc = built_exp.project.collectors().set_collector(
+            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=[mc])
+        assert mc.has_node('dt')
+        built_exp.e.reset_nodes(['dt'])
+        assert mc.has_node('dt')
+        mc.reset_nodes(['dt'])
+        assert not mc.has_node('dt')
 
     def test_multiple_collectors(self, built_exp):
         from mllabs.adapter import DecisionTreeAdapter
-        mc = MetricCollector('acc', Connector(), output_var=None,
-                             metric_func=accuracy_metric)
-        oc = OutputCollector('out', Connector(), output_var=None)
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
-                                result_key='feature_importances',
-                                adapter=DecisionTreeAdapter())
-        built_exp.add_collector(mc)
-        built_exp.add_collector(oc)
-        built_exp.add_collector(mac)
-        assert mc.has('dt')
+        collectors = built_exp.project.collectors()
+        mc = collectors.set_collector('acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        oc = collectors.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        mac = collectors.set_collector(
+            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
+            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+        _run(built_exp, collectors=[mc, oc, mac])
+        assert mc.has_node('dt')
         assert oc.has_node('dt')
-        assert mac.has('dt')
+        assert mac.has_node('dt')
 
 
 class TestSHAPCollector:
@@ -569,10 +649,11 @@ class TestSHAPCollector:
     def skip_if_no_shap(self):
         pytest.importorskip('shap')
 
-    def _make_sc(self, exp):
+    def _make_sc(self, built):
         from mllabs import SHAPCollector
-        sc = SHAPCollector('shap', Connector(processor=DecisionTreeClassifier))
-        exp.add_collector(sc)
+        sc = built.project.collectors().set_collector(
+            'shap', SHAPCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'))
+        _run(built, collectors=[sc])
         return sc
 
     def test_collect_basic(self, built_exp):
@@ -632,8 +713,7 @@ class TestSHAPCollector:
 
     def test_save_load(self, built_exp):
         sc = self._make_sc(built_exp)
-        from mllabs import SHAPCollector
-        loaded = SHAPCollector.load(sc.path)
+        loaded = built_exp.project.collectors().get_collector('shap')
         assert loaded.has_node('dt')
         orig = sc.get_feature_importance_agg('dt')
         loaded_result = loaded.get_feature_importance_agg('dt')
@@ -668,45 +748,140 @@ class TestBaseCollector:
 
 
 class TestCollectorErrorHandling:
-    @pytest.fixture
-    def pre_exp(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_pre')
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
-                  method='predict',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
-                  params={'max_depth': 3, 'random_state': 42})
-        p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        return e
+    """A failing Collector is recorded, never raised: it must not take down an
+    experiment whose Trials already ran, and in a worker the exception object
+    never reaches the parent — only what the hist row carries."""
 
-    def _make_broken_collector(self):
-        from mllabs.collector._base import Collector
+    def test_collect_error_is_recorded_with_its_traceback(self, built_exp):
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('broken', 'mock.BrokenCollector', Connector())
+        _run(built_exp, collectors=collectors)
 
-        class BrokenCollector(Collector):
-            def collect(self, context):
-                raise RuntimeError("collect error")
+        rows = collectors.hist.get_hist(collector_name='broken')
+        assert rows and all(r['status'] == 'error' for r in rows)
+        info = rows[0]['info']
+        assert info['phase'] == 'collect'
+        assert info['type'] == 'RuntimeError'
+        assert 'collect error' in info['traceback']
 
-        return BrokenCollector('broken', Connector())
+    def test_exp_continues_other_collectors_after_error(self, built_exp):
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('broken', 'mock.BrokenCollector', Connector())
+        mc = collectors.set_collector('acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        _run(built_exp, collectors=collectors)
 
-    def test_exp_warning_contains_traceback(self, pre_exp):
-        bc = self._make_broken_collector()
-        pre_exp.add_collector(bc)
-        pre_exp.exp()
-        w = bc.warnings[0]
-        assert 'traceback' in w
-        assert 'RuntimeError' in w['traceback']
-        assert 'collect error' in w['traceback']
+        assert mc.has_node('dt')
+        assert collectors.hist.get_hist(collector_name='broken', status='error')
+        assert collectors.hist.get_hist(collector_name='acc', status='collected')
 
-    def test_exp_continues_other_collectors_after_error(self, pre_exp):
-        bc = self._make_broken_collector()
-        mc = MetricCollector('acc', Connector(), output_var=None, metric_func=accuracy_metric)
-        pre_exp.add_collector(bc)
-        pre_exp.add_collector(mc)
-        pre_exp.exp()
-        assert mc.has('dt')
-        assert len(bc.warnings) > 0
+    def test_push_failure_is_recorded_as_its_own_phase(self, built_exp):
+        """A Collector whose collect() works but whose store step blows up —
+        the fold that triggered the flush is the one that carries the error."""
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('badpush', 'mock.BrokenPushCollector', Connector())
+        _run(built_exp, collectors=collectors)
+
+        rows = collectors.hist.get_hist(collector_name='badpush')
+        assert rows and all(r['status'] == 'error' for r in rows)
+        assert rows[0]['info']['phase'] == 'push'
+
+
+class TestCollectHist:
+    """One row per (collector, experimenter, node, outer, inner) — the fold
+    keys are what make an error locatable, which is the whole point of
+    recording an outcome the Collector itself no longer keeps."""
+
+    @staticmethod
+    def _folds(e):
+        return {(o, i) for o in range(e.get_n_splits())
+                for i in range(e.get_n_splits_inner())}
+
+    def test_a_row_per_collector_and_fold(self, built_exp_inner):
+        collectors = built_exp_inner.project.collectors()
+        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        _run(built_exp_inner, collectors=collectors)
+
+        rows = collectors.hist.get_hist(collector_name='count')
+        assert {(r['outer_idx'], r['inner_idx']) for r in rows} == self._folds(built_exp_inner.e)
+        assert all(r['node_name'] == 'dt' and r['status'] == 'collected' for r in rows)
+
+    def test_row_carries_the_run_it_came_from(self, built_exp):
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        _run(built_exp, collectors=collectors)
+
+        row = collectors.hist.get_hist(collector_name='count')[0]
+        assert row['experimenter'] == built_exp.e.name
+        assert row['pipeline_version'] == built_exp.e.pipeline_version
+        assert row['collect_date'] is not None
+        assert row['elapsed'] >= 0
+
+    def test_collecting_nothing_is_not_an_error(self, built_exp):
+        """The base Collector returns None — that used to be indistinguishable
+        from a failed collect, since both produced None."""
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('noop', 'mllabs.Collector', Connector())
+        _run(built_exp, collectors=collectors)
+
+        rows = collectors.hist.get_hist(collector_name='noop')
+        assert rows and all(r['status'] == 'empty' and r['info'] is None for r in rows)
+
+    def test_only_matched_collectors_get_rows(self, built_exp):
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('count', 'mock.CountingCollector', Connector(node_query='^dt'))
+        collectors.set_collector('other', 'mock.CountingCollector', Connector(node_query='^nope'))
+        _run(built_exp, collectors=collectors)
+
+        assert collectors.hist.get_hist(collector_name='count')
+        assert collectors.hist.get_hist(collector_name='other') == []
+
+    def test_get_status_is_keyed_by_node_and_fold(self, built_exp_inner):
+        collectors = built_exp_inner.project.collectors()
+        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        _run(built_exp_inner, collectors=collectors)
+
+        status = collectors.hist.get_status('count', built_exp_inner.e.name)
+        assert set(status) == {('dt', o, i) for o, i in self._folds(built_exp_inner.e)}
+        assert set(status.values()) == {'collected'}
+
+    def test_multi_worker_records_the_same_rows(self, built_exp):
+        """_run_collectors runs in the worker, so the outcome has to travel
+        back over the pipe — only the parent ever writes the hist."""
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        _run(built_exp, collectors=collectors, n_jobs=2)
+
+        rows = collectors.hist.get_hist(collector_name='count')
+        assert {(r['outer_idx'], r['inner_idx']) for r in rows} == self._folds(built_exp.e)
+        assert all(r['status'] == 'collected' for r in rows)
+
+    def test_multi_worker_records_a_collect_error(self, built_exp):
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('broken', 'mock.BrokenCollector', Connector())
+        _run(built_exp, collectors=collectors, n_jobs=2)
+
+        rows = collectors.hist.get_hist(collector_name='broken')
+        assert rows and all(r['status'] == 'error' for r in rows)
+        assert 'collect error' in rows[0]['info']['traceback']
+
+    def test_a_bare_list_records_nothing(self, built_exp):
+        """A list has no project-global place to write to; a registry does."""
+        collectors = built_exp.project.collectors()
+        c = collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        _run(built_exp, collectors=[c])
+
+        assert collectors.hist.get_hist() == []
+
+    def test_collect_hist_argument_overrides_the_registry(self, built_exp, tmp_path):
+        from mllabs import CollectHist
+        hist = CollectHist(tmp_path / 'elsewhere')
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        _run(built_exp, collectors=collectors, collect_hist=hist)
+
+        assert hist.get_hist(collector_name='count')
+        assert collectors.hist.get_hist() == []
+
 
 class TestProcessCollector:
     @pytest.fixture
@@ -714,319 +889,143 @@ class TestProcessCollector:
         return sample_data.iloc[:20].reset_index(drop=True)
 
     def test_collect_basic(self, built_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        pc = built_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(built_exp, collectors=[pc])
         assert pc.has_node('dt')
 
     def test_get_output_shape(self, built_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        pc = built_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(built_exp, collectors=[pc])
         result = pc.get_output()
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_get_output_nodes_none(self, built_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        pc = built_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(built_exp, collectors=[pc])
         result = pc.get_output(nodes=None)
         assert isinstance(result, pd.DataFrame)
 
     def test_get_output_nodes_list(self, multi_head_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        multi_head_exp.add_collector(pc)
+        pc = multi_head_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[pc])
         result_dt1 = pc.get_output(nodes=['dt1'])
         result_all = pc.get_output(nodes=None)
         assert isinstance(result_dt1, pd.DataFrame)
         assert result_dt1.shape[1] < result_all.shape[1]
 
     def test_get_output_nodes_regex(self, multi_head_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        multi_head_exp.add_collector(pc)
+        pc = multi_head_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[pc])
         result = pc.get_output(nodes='dt1')
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_with_upstream_stage(self, built_exp, ext_data):
-        # built_exp: scaler(stage) -> dt(head), ext_data goes through scaler first
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        # built_exp: scaler(stage) -> dt(Trial), ext_data goes through scaler first
+        pc = built_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(built_exp, collectors=[pc])
         result = pc.get_output()
         assert len(result) == 20
 
     def test_agg_mean(self, built_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data, method='mean')
-        built_exp.add_collector(pc)
+        pc = built_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data, 'method': 'mean'})
+        _run(built_exp, collectors=[pc])
         result = pc.get_output(agg='mean')
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_agg_mode(self, built_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        pc = built_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(built_exp, collectors=[pc])
         result = pc.get_output(agg='mode')
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_agg_simple(self, built_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data, method='simple')
-        built_exp.add_collector(pc)
+        pc = built_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data, 'method': 'simple'})
+        _run(built_exp, collectors=[pc])
         result = pc.get_output(agg='simple')
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_with_inner_splits(self, built_exp_inner, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp_inner.add_collector(pc)
+        pc = built_exp_inner.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(built_exp_inner, collectors=[pc])
         result = pc.get_output()
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_multi_head_columns_concat(self, multi_head_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        multi_head_exp.add_collector(pc)
+        pc = multi_head_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[pc])
         result_all = pc.get_output(nodes=None)
         result_dt1 = pc.get_output(nodes=['dt1'])
         result_dt2 = pc.get_output(nodes=['dt2'])
         assert result_all.shape[1] == result_dt1.shape[1] + result_dt2.shape[1]
 
     def test_connector_filter(self, multi_head_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(node_query=['dt1']), ext_data=ext_data)
-        multi_head_exp.add_collector(pc)
+        pc = multi_head_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(node_query=['dt1']), params={'ext_data': ext_data})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[pc])
         assert pc.has_node('dt1')
         assert not pc.has_node('dt2')
 
     def test_reset_nodes(self, built_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        pc = built_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(built_exp, collectors=[pc])
         assert pc.has_node('dt')
         pc.reset_nodes(['dt'])
         assert not pc.has_node('dt')
 
     def test_get_saved_nodes(self, multi_head_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        multi_head_exp.add_collector(pc)
+        pc = multi_head_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[pc])
         saved = pc._get_saved_nodes()
         assert 'dt1' in saved
         assert 'dt2' in saved
 
     def test_save_load(self, built_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
-        loaded = ProcessCollector.load(pc.path)
+        pc = built_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(built_exp, collectors=[pc])
+        loaded = built_exp.project.collectors().get_collector('proc')
         assert loaded.has_node('dt')
         result_orig = pc.get_output()
         result_loaded = loaded.get_output()
         pd.testing.assert_frame_equal(result_orig, result_loaded)
 
     def test_invalid_agg(self, built_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        built_exp.add_collector(pc)
+        pc = built_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        _run(built_exp, collectors=[pc])
         with pytest.raises(ValueError):
             pc.get_output(agg='invalid')
 
     @pytest.fixture
     def proba_exp(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_proba')
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
-                  method='predict_proba',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
-                  params={'max_depth': 3, 'random_state': 42})
-        p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
+        project = Project(tmp_path / 'proj_proba')
+        version = _pipeline_version(project, 'pipeline_proba')
+        e = project.experimenter('exp_proba', sample_data,
+                                 sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
+                                 pipeline_name='pipeline_proba', pipeline_version=version)
         e.build()
-        e.exp()
-        return e
+        trial = Trial('dt', TREE, EDGES, method='predict_proba', params={'max_depth': 3, 'random_state': 42})
+        return Built(project=project, e=e, trial=trial)
 
     def test_output_var_none_returns_all_columns(self, proba_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data, output_var=None)
-        proba_exp.add_collector(pc)
+        pc = proba_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data, 'output_var': None})
+        _run(proba_exp, collectors=[pc])
         result = pc.get_output()
         assert result.shape == (20, 2)
 
     def test_output_var_list_selects_column(self, proba_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data, output_var=['dt__target_0'])
-        proba_exp.add_collector(pc)
+        pc = proba_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data, 'output_var': '{dt__target_0}'})
+        _run(proba_exp, collectors=[pc])
         result = pc.get_output()
         assert list(result.columns) == ['dt__target_0']
         assert result.shape == (20, 1)
 
     def test_output_var_regex_selects_column(self, proba_exp, ext_data):
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data, output_var='dt__target_1')
-        proba_exp.add_collector(pc)
+        pc = proba_exp.project.collectors().set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data, 'output_var': 'dt__target_1'})
+        _run(proba_exp, collectors=[pc])
         result = pc.get_output()
         assert list(result.columns) == ['dt__target_1']
         assert result.shape == (20, 1)
-
-
-class TestFinalizedBeforeCollect:
-    """Collector query methods return None/{} when node was finalized before collect."""
-
-    @pytest.fixture
-    def finalized_exp(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_fin')
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
-                  method='predict',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
-                  params={'max_depth': 3, 'random_state': 42})
-        p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        e.exp()
-        e.finalize('dt')
-        return e
-
-    def test_metric_get_metric_returns_none(self, finalized_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        finalized_exp.add_collector(mc)
-        assert mc.get_metric('dt') is None
-
-    def test_metric_get_metrics_returns_none(self, finalized_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        finalized_exp.add_collector(mc)
-        assert mc.get_metrics() is None
-
-    def test_model_attr_get_attr_returns_none(self, finalized_exp):
-        from mllabs.adapter import DecisionTreeAdapter
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
-                                 result_key='feature_importances',
-                                 adapter=DecisionTreeAdapter())
-        finalized_exp.add_collector(mac)
-        assert mac.get_attr('dt') is None
-
-    def test_model_attr_get_attrs_agg_returns_none(self, finalized_exp):
-        from mllabs.adapter import DecisionTreeAdapter
-        mac = ModelAttrCollector('fi', Connector(processor=DecisionTreeClassifier),
-                                 result_key='feature_importances',
-                                 adapter=DecisionTreeAdapter())
-        finalized_exp.add_collector(mac)
-        assert mac.get_attrs_agg('dt') is None
-
-    def test_output_get_output_returns_none(self, finalized_exp):
-        oc = OutputCollector('out', Connector(), output_var=None)
-        finalized_exp.add_collector(oc)
-        assert oc.get_output('dt', 0, 0) is None
-
-    def test_output_get_outputs_returns_empty(self, finalized_exp):
-        oc = OutputCollector('out', Connector(), output_var=None)
-        finalized_exp.add_collector(oc)
-        assert oc.get_outputs('dt') == {}
-
-    def test_process_get_output_returns_none(self, finalized_exp, sample_data):
-        ext_data = sample_data.iloc[:20].reset_index(drop=True)
-        pc = ProcessCollector('proc', Connector(), ext_data=ext_data)
-        finalized_exp.add_collector(pc)
-        assert pc.get_output() is None
-
-    def test_shap_get_feature_importance_agg_returns_none(self, finalized_exp):
-        pytest.importorskip('shap')
-        from mllabs import SHAPCollector
-        sc = SHAPCollector('shap', Connector(processor=DecisionTreeClassifier))
-        finalized_exp.add_collector(sc)
-        assert sc.get_feature_importance_agg('dt') is None
-
-
-class TestGetCollectStatus:
-
-    @pytest.fixture
-    def not_exp_exp(self, tmp_path, sample_data):
-        """Stage built but head exp() not called."""
-        p = Pipeline(path=tmp_path / 'pipeline_notexp')
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
-                  method='predict',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
-                  params={'max_depth': 3, 'random_state': 42})
-        p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        return e
-
-    @pytest.fixture
-    def finalized_exp(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_fin2')
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
-                  method='predict',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
-                  params={'max_depth': 3, 'random_state': 42})
-        p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        e.exp()
-        e.finalize('dt')
-        return e
-
-    @pytest.fixture
-    def error_exp(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_err')
-        p.set_grp('model', role='head', processor=FailPredictor,
-                  method='predict',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]})
-        p.set_node('dt', grp='model')
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        e.exp()
-        return e
-
-    def test_status_collected(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        built_exp.add_collector(mc)
-        assert built_exp.get_collect_status(mc)['dt'] == 'collected'
-
-    def test_status_not_collected(self, not_exp_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        not_exp_exp.add_collector(mc)
-        assert not_exp_exp.get_collect_status(mc)['dt'] == 'not_collected'
-
-    def test_status_finalized(self, finalized_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        finalized_exp.add_collector(mc)
-        assert finalized_exp.get_collect_status(mc)['dt'] == 'finalized'
-
-    def test_status_error(self, error_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        error_exp.add_collector(mc)
-        assert error_exp.get_collect_status(mc)['dt'] == 'error'
-
-    def test_by_collector_name(self, built_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        built_exp.add_collector(mc)
-        assert built_exp.get_collect_status('acc')['dt'] == 'collected'
-
-    def test_nodes_filter(self, multi_head_exp):
-        mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        multi_head_exp.add_collector(mc)
-        status = multi_head_exp.get_collect_status(mc, nodes=['dt1'])
-        assert 'dt1' in status
-        assert 'dt2' not in status
-
-    def test_connector_filter(self, multi_head_exp):
-        mc = MetricCollector('acc', Connector(node_query=['dt1']),
-                             output_var=None, metric_func=dummy_metric)
-        multi_head_exp.add_collector(mc)
-        status = multi_head_exp.get_collect_status(mc)
-        assert 'dt1' in status
-        assert 'dt2' not in status
-
-    def test_mixed_status(self, tmp_path, sample_data):
-        p = Pipeline(path=tmp_path / 'pipeline_mixed')
-        p.set_grp('model', role='head', processor=DecisionTreeClassifier,
-                  method='predict',
-                  edges={'X': [(None, ['f1', 'f2', 'f3'])], 'y': [(None, 'target')]},
-                  params={'max_depth': 3, 'random_state': 42})
-        p.set_node('dt1', grp='model')
-        p.set_node('dt2', grp='model', params={'max_depth': 5})
-        e = p.add_experiment('main', data=sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42))
-        e.build()
-        e.exp('dt1')
-        e.exp('dt2')
-        e.finalize('dt2')
-        mc = MetricCollector('acc', Connector(), output_var=None, metric_func=dummy_metric)
-        e.add_collector(mc)
-        status = e.get_collect_status(mc)
-        assert status['dt1'] == 'collected'
-        assert status['dt2'] == 'finalized'

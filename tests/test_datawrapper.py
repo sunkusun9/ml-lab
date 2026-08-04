@@ -70,6 +70,12 @@ class TestWrapUnwrap:
         w = wrap(pldf)
         assert isinstance(w, PolarsWrapper)
 
+    def test_wrap_wrapper(self, pdf):
+        """Idempotent, mirroring ``unwrap`` on native data — callers should not
+        have to know whether the value has been wrapped already."""
+        w = wrap(pdf)
+        assert wrap(w) is w
+
     def test_wrap_none(self):
         assert wrap(None) is None
 

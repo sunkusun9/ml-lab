@@ -2,13 +2,18 @@
 Model adapters for handling eval_set in different ML frameworks
 """
 
+import importlib
+
 from ._base import ModelAdapter, GPU_NO, GPU_POSSIBLE, GPU_YES
 from ._gpu import get_gpus, get_idle_gpu
 from ._catboost import CatBoostAdapter
 from ._keras import KerasAdapter
 from ._default import DefaultAdapter
 from ._sklearn import LMAdapter, PCAAdapter, LDAAdapter, DecisionTreeAdapter
-from ._nn import NNAdapter
+
+# NNAdapter (._nn) imports TensorFlow at module load. Keep it out of eager
+# import so ``import mllabs`` does not pull in TF; it is loaded lazily on first
+# use (see _LAZY_ADAPTERS / get_adapter / __getattr__).
 
 try:
     from ._xgboost import XGBoostAdapter
@@ -30,9 +35,6 @@ MODEL_ADAPTERS = {
 
     'KerasClassifier': KerasAdapter(),
     'KerasRegressor': KerasAdapter(),
-
-    'NNClassifier': NNAdapter(),
-    'NNRegressor': NNAdapter(),
 
     'LinearRegression': LMAdapter(),
     'LogisticRegression': LMAdapter(),
@@ -61,6 +63,23 @@ if LightGBMAdapter is not None:
     })
 
 
+# model_name -> (submodule, class attr) for adapters whose import loads a heavy
+# optional dependency (TensorFlow). Instantiated and cached into MODEL_ADAPTERS
+# only on first use so ``import mllabs`` stays TF-free.
+_LAZY_ADAPTERS = {
+    'NNClassifier': ('_nn', 'NNAdapter'),
+    'NNRegressor': ('_nn', 'NNAdapter'),
+}
+
+
+def _load_lazy_adapter(model_name):
+    submod, cls_name = _LAZY_ADAPTERS[model_name]
+    cls = getattr(importlib.import_module(f'{__name__}.{submod}'), cls_name)
+    adapter = cls()
+    MODEL_ADAPTERS[model_name] = adapter
+    return adapter
+
+
 def get_adapter(model_or_name):
     """모델 또는 모델명에 해당하는 어댑터 인스턴스를 반환
 
@@ -77,7 +96,9 @@ def get_adapter(model_or_name):
         >>> adapter = get_adapter('XGBClassifier')
     """
     if isinstance(model_or_name, str):
-        model_name = model_or_name
+        # bare name or a "module.ClassName" ref (Pipeline's processor convention) — either way,
+        # the part after the last '.' is the class name.
+        model_name = model_or_name.rpartition('.')[-1]
     else:
         # model instance or class
         if hasattr(model_or_name, '__name__'):
@@ -85,7 +106,44 @@ def get_adapter(model_or_name):
         else:
             model_name = model_or_name.__class__.__name__
 
-    return MODEL_ADAPTERS.get(model_name, DefaultAdapter())
+    if model_name in MODEL_ADAPTERS:
+        return MODEL_ADAPTERS[model_name]
+    if model_name in _LAZY_ADAPTERS:
+        return _load_lazy_adapter(model_name)
+    return DefaultAdapter()
+
+
+def resolve_node_adapter(processor, adapter_spec):
+    """Resolve a node's effective adapter at the point of use.
+
+    Args:
+        processor: The node's processor as a ``"module.ClassName"`` string —
+            Pipeline always stores/passes processor as a string (see
+            ``_pipeline.py``, ``Pipeline.set_grp``/``set_node``). Used for the
+            by-class default when *adapter_spec* is not given — passed
+            straight to ``get_adapter``, which never needs to import the
+            processor's module just to pick a default adapter.
+        adapter_spec: ``None``, a ``"module.ClassName"`` string, a
+            ``{"__ref__": ..., "__params__": {...}}`` dict, or an already
+            instantiated adapter — whatever a Pipeline node/group stored as-is
+            (Pipeline never eagerly instantiates it; see ``_pipeline.py``).
+
+    Returns:
+        ModelAdapter: An instance, resolved/instantiated only now.
+    """
+    if adapter_spec is not None:
+        from .._serialize import resolve_instance
+        return resolve_instance(adapter_spec)
+    return get_adapter(processor)
+
+
+def __getattr__(name):
+    # PEP 562: expose TF-backed adapter classes without importing TF at package
+    # load. ``from mllabs.adapter import NNAdapter`` triggers TF only here.
+    if name == 'NNAdapter':
+        from ._nn import NNAdapter
+        return NNAdapter
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def register_adapter(model_name, adapter):
@@ -128,5 +186,6 @@ __all__ = [
     'DecisionTreeAdapter',
     'MODEL_ADAPTERS',
     'get_adapter',
+    'resolve_node_adapter',
     'register_adapter',
 ]

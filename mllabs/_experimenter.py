@@ -1,57 +1,113 @@
 import os
-import uuid
+import sys
 import pickle as pkl
-import shutil
 import traceback
-import warnings
+import contextlib
 from pathlib import Path
-
-import pandas as pd
 
 from sklearn.model_selection import ShuffleSplit
 
 from ._data_wrapper import wrap, unwrap, DataWrapperProvider
 from ._flow import TrainDataFlow
 from ._store import NodeStore
-from ._describer import desc_spec, desc_status
-from ._logger import DefaultLogger
-from ._cache import DataCache
+from ._experimenter_store import ExperimenterStore, DB_NAME as _EXP_DB
+from ._describer import desc_spec
+from ._logger import resolve_logger
 
-from ._pipeline import Pipeline
-from ._node_processor import resolve_columns
-from ._connector import Connector
-from .collector import Collector, MetricCollector, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector, ProcessCollector
+
+def _start_native_redirect(log_path):
+    """Redirect the calling process's OS-level stdout/stderr (fd 1/2) to
+    *log_path*, capturing native library chatter (TensorFlow, LightGBM,
+    CatBoost, cuDNN/XLA) written directly to the fd. Split into start/stop so
+    ``Experimenter.open_os_log``/``close_os_log`` can hold the state open
+    across multiple separate ``build``/``exp`` calls, rather than scoping a
+    redirect to a single call.
+
+    The calling process may also write progress/log output the user is meant
+    to see over real stdout (e.g. ``DefaultLogger``'s progress bars via
+    ``sys.stdout.write``/``print``). So before fd 1/2 are redirected to the
+    log file, ``sys.stdout``/``sys.stderr`` are rebound to a duplicate of the
+    original fd — Python-level output keeps reaching the real console, while
+    only native C-level writes (which bypass those Python objects and hit fd
+    1/2 directly) land in the log file.
+
+    Returns:
+        dict: Opaque state to pass to :func:`_stop_native_redirect`.
+    """
+    log_path = str(log_path)
+    log_dir = os.path.dirname(log_path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+
+    saved_out_fd = os.dup(1)
+    saved_err_fd = os.dup(2)
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    sys.stdout = os.fdopen(saved_out_fd, 'w')
+    sys.stderr = os.fdopen(saved_err_fd, 'w')
+    with  open(log_path, 'w') as log_f:
+        os.dup2(log_f.fileno(), 1)
+        os.dup2(log_f.fileno(), 2)
+    return {
+        'saved_out_fd': saved_out_fd, 'saved_err_fd': saved_err_fd,
+        'orig_stdout': orig_stdout, 'orig_stderr': orig_stderr, 'log_f': log_f,
+    }
+
+
+def _stop_native_redirect(state):
+    """Undo :func:`_start_native_redirect` — restore fd 1/2 and sys.stdout/stderr."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.dup2(state['saved_out_fd'], 1)
+    os.dup2(state['saved_err_fd'], 2)
+    sys.stdout.close()  # closes saved_out_fd
+    sys.stderr.close()  # closes saved_err_fd
+    sys.stdout = state['orig_stdout']
+    sys.stderr = state['orig_stderr']
+    state['log_f'].close()
+from ._run_common import resolve_common_status, require_built_pipeline
+
+
+def _resolve_collectors(collectors):
+    """``(instances, CollectHist | None)`` from a registry, a list, or None.
+
+    A registry brings its own history — it owns the project-global path both
+    the Collectors and their history live under. A bare list has no such
+    place, so its outcomes go unrecorded unless ``exp(collect_hist=...)``
+    names one.
+    """
+    if collectors is None:
+        return [], None
+    if hasattr(collectors, 'resolve'):
+        return collectors.resolve(None), getattr(collectors, 'hist', None)
+    return list(collectors), None
 
 
 class OuterFold:
-    """One outer fold: test indices, base path, and per-inner-fold TrainDataFlows.
+    """One outer fold: test indices and per-inner-fold TrainDataFlows.
 
-    Serializes test_idx, path, and TrainDataFlow list.
+    Every TrainDataFlow of every OuterFold shares the same NodeStore (this
+    run's own — see ``Experimenter.node_store``); only ``outer_idx``/``j``
+    (inner_idx) tell them apart.
+
     DataWrapperProvider inside each TrainDataFlow persists only indices — DataWrapper is transient.
-
     Call set_data(data) to re-inject DataWrapper and cache after load.
     """
 
-    def __init__(self, outer_idx, path, data, test_idx, train_idx_list, cache=None, aug_data=None):
+    def __init__(self, outer_idx, store, data, test_idx, train_idx_list, cache=None, aug_data=None):
         self.outer_idx = outer_idx
-        self.path = Path(path)
         self.test_idx = test_idx
         self.data = data
         self.train_data_flows = [
             TrainDataFlow(
-                path=self.path / str(j),
-                data_source=DataWrapperProvider(data, train_idx, valid_idx=valid_idx, aug_data=aug_data),
+                store=store,
+                data_source=DataWrapperProvider(data, train_idx, valid_idx=valid_idx,
+                                                test_idx=test_idx, aug_data=aug_data),
                 cache=cache,
                 outer_idx=outer_idx,
                 inner_idx=j,
             )
             for j, (train_idx, valid_idx) in enumerate(train_idx_list)
         ]
-        self.artifact_stores = [
-            NodeStore(path=self.path / str(j))
-            for j in range(len(train_idx_list))
-        ]
-
     def set_data(self, data, cache=None, aug_data=None):
         self.data = data
         for flow in self.train_data_flows:
@@ -72,11 +128,25 @@ class Experimenter():
     """Executes and manages a Pipeline experiment on a single dataset.
 
     Splits data using *sp* (outer) and optionally *sp_v* (inner), then runs
-    Stage builds and Head experiments fold-by-fold.
+    node builds and Trial experiments fold-by-fold.
+
+    No ``Project`` dependency, and nothing to inject but a ``cache``: the run
+    owns its own :class:`~mllabs.ExperimenterStore`, built from ``path``, and
+    everything needed to reopen it lives in that directory. ``Project`` only
+    supplies the path and records the name in its index.
+
+    Constructing is *creating*. It splits the data and writes a fresh state,
+    so pointing it at an existing directory starts that run over rather than
+    resuming it — :meth:`load_experimenter` is how an existing one comes back.
+    A Pipeline is never a constructor argument either way; adopt one with
+    :meth:`set_pipeline`, which saves it as this run's ``pipeline.pkl``.
 
     Args:
+        path: This run's own base directory (``{project}/exp/{name}`` when
+            created via a Project), created if it does not exist.
+        name (str): Experimenter name. This is its identity — the directory
+            above and the key used in TrialStore history.
         data: Input dataset (pandas DataFrame, polars DataFrame, or numpy array).
-        path (str | Path): Directory for persisting experiment artifacts.
         data_names (list[str], optional): Column names override.
         sp: Outer splitter (sklearn splitter API). Default
             ``ShuffleSplit(n_splits=1, random_state=1)``.
@@ -84,32 +154,33 @@ class Experimenter():
         splitter_params (dict, optional): Maps splitter keyword args to column
             names in *data*, e.g. ``{'y': 'target'}``.
         title (str, optional): Human-readable experiment title.
-        data_key (str, optional): Identifier verified on :meth:`load` to prevent
+        data_key (str, optional): Identifier verified on reload to prevent
             data mismatch.
-        cache_maxsize (int): Stage output cache size in bytes. Default 4 GB.
-        logger: Logger instance. Default ``DefaultLogger(level=['info', 'progress'])``.
+        cache (DataCache, optional): Shared LRU cache.
 
     Attributes:
-        pipeline (Pipeline): The pipeline being experimented on.
-        node_objs (dict): ``{node_name: StageObj}`` — stage nodes only; head node state is checked on-demand via :meth:`get_status`.
-        cache (DataCache): Shared LRU cache.
-        collectors (dict): Registered :class:`~mllabs.collector.Collector` instances.
-        trainers (dict): Registered :class:`~mllabs._trainer.Trainer` instances.
-        status (str): ``'open'`` or ``'closed'``.
+        cache (DataCache): Shared LRU cache, or ``None``.
+        pipeline (Pipeline): The adopted Pipeline, kept as this run's own
+            ``pipeline.pkl``. The ``(pipeline_name, pipeline_version)``
+            pointer is recorded too, but only as provenance — it names the
+            project version this copy was taken from.
+
+    Note:
+        ``build``, ``exp`` and other node-graph-aware methods use
+        ``self.pipeline`` — call :meth:`set_pipeline` first.
     """
 
     def __init__(
-            self, data, path, data_names = None, sp = ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
-            splitter_params=None, title=None, data_key=None, cache_maxsize=4 * 1024 ** 3,
-            logger = DefaultLogger(level=['info', 'progress']), aug_data=None, _save=True
+            self, path, name, data, data_names = None,
+            sp = ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
+            splitter_params=None, title=None, data_key=None,
+            aug_data=None, cache=None
         ):
-        self.cache_maxsize = cache_maxsize
-        self.logger = logger
+        self.name = name
         self.path = Path(path)
-        if not os.path.exists(path):
-            self.path.mkdir(parents=True, exist_ok=True)
-            self.logger.info(f"📁 Created directory: {self.path}")
-        data_native = data
+        self.path.mkdir(parents=True, exist_ok=True)
+        self._store = ExperimenterStore(self.path)
+        data_native = unwrap(data)
         self.data = wrap(data)
         self.aug_data = wrap(aug_data) if aug_data is not None else None
         self.title = title
@@ -117,7 +188,6 @@ class Experimenter():
         self.sp = sp
         self.sp_v = sp_v
         self.splitter_params = splitter_params if splitter_params is not None else {}
-        self.exp_id = str(uuid.uuid4())
 
         split_params = {}
         if data_names is None:
@@ -141,14 +211,13 @@ class Experimenter():
                 inner_folds = [(outer_train_idx, None)]
             raw_splits.append((test_idx, inner_folds))
 
-        self.pipeline = None
-        self.pipeline_id = None
-        self.cache = DataCache(maxsize=cache_maxsize)
+        self.cache = cache
+        self.node_store = NodeStore(self.path / '__folds')
 
         self.outer_folds = [
             OuterFold(
                 outer_idx=i,
-                path=self.path / '__folds' / str(i),
+                store=self.node_store,
                 data=self.data,
                 test_idx=test_idx,
                 train_idx_list=inner_folds,
@@ -157,66 +226,170 @@ class Experimenter():
             )
             for i, (test_idx, inner_folds) in enumerate(raw_splits)
         ]
-        self.collectors = {}
-        self.status = "open"
-        if _save:
-            self._save()
-
-    def attach(self, pipeline):
-        """Attach a Pipeline to this Experimenter.
-
-        If this Experimenter has already been associated with a pipeline,
-        the given pipeline must have the same pipeline_id.
-
-        Args:
-            pipeline (Pipeline): Pipeline instance to attach.
-
-        Raises:
-            ValueError: If pipeline_id does not match the previously recorded one.
-        """
-        if self.pipeline_id is not None and pipeline.pipeline_id != self.pipeline_id:
-            raise ValueError(
-                f"Pipeline ID mismatch: expected '{self.pipeline_id}', got '{pipeline.pipeline_id}'"
-            )
-        self.pipeline = pipeline
-        self.pipeline_id = pipeline.pipeline_id
-        self.logger.info(
-            f"Attached: {len(self.pipeline.nodes) - 1} node(s), "
-            f"{len(self.pipeline.grps)} group(s), {len(self.outer_folds)} fold(s)"
-        )
-
-    def _check_pipeline(self):
-        if self.pipeline is None:
-            raise RuntimeError("No pipeline attached. Call attach(pipeline) first.")
-
-    def _check_open(self):
-        """상태가 open인지 확인하고, 아니면 에러 발생"""
-        if self.status != "open":
-            raise RuntimeError(f"Experimenter is '{self.status}'. Only 'open' status allows modifications.")
-
-    def open(self):
-        """Experimenter를 open 상태로 변경"""
-        self.status = "open"
+        self.pipeline = None
+        self.pipeline_name = 'pipeline'
+        self.pipeline_version = None
+        self._os_log_state = None
         self._save()
-        self.logger.info("Experimenter status changed to 'open'")
-
-    def close(self):
-        """Experimenter를 close 상태로 변경"""
-        self.status = "close"
-        self._save()
-        self.logger.info("Experimenter status changed to 'close'")
 
     @staticmethod
-    def create(data, path, data_names=None, sp=ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
-            splitter_params=None, title=None, data_key=None, cache_maxsize=4 * 1024 ** 3,
-            logger = DefaultLogger(level=['info', 'progress']), aug_data=None):
+    def load_experimenter(path, data, data_key=None, aug_data=None, cache=None):
+        """Reopen the Experimenter rooted at *path*.
 
-        if os.path.exists(path):
-            raise RuntimeError(f"Exists: {path}")
-        return Experimenter(
-            data, path, data_names, sp=sp, sp_v=sp_v, splitter_params=splitter_params,
-            title=title, data_key=data_key, cache_maxsize=cache_maxsize, logger=logger,
-            aug_data=aug_data)
+        Everything comes out of that directory — meta and splitters from its
+        ``__exp.db``, the Pipeline from its ``pipeline.pkl`` — so no Project
+        is involved and no ``(pipeline_name, pipeline_version)`` is resolved.
+        The name is the directory's own.
+
+        Args:
+            path: The Experimenter's base directory.
+            data: Dataset to attach. Must match the original data shape.
+            data_key (str, optional): Must match the saved value, if one was
+                given when the Experimenter was created.
+            aug_data (optional): External data appended to inner train splits.
+            cache (DataCache, optional): Shared LRU cache.
+
+        Returns:
+            Experimenter: The reopened run.
+
+        Raises:
+            KeyError: If *path* holds no saved Experimenter.
+            ValueError: If *data_key* does not match the saved value.
+        """
+        path = Path(path)
+        # Checked before building the store, which would otherwise create the
+        # directory and an empty db for a run that does not exist.
+        if not (path / f'{_EXP_DB}.db').exists():
+            raise KeyError(f"No experimenter saved at {path}")
+        store = ExperimenterStore(path)
+        meta = store.fetch()
+        if meta is None:
+            raise KeyError(f"No experimenter saved at {path}")
+
+        saved_data_key = meta.get('data_key')
+        if saved_data_key is not None and saved_data_key != data_key:
+            raise ValueError(
+                f"data_key mismatch: saved='{saved_data_key}', provided='{data_key}'"
+            )
+
+        splitters = store.load_splitters() or {}
+        # 'sp' has a non-None default; passing the stored None through would
+        # break the split rather than fall back to it.
+        split_kwargs = {k: v for k, v in splitters.items() if v is not None}
+        exp = Experimenter(
+            path, meta['name'], data,
+            title=meta.get('title'), data_key=saved_data_key,
+            aug_data=aug_data, cache=cache, **split_kwargs,
+        )
+        pipeline = store.load_pipeline()
+        if pipeline is not None:
+            exp.set_pipeline(pipeline, meta.get('pipeline_name') or 'pipeline')
+        return exp
+
+    def open_os_log(self, log_path=None):
+        """Start capturing this process's OS-level stdout/stderr — native
+        library chatter (TensorFlow, LightGBM, CatBoost, cuDNN/XLA) written
+        directly to fd 1/2, which would otherwise pollute the console.
+
+        This only toggles OS-level log capture, independent of anything else
+        on the Experimenter. While open:
+
+        - ``build``/``exp`` with ``n_jobs=1`` run in this same process, so
+          their native chatter is captured directly by this redirect — no
+          separate handling needed per call.
+        - ``build``/``exp`` with ``n_jobs>1`` additionally redirect each
+          worker's own native chatter to ``{path}/__worker_logs/worker_{i}.log``
+          for the duration of that call. When log capture is *not* open,
+          workers do not redirect at all (matches pre-existing behavior).
+
+        Call :meth:`close_os_log` to stop and restore the console. See also
+        :meth:`os_log` for a context-manager form.
+
+        Args:
+            log_path: File to write to. Default:
+                ``{path}/__worker_logs/master.log``.
+        """
+        if self._os_log_state is not None:
+            raise RuntimeError("OS log capture is already open")
+        if log_path is None:
+            log_path = self.path / '__worker_logs' / 'master.log'
+        self._os_log_state = _start_native_redirect(log_path)
+
+    def close_os_log(self):
+        """Stop OS-level stdout/stderr capture started by :meth:`open_os_log`."""
+        if self._os_log_state is None:
+            return
+        _stop_native_redirect(self._os_log_state)
+        self._os_log_state = None
+
+    @contextlib.contextmanager
+    def os_log(self, log_path=None):
+        """Context manager form of :meth:`open_os_log`/:meth:`close_os_log`.
+
+        Usage::
+
+            with e.os_log():
+                e.build(n_jobs=1)
+                e.exp(n_jobs=4)
+        """
+        self.open_os_log(log_path)
+        try:
+            yield
+        finally:
+            self.close_os_log()
+
+    def set_pipeline(self, pipeline, pipeline_name=None):
+        """Adopt an already-loaded Pipeline.
+
+        Takes the Pipeline object directly rather than a version number —
+        this class has no way to load one by name/version itself (see the
+        class docstring); ``Project.experimenter()`` resolves that before
+        calling this. ``self.pipeline_version`` is read straight off
+        *pipeline* (its ``.version``), so it's never tracked as a separate,
+        possibly-diverging value.
+
+        The Pipeline is written to this Experimenter's own ``pipeline.pkl``,
+        which is what the constructor reads back — reopening needs only this
+        directory, never a Project. Persisting requires an
+        ``experimenter_store``; without one this Experimenter keeps the
+        Pipeline in memory only, the same way it skips saving its meta.
+
+        Moving between versions diffs the two Pipelines (:meth:`Pipeline.diff_from`)
+        and drops exactly the Stage artifacts the change invalidates: Stages
+        whose definition or inputs differ, everything downstream of them, and
+        Stages that no longer exist. Trials are left as-is — a Trial's
+        artifact and its ``TrialStore.experiment_hist`` row document the
+        pipeline version it actually ran against, which stays valid even
+        after a newer version is adopted; rerunning it is a separate,
+        explicit action.
+
+        Args:
+            pipeline (Pipeline): Already-built, already-loaded Pipeline.
+            pipeline_name (str, optional): Name to record this Pipeline
+                under in this Experimenter's own meta. Defaults to the one
+                this Experimenter was created with.
+
+        Returns:
+            Pipeline: *pipeline*, unchanged.
+        """
+        require_built_pipeline(pipeline)
+        if pipeline_name is not None:
+            self.pipeline_name = pipeline_name
+        if self.pipeline is not None:
+            stale = pipeline.diff_from(self.pipeline)
+            if stale:
+                self.reset_nodes(sorted(stale))
+        self.pipeline = pipeline
+        self.pipeline_version = pipeline.version
+        self._store.save_pipeline(pipeline)
+        self._store.set(self.name, 'pipeline_name', self.pipeline_name)
+        self._store.set(self.name, 'pipeline_version', self.pipeline_version)
+        return pipeline
+
+    def _require_pipeline(self):
+        if self.pipeline is None:
+            raise RuntimeError("No pipeline set. Call set_pipeline(pipeline) first.")
+        return self.pipeline
 
     def get_n_splits(self):
         return len(self.outer_folds)
@@ -224,462 +397,281 @@ class Experimenter():
     def get_n_splits_inner(self):
         return len(self.outer_folds[0].train_data_flows)
 
-    def get_collector(self, name):
-        return self.collectors.get(name)
-
-    def remove_collector(self, name):
-        if name in self.collectors:
-            collector_path = self.path / '__collector' / name
-            if collector_path.exists():
-                shutil.rmtree(collector_path)
-            del self.collectors[name]
-            self._save()
-
-    def add_collector(self, collector, exist = 'skip'):
-        """Register a Collector and immediately collect from built Head nodes.
-
-        Args:
-            collector (Collector): Collector instance to register.
-            exist (str): ``'skip'`` (default) returns existing if already registered;
-                ``'error'`` raises; ``'replace'`` removes the existing collector and
-                registers the new one from scratch.
-
-        Returns:
-            Collector: The registered collector.
-        """
-        if collector.name in self.collectors:
-            if exist == 'skip':
-                return self.collectors[collector.name]
-            elif exist == 'error':
-                raise RuntimeError("")
-            elif exist == 'replace':
-                self.remove_collector(collector.name)
-
-        self._check_open()
-        collector.path = self.path / '__collector' / collector.name
-        collector.on_attach(self)
-        collector._setup(
-            len(self.outer_folds), len(self.outer_folds[0].train_data_flows)
-        )
-        collector.save()
-        self.collectors[collector.name] = collector
-        self.collect(collector)
-        self._save()
-        return collector
-
-    def get_collect_status(self, collector, nodes=None):
-        if isinstance(collector, str):
-            collector = self.collectors[collector]
-        all_node_names = self.pipeline.get_node_names(nodes)
-        head_nodes = [
-            n for n in all_node_names
-            if n is not None and self.pipeline.get_node_attrs(n).get('role') == 'head'
-            and collector.connector.match(self.pipeline.get_node_attrs(n))
+    def _all_stores(self):
+        """Flatten every store (both Stage and Head, all folds) into one list."""
+        return [
+            store
+            for outer_fold in self.outer_folds
+            for store in outer_fold.train_data_flows
         ]
-        result = {}
-        for node in head_nodes:
-            if collector.has_node(node):
-                result[node] = 'collected'
-            else:
-                node_status = self.get_status(node)
-                if node_status == 'finalized':
-                    result[node] = 'finalized'
-                elif node_status == 'error':
-                    result[node] = 'error'
-                else:
-                    result[node] = 'not_collected'
-        return result
-
 
     def get_status(self, node_name):
-        """Return the disk status of a head node across all folds.
+        """Return the disk status of a node across all folds.
 
-        Reads info.pkl from every artifact_store (outer × inner folds).
+        One :class:`NodeStore` covers this whole run — Stages and Trials
+        always shared its directory, and every fold now shares the same
+        store instance too (told apart by ``outer_idx``/``inner_idx``).
         Returns the common status if all folds agree, or ``'inconsistent'``
         if they differ.
 
         Returns:
-            ``'built'``, ``'finalized'``, ``'error'``, ``None`` (init),
-            or ``'inconsistent'``.
+            ``'built'``, ``'error'``, ``None`` (init), or ``'inconsistent'``.
         """
-        
-        node = self.pipeline.get_node(node_name)
-        if node is None:
-            return
-        grp = self.pipeline.get_grp(node.grp)
-        if grp.role == 'stage':
-            statuses = {
-                store.status(node_name)
-                for outer_fold in self.outer_folds
-                for store in outer_fold.train_data_flows
-            }
-        else:
-            statuses = {
-                store.status(node_name)
-                for outer_fold in self.outer_folds
-                for store in outer_fold.artifact_stores
-            }
-        return statuses.pop() if len(statuses) == 1 else 'inconsistent'
-
-    def finalize(self, nodes):
-        """Release memory for built Head nodes (``built`` → ``finalized``).
-
-        Disk artifacts are preserved so nodes can be reloaded.
-
-        Args:
-            nodes: Node query for Head nodes to finalize.
-        """
-        self._check_open()
-        node_names = self.pipeline.get_node_names(nodes)
-        for i in node_names:
-            if i is None:
-                continue
-            node = self.pipeline.get_node(i)
-            grp = self.pipeline.get_grp(node.grp)
-            if grp.role == 'head':
-                if self.get_status(i) == 'built':
-                    self.logger.info(f"Finalize '{i}'")
-                    for outer_fold in self.outer_folds:
-                        for artifact_store in outer_fold.artifact_stores:
-                            artifact_store.finalize(i)
-
-    def reinitialize(self, nodes):
-        self._check_open()
-        node_names = self.pipeline.get_node_names(nodes)
-        for i in node_names:
-            if i is None:
-                continue
-            node = self.pipeline.get_node(i)
-            if node is None:
-                return
-            grp = self.pipeline.get_grp(node.grp)
-            if grp.role == 'stage':
-                reinitialized = False
-                for outer_fold in self.outer_folds:
-                    for data_flow in outer_fold.train_data_flows:
-                        if data_flow.status(i) == 'finalized':
-                            data_flow.reset_node(i)
-                            reinitialized = True
-            else:
-                reinitialized = False
-                for outer_fold in self.outer_folds:
-                    for artifact_store in outer_fold.artifact_stores:
-                        if artifact_store.status(i) == 'finalized':
-                            artifact_store.reset_node(i)
-                            reinitialized = True
-            if reinitialized:
-                self.logger.info(f"reinitialize '{i}'")
-
-    def close_exp(self):
-        """Finalize all built nodes and mark the experiment as closed.
-
-        Collector data is preserved. After this call, :attr:`status` is
-        ``'closed'`` and no further builds or experiments are permitted until
-        :meth:`reopen_exp` is called.
-        """
-        if self.status != "open":
-            raise RuntimeError("")
-        for name in list(self.pipeline.nodes):
-            if name is None:
-                continue
-            node = self.pipeline.get_node(name)
-            grp = self.pipeline.get_grp(node.grp)
-            logged = False
-            for outer_fold in self.outer_folds:
-                stores = outer_fold.train_data_flows if grp.role == 'stage' else outer_fold.artifact_stores
-                for store in stores:
-                    if store.status(name) == 'built':
-                        if not logged:
-                            self.logger.info(f"Finalize '{name}'")
-                            logged = True
-                        store.finalize(name)
-        self.status = "closed"
-        self._save()
-
-    def reopen_exp(self):
-        """Reopen a closed experiment and rebuild Stage nodes.
-
-        Clears all node objects, sets status back to ``'open'``, then calls
-        :meth:`build`.
-        """
-        if self.status != "closed":
-            raise RuntimeError("")
-        for name in list(self.pipeline.nodes):
-            if name is None:
-                continue
-            node = self.pipeline.get_node(name)
-            grp = self.pipeline.get_grp(node.grp)
-            for outer_fold in self.outer_folds:
-                if grp.role == 'stage':
-                    for store in outer_fold.train_data_flows:
-                        store.reset_node(name)
-        self.status = "open"
-        self.build()
-        self._save()
+        return resolve_common_status(
+            status
+            for store in self._all_stores()
+            if (status := store.status(node_name)) is not None
+        )
 
     def reset_nodes(self, nodes):
         """Reset nodes to ``init`` state.
 
-        Removes node objects, clears cache entries, and resets Collector and
-        Trainer data for the affected nodes.
+        Removes node objects and clears cache entries for the affected nodes.
 
         Args:
             nodes (list[str]): Node names to reset.
         """
         for name in nodes:
-            node = self.pipeline.get_node(name)
-            if node is None:
-                continue
-            grp = self.pipeline.get_grp(node.grp)
-            if grp is None:
-                 continue
-            for outer_fold in self.outer_folds:
-                if grp.role == 'stage':
-                    for flow in outer_fold.train_data_flows:
-                        flow.reset_node(name)
-                else:
-                    for store in outer_fold.artifact_stores:
-                        store.reset_node(name)
+            for store in self._all_stores():
+                store.reset_node(name)
 
-        self.cache.clear_nodes(nodes)
+        if self.cache is not None:
+            self.cache.clear_nodes(nodes)
 
-        for v in self.collectors.values():
-            v.reset_nodes(nodes)
-
-    def _reset_serial_stale_nodes(self, node_names):
-        stale = []
-        for name in node_names:
-            current_serial = self.pipeline.nodes[name].serial
-            node = self.pipeline.get_node(name)
-            grp = self.pipeline.get_grp(node.grp)
-            stores = []
-            for outer_fold in self.outer_folds:
-                if grp.role == 'stage':
-                    stores.extend(outer_fold.train_data_flows)
-                else:
-                    stores.extend(outer_fold.artifact_stores)
-            for store in stores:
-                info = store.get_info(name)
-                if info is not None and info.get('node_serial') != current_serial:
-                    stale.append(name)
-                    break
-        if stale:
-            self.reset_nodes(stale)
-            self.logger.info(f"Serial mismatch: reset {len(stale)} node(s): {sorted(stale)}")
-
-    def show_error_nodes(self, nodes=None, traceback=False):
+    def show_error_nodes(self, nodes=None, traceback=False, trial_store=None):
         """Print nodes in ``error`` state.
 
-        Args:
-            nodes: Node query to filter. ``None`` checks all nodes.
-            traceback (bool): Include full traceback in output.
-        """
-        node_names = self.pipeline.get_node_names(nodes)
-        error_nodes = []
-        for n in node_names:
-            if n is None:
-                continue
-            node = self.pipeline.get_node(n)
-            grp = self.pipeline.get_grp(node.grp)
-            stores = (
-                [flow for of in self.outer_folds for flow in of.train_data_flows]
-                if grp.role == 'stage' else
-                [store for of in self.outer_folds for store in of.artifact_stores]
-            )
-            if any(s.status(n) == 'error' for s in stores):
-                error_nodes.append(n)
-        if not error_nodes:
-            self.logger.info("No error nodes found")
-            return
-        for n in error_nodes:
-            node = self.pipeline.get_node(n)
-            grp = self.pipeline.get_grp(node.grp)
-            stores = (
-                [flow for of in self.outer_folds for flow in of.train_data_flows]
-                if grp.role == 'stage' else
-                [store for of in self.outer_folds for store in of.artifact_stores]
-            )
-            err = next((s.get_info(n)['error'] for s in stores if s.status(n) == 'error'), None)
-            if err is None:
-                continue
-            if traceback:
-                self.logger.info(f"[{n}] {err['type']}: {err['message']}\n{err['traceback']}")
-            else:
-                self.logger.info(f"[{n}] {err['type']}: {err['message']}")
+        Error detail no longer lives on the artifact itself (see
+        ``NodeStore``) — it's recorded in ``TrialStore.experiment_hist``
+        (Trials) or this run's own ``NodeStore`` history (Stages), so this
+        queries both instead of walking fold directories.
 
-    def build(self, nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None):
+        Args:
+            nodes (list[str], optional): Node names to check. ``None`` checks
+                every node recorded for this run.
+            traceback (bool): Include full traceback in output.
+            trial_store (TrialStore, optional): Where Trial history for this
+                run lives. ``None`` skips the Trial half, reporting only
+                Stage errors from this run's own ``NodeStore``.
+        """
+        rows = [
+            (r['node_name'], r['outer_idx'], r['inner_idx'], r['info'])
+            for r in self.node_store.get_hist()
+            if r['status'] == 'error'
+        ]
+        if trial_store is not None:
+            rows += [
+                (r['trial_name'], r['outer_idx'], r['inner_idx'], r['info'])
+                for r in trial_store.get_hist(experimenter=self.name)
+                if r['status'] == 'error'
+            ]
+        if nodes is not None:
+            node_set = set(nodes)
+            rows = [r for r in rows if r[0] in node_set]
+
+        errors = list()
+        for name, outer_idx, inner_idx, info in rows:
+            err = (info or {}).get('error', {})
+            label = f"[{name}] fold {outer_idx}_{inner_idx}"
+            if traceback:
+                errors.append(f"{label} {err.get('type')}: {err.get('message')}\n{err.get('traceback')}")
+            else:
+                errors.append(f"{label} {err.get('type')}: {err.get('message')}")
+        return errors if errors else None
+
+    def build(self, nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None):
         """Build Stage nodes.
+
+        Staleness is settled when a Pipeline is adopted (:meth:`set_pipeline`),
+        so anything still on disk when this runs is current — it only builds
+        what is missing.
 
         Args:
             nodes: Node query — ``None`` (all stages), ``list``, or regex ``str``.
             rebuild (bool): If ``True``, rebuild already-built nodes.
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
             gpu_id_list (list, optional): GPU IDs to use for GPU-enabled nodes.
+            logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
         """
-        from ._executor import _build_flow_single, _build_flow_multi
-        from ._tracker import LoggerExecuteTracker
-        self._check_open()
-        node_names = set(self.pipeline.get_node_names(nodes))
-        target_nodes = [
-            i for i in self.pipeline._get_affected_nodes([None])
-            if i is not None
-            and i in node_names
-            and self.pipeline.grps[self.pipeline.nodes[i].grp].role == 'stage'
-        ]
+        from ._executor import _execute_single, _execute_multi
+        from ._tracker import LoggerExecuteTracker, NodeInfoTracker
+        logger = resolve_logger(logger)
+        pipeline = self._require_pipeline()
+        pipeline.check_data_compatibility(self.data)
+        node_names = set(pipeline.get_node_names(nodes))
+        target_nodes = [i for i in pipeline.topo_order() if i in node_names]
         if rebuild:
             self.reset_nodes(target_nodes)
-        else:
-            self._reset_serial_stale_nodes(target_nodes)
-            target_nodes = [
-                i for i in target_nodes
-                if self.get_status(i) not in ['built', 'finalized']
-            ]
-        if not target_nodes:
-            self.logger.info("No stage nodes to build")
+
+        jobs = self._make_node_jobs(pipeline, target_nodes, gpu_id_list)
+        if not jobs:
+            logger.info("No stage nodes to build")
             return
 
-        self.logger.info(f"Building {len(target_nodes)} node(s)")
-        collectors = list(self.collectors.values())
-        total = sum(len(of.train_data_flows) for of in self.outer_folds) * len(target_nodes)
-        tracker = LoggerExecuteTracker(total, n_jobs, self.logger)
+        logger.info(f"Building {len(jobs)} job(s)")
+        n_jobs = min(n_jobs, len(jobs))
+        tracker = NodeInfoTracker(
+            LoggerExecuteTracker(len(jobs), n_jobs, logger),
+            self.node_store, self.pipeline_version,
+        )
 
         try:
             if n_jobs > 1:
-                errors = _build_flow_multi(self.outer_folds, self.pipeline, target_nodes, n_jobs,
-                                           gpu_id_list=gpu_id_list, collectors=collectors,
-                                           tracker=tracker)
+                log_dir = self.path / '__worker_logs' if self._os_log_state is not None else None
+                errors = _execute_multi(jobs, n_jobs, self.node_store, gpu_id_list=gpu_id_list,
+                                        tracker=tracker, log_dir=log_dir)
             else:
-                errors = _build_flow_single(self.outer_folds, self.pipeline, target_nodes,
-                                            gpu_id_list=gpu_id_list, collectors=collectors,
-                                            tracker=tracker)
+                errors = _execute_single(jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=tracker)
         finally:
             tracker.close()
 
-        error_nodes = list({n for _, _, n in errors})
-        n_ok = len(target_nodes) - len(error_nodes)
-        if error_nodes:
-            self.logger.info(f"Build complete: {n_ok}/{len(target_nodes)} node(s), {len(error_nodes)} error(s): {error_nodes}")
+        error_names = sorted({n for _, _, n in errors})
+        n_ok = len(jobs) - len(errors)
+        if errors:
+            logger.info(f"Build complete: {n_ok}/{len(jobs)} job(s), {len(errors)} error(s): {error_names}")
         else:
-            self.logger.info(f"Build complete: {len(target_nodes)} node(s)")
-    
-    def exp(self, nodes=None, finalize=False, n_jobs=1, gpu_id_list=None):
-        """Run Head nodes and invoke all matching Collectors.
+            logger.info(f"Build complete: {len(jobs)} job(s)")
+
+    def _make_node_jobs(self, pipeline, node_names, gpu_id_list):
+        """Expand Stage node names into per-fold Jobs.
+
+        Skip decisions live here, not in the executor (mirrors ``_make_jobs``
+        for Trials) — a fold already built for a given node is left out; the
+        executor only orders dispatch among what's left, via
+        ``flow.get_missing_nodes``.
+        """
+        from ._executor import Job
+        from .adapter import resolve_node_adapter
+        from .adapter._base import GPU_NO
+
+        gpu_cache = {}
+        jobs = []
+        for name in node_names:
+            node = pipeline.get_node(name)
+            spec = node.get_spec()
+            if gpu_id_list and name not in gpu_cache:
+                adapter = resolve_node_adapter(node.processor, node.adapter)
+                gpu_cache[name] = adapter.get_gpu_usage(node.params) != GPU_NO
+            need_gpu = gpu_cache.get(name, False)
+
+            for outer_idx, outer_fold in enumerate(self.outer_folds):
+                for inner_idx, flow in enumerate(outer_fold.train_data_flows):
+                    if flow.status(name) == 'built':
+                        continue
+                    jobs.append(Job(name, spec, outer_idx, inner_idx, flow, need_gpu=need_gpu))
+        return jobs
+
+    def exp(self, trials, trial_store, collectors=None, collect_hist=None,
+            n_jobs=1, gpu_id_list=None, logger=None):
+        """Run *trials* against the Stage graph and invoke matching Collectors.
 
         Args:
-            nodes: Node query — ``None`` (all heads), ``list``, or regex ``str``.
-            finalize (bool): If ``True``, finalize after all folds complete.
+            trials: ``[(Trial, outer_idx, inner_idx), ...]`` — each entry names
+                exactly which fold a Trial runs on. Expanding folds here rather
+                than in the executor keeps fold policy in one place and lets the
+                dispatcher take its target list literally.
+            trial_store (TrialStore): Where Trial definitions are registered
+                and fold outcomes are recorded — also what decides which
+                folds are skipped as already built (see :meth:`_make_jobs`).
+            collectors: :class:`~mllabs.Collectors` registry, a list of
+                Collector instances, or ``None`` to collect nothing.
+            collect_hist (CollectHist, optional): Where each Collector's
+                per-fold outcome is recorded. Defaults to the registry's own
+                ``hist`` when *collectors* is a registry; a bare list has none
+                unless one is named here.
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
-            gpu_id_list (list, optional): GPU IDs to use for GPU-enabled nodes.
+            gpu_id_list (list, optional): GPU IDs to use for GPU-enabled trials.
+            logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
+
+        Trial definitions are registered in *trial_store*, and every fold
+        that actually runs records its outcome there as it finishes (see
+        :class:`~mllabs._tracker.TrialHistTracker`). Folds skipped as already
+        built produce no new row — their result was recorded when they ran.
         """
-        from ._executor import _experiment_single, _experiment_multi
-        from ._tracker import LoggerExecuteTracker
-        self._check_open()
-        node_names = set(self.pipeline.get_node_names(nodes))
-        candidate_nodes = [
-            i for i in self.pipeline._get_affected_nodes([None])
-            if i is not None
-            and i in node_names
-            and self.pipeline.grps[self.pipeline.nodes[i].grp].role == 'head'
-        ]
-        self._reset_serial_stale_nodes(candidate_nodes)
-        target_nodes = [
-            i for i in candidate_nodes
-            if self.get_status(i) not in ['built', 'finalized']
-        ]
-        if not target_nodes:
-            self.logger.info("No head nodes to experiment")
+        from ._executor import _execute_single, _execute_multi
+        from ._tracker import LoggerExecuteTracker, TrialHistTracker
+        logger = resolve_logger(logger)
+        pipeline = self._require_pipeline()
+        pipeline.check_data_compatibility(self.data)
+
+        collectors, registry_hist = _resolve_collectors(collectors)
+        collect_hist = collect_hist if collect_hist is not None else registry_hist
+        jobs = self._make_jobs(trials, trial_store)
+        if not jobs:
+            logger.info("No trials to run")
             return
 
-        self.logger.info(f"Experimenting {len(target_nodes)} node(s)")
-        collectors = list(self.collectors.values())
-        total = sum(len(of.train_data_flows) for of in self.outer_folds) * len(target_nodes)
-        tracker = LoggerExecuteTracker(total, n_jobs, self.logger)
+        logger.info(f"Experimenting {len(jobs)} job(s)")
+        for c in collectors:
+            c.on_attach(self)
+            c._setup(len(self.outer_folds), len(self.outer_folds[0].train_data_flows))
+        n_jobs = min(n_jobs, len(jobs))
+        trial_store.register_all(t for t, _, _ in trials)
+        tracker = TrialHistTracker(
+            LoggerExecuteTracker(len(jobs), n_jobs, logger),
+            trial_store, self.name, self.pipeline_version,
+            collect_hist=collect_hist,
+        )
 
         try:
             if n_jobs > 1:
-                errors = _experiment_multi(self.outer_folds, self.pipeline, target_nodes, n_jobs,
-                                           gpu_id_list=gpu_id_list, collectors=collectors,
-                                           tracker=tracker, finalize=finalize)
+                log_dir = self.path / '__worker_logs' if self._os_log_state is not None else None
+                errors = _execute_multi(jobs, n_jobs, self.node_store, gpu_id_list=gpu_id_list,
+                                        collectors=collectors, tracker=tracker,
+                                        log_dir=log_dir)
             else:
-                errors = _experiment_single(self.outer_folds, self.pipeline, target_nodes,
-                                            gpu_id_list=gpu_id_list, collectors=collectors,
-                                            tracker=tracker, finalize=finalize)
+                errors = _execute_single(jobs, self.node_store, gpu_id_list=gpu_id_list,
+                                         collectors=collectors, tracker=tracker)
         finally:
             tracker.close()
 
-        error_nodes = list({n for _, n in errors})
-        n_ok = len(target_nodes) - len(error_nodes)
-        if error_nodes:
-            self.logger.info(f"Exp complete: {n_ok}/{len(target_nodes)} node(s), {len(error_nodes)} error(s): {error_nodes}")
+        error_names = sorted({n for _, _, n in errors})
+        n_ok = len(jobs) - len(errors)
+        if errors:
+            logger.info(f"Exp complete: {n_ok}/{len(jobs)} job(s), "
+                        f"{len(errors)} error(s): {error_names}")
         else:
-            self.logger.info(f"Exp complete: {len(target_nodes)} node(s)")
+            logger.info(f"Exp complete: {len(jobs)} job(s)")
 
-    def collect(self, collector, nodes=None, exist='skip'):
-        """Run a Collector ad-hoc over already-built Head nodes.
+    def _make_jobs(self, trials, trial_store):
+        """Expand ``(Trial, outer, inner)`` entries into runnable Jobs.
 
-        Args:
-            collector (Collector): Collector instance to run.
-            nodes: Node query — ``None`` (all heads), ``list``, or regex ``str``.
-            exist (str): ``'skip'`` (default) skips nodes already collected.
+        A fold is skipped only if ``TrialStore.experiment_hist`` already has
+        it recorded as ``'built'`` — a fold recorded as ``'error'``, or with
+        no history row at all, gets a job. Whether the Trial's definition
+        changed since that history was recorded is not checked here; history
+        is the sole source of truth for what still needs to run.
 
-        Returns:
-            Collector: The same collector after collection.
+        A fold that does get a job has its NodeStore entry reset first — the
+        write on rerun would overwrite the on-disk artifact regardless, but
+        without this, a flow's in-memory info cache (populated by an earlier
+        ``get_info``/``get_status`` call in this same process) would keep
+        returning the stale pre-rerun info even after the new write lands.
         """
-        from ._executor import _run_collectors
-        from ._node_processor import ProgressMonitor
+        from ._executor import Job
+        from .adapter import resolve_node_adapter
+        from .adapter._base import GPU_NO
 
-        node_names = set(self.pipeline.get_node_names(nodes))
-        target_nodes = [
-            name for name in self.pipeline._get_affected_nodes([None])
-            if name is not None
-            and name in node_names
-            and not (exist == 'skip' and collector.has(name))
-            and self.get_status(name) == 'built'
-            and collector.connector.match(self.pipeline.get_node_attrs(name))
-        ]
+        gpu_cache = {}
+        hist_cache = {}
+        jobs = []
+        for trial, outer_idx, inner_idx in trials:
+            flow = self.outer_folds[outer_idx].train_data_flows[inner_idx]
+            spec = trial.get_spec()
 
-        if not target_nodes:
-            return collector
+            if trial.name not in hist_cache:
+                hist_cache[trial.name] = trial_store.get_status(trial.name, self.name)
+            if hist_cache[trial.name].get((outer_idx, inner_idx)) == 'built':
+                continue
+            flow.reset_node(trial.name)
 
-        collector.on_attach(self)
-        collector._setup(len(self.outer_folds), len(self.outer_folds[0].train_data_flows))
-        monitor = ProgressMonitor()
-        n_total = self.get_n_splits() * len(target_nodes)
-        try:
-            self.logger.create_session(0)
-            self.logger.create_session(1)
-            self.logger.start_progress(0, 'Collect', n_total)
-            n_done = 0
-            for name in target_nodes:
-                node_attrs = self.pipeline.get_node_attrs(name)
-                edges = node_attrs['edges']
-                self.logger.start_progress(1, name)
-                for outer_idx, outer_fold in enumerate(self.outer_folds):
-                    for inner_idx, (train_flow, artifact_store) in enumerate(
-                        zip(outer_fold.train_data_flows, outer_fold.artifact_stores)
-                    ):
-                        if artifact_store.status(name) != 'built':
-                            continue
-                        obj, result, info = artifact_store.get_objs(name)
-                        train_data = train_flow.get_train(edges)
-                        valid_data = train_flow.get_valid(edges)
-                        test_data = outer_fold.get_test_data(edges)
-                        ext_data = {}
-                        if collector.get_properties().get('need_process_data', False):
-                            ext_data[collector.name] = train_flow.get_data(collector.get_ext_data(), node_attrs['edges'])
-                        _run_collectors(
-                            [collector], node_attrs, obj, result, info,
-                            train_data, valid_data, test_data, ext_data,
-                            outer_idx, inner_idx, monitor
-                        )
-                    n_done += 1
-                    self.logger.update_progress(0, n_done)
-                self.logger.end_progress(1)
-            self.logger.end_progress(0, n_total)
-        finally:
-            self.logger.remove_session(1)
-            self.logger.remove_session(0)
-        return collector
+            if trial.name not in gpu_cache:
+                adapter = resolve_node_adapter(spec.processor, spec.adapter)
+                gpu_cache[trial.name] = adapter.get_gpu_usage(spec.params) != GPU_NO
+
+            jobs.append(Job(trial.name, spec, outer_idx, inner_idx, flow,
+                            need_gpu=gpu_cache[trial.name]))
+        return jobs
 
     def get_train_data(self, edges, o_idx=0, i_idx=0):
         return self.outer_folds[o_idx].train_data_flows[i_idx].get_train(edges)
@@ -690,40 +682,26 @@ class Experimenter():
     def get_test_data(self, edges, o_idx=0, i_idx=0):
         return self.outer_folds[o_idx].get_test_data(edges, i_idx)
 
-    def get_node_train_data(self, node, o_idx=0, i_idx=0):
-        edges = self.pipeline.get_node_attrs(node)['edges']
-        return self.get_train_data(edges, o_idx, i_idx)
-
-    def get_node_valid_data(self, node, o_idx=0, i_idx=0):
-        edges = self.pipeline.get_node_attrs(node)['edges']
-        return self.get_valid_data(edges, o_idx, i_idx)
-
-    def get_node_test_data(self, node, o_idx=0, i_idx=0):
-        edges = self.pipeline.get_node_attrs(node)['edges']
-        return self.get_test_data(edges, o_idx, i_idx)
-
-
     def get_node_info(self):
+        pipeline = self._require_pipeline()
         lines = [f"# Experiment Pipeline Summary\n"]
         lines.append(f"- **DataSource**\n")
 
-        for name in self.pipeline.nodes.keys():
+        for name in pipeline.nodes.keys():
             if name is None:
                 continue
-            node = self.pipeline.get_node(name)
-            node_attrs = node.get_attrs(self.pipeline.grps)
-            processor_name = node_attrs['processor'].__name__ if node_attrs['processor'] else 'None'
-            edges_info_parts = []
-            for key, edge_list in node_attrs['edges'].items():
-                edge_strs = [f"{n or 'DataSource'}{f'[{v}]' if v else ''}" for n, v in edge_list]
-                edges_info_parts.append(f"{key}: [{', '.join(edge_strs)}]")
-            edges_info = ", ".join(edges_info_parts)
+            spec = pipeline.get_node_spec(name)
+            processor = spec.processor
+            processor_name = getattr(processor, '__name__', processor) if processor else 'None'
+            edges_info = ", ".join(
+                f"{key}: {dsl_string}" for key, dsl_string in spec.edges.items()
+            )
             lines.append(f"## {name}")
             lines.append(f"- **Processor**: {processor_name}")
-            lines.append(f"- **Method**: {node_attrs['method']}")
+            lines.append(f"- **Method**: {spec.method}")
             lines.append(f"- **Edges**: {edges_info}")
 
-            descendants = self.pipeline._find_descendants(name)
+            descendants = pipeline.descendants(name)
             if descendants:
                 lines.append(f"- **Descendants**: {sorted(descendants)}")
             lines.append("")
@@ -731,105 +709,57 @@ class Experimenter():
         return "\n".join(lines)
 
     def get_objs(self, node_name, outer_idx = 0, inner_idx = 0):
-        node = self.pipeline.get_node(node_name)
-        node_attrs = node.get_attrs(self.pipeline.grps)
-        fold = self.outer_folds[outer_idx]
-        if node_attrs['role'] == 'head':
-            return fold.artifact_stores[inner_idx].get_objs(node_name)
-        else:
-            return fold.train_data_flows[inner_idx].get_objs(node_name)
+        return self.outer_folds[outer_idx].train_data_flows[inner_idx].get_objs(node_name)
 
-    def _save(self, filepath=None):
-        if filepath is None:
-            filepath = self.path / '__exp.pkl'
+    def get_worker_logs(self, worker=None):
+        """Native (OS-level stdout/stderr) output captured while OS log
+        capture was open (see :meth:`open_os_log`/:meth:`os_log`).
 
-        save_data = {
+        Multi-worker ``build``/``exp`` (``n_jobs > 1``) redirect each worker's
+        stdout/stderr to ``{path}/__worker_logs/worker_{i}.log``, capturing
+        native library chatter (TensorFlow, LightGBM, CatBoost, cuDNN/XLA) that
+        would otherwise pollute the console. This process's own (master)
+        output goes to ``worker_logs/master.log``. Each run overwrites the
+        previous.
+
+        Args:
+            worker: ``int`` for a per-worker log, ``'master'`` for this
+                process's own log, or ``None`` for all.
+
+        Returns:
+            dict mapping worker index (``int``) / ``'master'`` to captured
+            text, or a single string if *worker* is given. Empty if nothing
+            was captured.
+        """
+        log_dir = self.path / '__worker_logs'
+        if worker is not None:
+            fname = 'master.log' if worker == 'master' else f'worker_{worker}.log'
+            f = log_dir / fname
+            return f.read_text() if f.exists() else ''
+        if not log_dir.exists():
+            return {}
+        logs = {
+            int(f.stem.split('_')[1]): f.read_text()
+            for f in sorted(log_dir.glob('worker_*.log'))
+        }
+        master_f = log_dir / 'master.log'
+        if master_f.exists():
+            logs['master'] = master_f.read_text()
+        return logs
+
+    def _save(self):
+        self._store.save({
+            'name': self.name,
             'data_key': self.data_key,
             'title': self.title,
+            'pipeline_name': self.pipeline_name,
+            'pipeline_version': self.pipeline_version,
+        })
+        self._store.save_splitters(self.name, {
             'sp': self.sp,
             'sp_v': self.sp_v,
             'splitter_params': self.splitter_params,
-            'cache_maxsize': self.cache_maxsize,
-            'exp_id': self.exp_id,
-            'pipeline_id': self.pipeline_id,
-            'collector_keys': {name: type(c).__name__ for name, c in self.collectors.items()},
-            'status': self.status
-        }
-
-        with open(filepath, 'wb') as f:
-            pkl.dump(save_data, f)
-
-    @staticmethod
-    def load(filepath, data, data_key=None, aug_data=None, logger = DefaultLogger(level=['info', 'progress'])):
-        """Load a saved Experimenter from disk.
-
-        Args:
-            filepath (str | Path): Path to the experiment directory
-                (contains ``__exp.pkl``).
-            data: Dataset to attach. Must match the original data shape.
-            data_key (str, optional): If the saved experiment has a ``data_key``,
-                this must match.
-
-        Returns:
-            Experimenter: Restored experimenter with all nodes, collectors, and
-            trainers reloaded.
-
-        Raises:
-            ValueError: If ``data_key`` does not match the saved value.
-        """
-        COLLECTOR_TYPES = {
-            'MetricCollector': MetricCollector,
-            'StackingCollector': StackingCollector,
-            'ModelAttrCollector': ModelAttrCollector,
-            'SHAPCollector': SHAPCollector,
-            'OutputCollector': OutputCollector,
-            'ProcessCollector': ProcessCollector,
-        }
-
-        filepath = Path(filepath)
-        with open(filepath / '__exp.pkl', 'rb') as f:
-            save_data = pkl.load(f)
-
-        saved_data_key = save_data.get('data_key')
-        if saved_data_key is not None and saved_data_key != data_key:
-            raise ValueError(
-                f"data_key mismatch: saved='{saved_data_key}', provided='{data_key}'"
-            )
-
-        exp = Experimenter(
-            data=data,
-            path=filepath,
-            sp=save_data['sp'],
-            sp_v=save_data['sp_v'],
-            splitter_params=save_data['splitter_params'],
-            title=save_data['title'],
-            data_key=saved_data_key,
-            cache_maxsize=save_data.get('cache_maxsize', 4 * 1024 ** 3),
-            aug_data=aug_data,
-            _save=False,
-            logger = logger
-        )
-        exp.exp_id = save_data['exp_id']
-        exp.pipeline_id = save_data.get('pipeline_id')
-        exp.status = save_data['status']
-
-        # Collector 복원
-        collector_keys = save_data.get('collector_keys', {})
-        for coll_name, type_name in collector_keys.items():
-            cls = COLLECTOR_TYPES.get(type_name)
-            if cls is None:
-                continue
-            coll_path = filepath / '__collector' / coll_name
-            if (coll_path / '__config.pkl').exists():
-                collector = cls.load(coll_path)
-                exp.collectors[coll_name] = collector
-
-        exp.logger.info(f"Loaded. Call attach(pipeline) to complete.")
-        return exp
-
-    def desc_status(self):
-        return desc_status(self)
+        })
 
     def desc_spec(self):
         return desc_spec(self)
-

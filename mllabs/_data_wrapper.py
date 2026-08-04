@@ -95,11 +95,14 @@ class DataWrapper(ABC):
         pass
 
     @abstractmethod
-    def get_column_list(self, col_selector):
-        """ColSelector 기준으로 컬럼명(또는 numpy offset) 리스트 반환
+    def select_by_dtype(self, kind):
+        """이 wrapper의 컬럼명(또는 numpy offset) 중 dtype이 kind에 해당하는 것만 반환.
+
+        ``@numeric``/``@categorical``/``@binary``/``@float``/``@int``/``@string``
+        DSL selector(``col.py``)가 사용하는 primitive.
 
         Args:
-            col_selector: ColSelector 인스턴스 (col_type, pattern)
+            kind: 'category' | 'numeric' | 'int' | 'float' | 'str' | 'bool'
 
         Returns:
             list: 매칭되는 컬럼명 또는 정수 offset 리스트
@@ -134,6 +137,8 @@ class DataWrapper(ABC):
         """
         if data is None:
             return None
+        if isinstance(data, DataWrapper):
+            return data
 
         # Check type and return appropriate wrapper
         type_name = type(data).__name__
@@ -281,29 +286,25 @@ class PandasWrapper(DataWrapper):
         else:
             raise TypeError(f"Cannot convert {type(output)} to pandas DataFrame")
     
-    def get_column_list(self, col_selector):
-        import re
+    def select_by_dtype(self, kind):
         data = self.data
         if isinstance(data, pd.Series):
             all_cols = [data.name] if data.name is not None else [0]
         else:
             all_cols = data.columns.tolist()
-        result = list(all_cols)
-        if col_selector.col_type is not None:
-            ct = col_selector.col_type
-            if ct == 'category':
-                result = [c for c in result if hasattr(data[c].dtype, 'categories') or str(data[c].dtype) == 'category']
-            elif ct == 'numeric':
-                result = [c for c in result if pd.api.types.is_numeric_dtype(data[c])]
-            elif ct == 'int':
-                result = [c for c in result if pd.api.types.is_integer_dtype(data[c])]
-            elif ct == 'float':
-                result = [c for c in result if pd.api.types.is_float_dtype(data[c])]
-            elif ct == 'str':
-                result = [c for c in result if data[c].dtype == object or isinstance(data[c].dtype, pd.StringDtype)]
-        if col_selector.pattern is not None:
-            result = [c for c in result if re.search(col_selector.pattern, str(c))]
-        return result
+        if kind == 'category':
+            return [c for c in all_cols if hasattr(data[c].dtype, 'categories') or str(data[c].dtype) == 'category']
+        if kind == 'numeric':
+            return [c for c in all_cols if pd.api.types.is_numeric_dtype(data[c])]
+        if kind == 'int':
+            return [c for c in all_cols if pd.api.types.is_integer_dtype(data[c])]
+        if kind == 'float':
+            return [c for c in all_cols if pd.api.types.is_float_dtype(data[c])]
+        if kind == 'str':
+            return [c for c in all_cols if data[c].dtype == object or isinstance(data[c].dtype, pd.StringDtype)]
+        if kind == 'bool':
+            return [c for c in all_cols if pd.api.types.is_bool_dtype(data[c])]
+        raise ValueError(f"Unknown dtype kind: {kind!r}")
 
     def squeeze(self):
         return PandasWrapper(self.data.squeeze())
@@ -432,8 +433,7 @@ class PolarsWrapper(DataWrapper):
             cnt += 1
         return wrap(ret / cnt)
 
-    def get_column_list(self, col_selector):
-        import re
+    def select_by_dtype(self, kind):
         data = self.data
         if isinstance(data, pl.Series):
             all_cols = [data.name]
@@ -441,29 +441,26 @@ class PolarsWrapper(DataWrapper):
         else:
             all_cols = data.columns
             schema = dict(zip(data.columns, data.dtypes))
-        result = list(all_cols)
-        if col_selector.col_type is not None:
-            ct = col_selector.col_type
-            _INT = {pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64}
-            _FLOAT = {pl.Float32, pl.Float64}
-            _STR = {pl.Utf8, pl.String} if hasattr(pl, 'String') else {pl.Utf8}
-            if ct == 'category':
-                def _is_cat(dtype):
-                    if dtype == pl.Categorical:
-                        return True
-                    return hasattr(pl, 'Enum') and isinstance(dtype, pl.Enum)
-                result = [c for c in result if _is_cat(schema[c])]
-            elif ct == 'numeric':
-                result = [c for c in result if schema[c] in _INT or schema[c] in _FLOAT]
-            elif ct == 'int':
-                result = [c for c in result if schema[c] in _INT]
-            elif ct == 'float':
-                result = [c for c in result if schema[c] in _FLOAT]
-            elif ct == 'str':
-                result = [c for c in result if schema[c] in _STR]
-        if col_selector.pattern is not None:
-            result = [c for c in result if re.search(col_selector.pattern, str(c))]
-        return result
+        _INT = {pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64}
+        _FLOAT = {pl.Float32, pl.Float64}
+        _STR = {pl.Utf8, pl.String} if hasattr(pl, 'String') else {pl.Utf8}
+        if kind == 'category':
+            def _is_cat(dtype):
+                if dtype == pl.Categorical:
+                    return True
+                return hasattr(pl, 'Enum') and isinstance(dtype, pl.Enum)
+            return [c for c in all_cols if _is_cat(schema[c])]
+        if kind == 'numeric':
+            return [c for c in all_cols if schema[c] in _INT or schema[c] in _FLOAT]
+        if kind == 'int':
+            return [c for c in all_cols if schema[c] in _INT]
+        if kind == 'float':
+            return [c for c in all_cols if schema[c] in _FLOAT]
+        if kind == 'str':
+            return [c for c in all_cols if schema[c] in _STR]
+        if kind == 'bool':
+            return [c for c in all_cols if schema[c] == pl.Boolean]
+        raise ValueError(f"Unknown dtype kind: {kind!r}")
 
     def squeeze(self):
         if isinstance(self.data, pl.DataFrame) and self.data.shape[1] == 1:
@@ -580,26 +577,22 @@ class CudfWrapper(DataWrapper):
         else:
             raise TypeError(f"Cannot convert {type(output)} to cudf DataFrame")
 
-    def get_column_list(self, col_selector):
-        import re
+    def select_by_dtype(self, kind):
         data = self.data
         all_cols = data.columns.tolist() if hasattr(data, 'columns') else ([data.name] if data.name is not None else [0])
-        result = list(all_cols)
-        if col_selector.col_type is not None:
-            ct = col_selector.col_type
-            if ct == 'category':
-                result = [c for c in result if hasattr(data[c].dtype, 'categories') or str(data[c].dtype) == 'category']
-            elif ct == 'numeric':
-                result = [c for c in result if pd.api.types.is_numeric_dtype(data[c].dtype)]
-            elif ct == 'int':
-                result = [c for c in result if pd.api.types.is_integer_dtype(data[c].dtype)]
-            elif ct == 'float':
-                result = [c for c in result if pd.api.types.is_float_dtype(data[c].dtype)]
-            elif ct == 'str':
-                result = [c for c in result if str(data[c].dtype) in ('object', 'string')]
-        if col_selector.pattern is not None:
-            result = [c for c in result if re.search(col_selector.pattern, str(c))]
-        return result
+        if kind == 'category':
+            return [c for c in all_cols if hasattr(data[c].dtype, 'categories') or str(data[c].dtype) == 'category']
+        if kind == 'numeric':
+            return [c for c in all_cols if pd.api.types.is_numeric_dtype(data[c].dtype)]
+        if kind == 'int':
+            return [c for c in all_cols if pd.api.types.is_integer_dtype(data[c].dtype)]
+        if kind == 'float':
+            return [c for c in all_cols if pd.api.types.is_float_dtype(data[c].dtype)]
+        if kind == 'str':
+            return [c for c in all_cols if str(data[c].dtype) in ('object', 'string')]
+        if kind == 'bool':
+            return [c for c in all_cols if pd.api.types.is_bool_dtype(data[c].dtype)]
+        raise ValueError(f"Unknown dtype kind: {kind!r}")
 
     def squeeze(self):
         return CudfWrapper(self.data.squeeze())
@@ -744,25 +737,22 @@ class NumpyWrapper(DataWrapper):
         else:
             raise TypeError(f"Cannot convert {type(output)} to numpy array")
         
-    def get_column_list(self, col_selector):
-        import re
+    def select_by_dtype(self, kind):
         result = list(self.columns)
-        if col_selector.col_type is not None:
-            ct = col_selector.col_type
-            kind = self.data.dtype.kind
-            if ct == 'category':
-                result = []
-            elif ct == 'numeric':
-                result = result if kind in ('i', 'u', 'f') else []
-            elif ct == 'int':
-                result = result if kind in ('i', 'u') else []
-            elif ct == 'float':
-                result = result if kind == 'f' else []
-            elif ct == 'str':
-                result = result if kind in ('U', 'O', 'S') else []
-        if col_selector.pattern is not None:
-            result = [c for c in result if re.search(col_selector.pattern, str(c))]
-        return result
+        dtype_kind = self.data.dtype.kind
+        if kind == 'category':
+            return []
+        if kind == 'numeric':
+            return result if dtype_kind in ('i', 'u', 'f') else []
+        if kind == 'int':
+            return result if dtype_kind in ('i', 'u') else []
+        if kind == 'float':
+            return result if dtype_kind == 'f' else []
+        if kind == 'str':
+            return result if dtype_kind in ('U', 'O', 'S') else []
+        if kind == 'bool':
+            return result if dtype_kind == 'b' else []
+        raise ValueError(f"Unknown dtype kind: {kind!r}")
 
     def squeeze(self):
         return NumpyWrapper(np.squeeze(self.data))
@@ -831,11 +821,12 @@ class DataWrapperProvider(DataSourceProvider):
     Call set_data(data) to re-inject DataWrapper after deserialization.
     """
 
-    def __init__(self, data, train_idx, valid_idx=None, aug_data=None):
+    def __init__(self, data, train_idx, valid_idx=None, test_idx=None, aug_data=None):
         self._data = data
         self._aug_data = aug_data
         self.train_idx = train_idx
         self.valid_idx = valid_idx
+        self.test_idx = test_idx
 
     def set_data(self, data, aug_data=None):
         self._data = data
@@ -852,11 +843,18 @@ class DataWrapperProvider(DataSourceProvider):
             return None
         return self._data.iloc(self.valid_idx)
 
+    def get_test(self):
+        if self.test_idx is None:
+            return None
+        return self._data.iloc(self.test_idx)
+
     def __getstate__(self):
-        return {'train_idx': self.train_idx, 'valid_idx': self.valid_idx}
+        return {'train_idx': self.train_idx, 'valid_idx': self.valid_idx,
+                'test_idx': self.test_idx}
 
     def __setstate__(self, state):
         self.train_idx = state['train_idx']
         self.valid_idx = state['valid_idx']
+        self.test_idx = state.get('test_idx')
         self._data = None
         self._aug_data = None

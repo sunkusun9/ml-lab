@@ -5,26 +5,18 @@ import numpy as np
 import pandas as pd
 
 from ._base import Collector
-from .._node_processor import resolve_columns
+from .._edge_dsl import parse, eval_expr
 
 
 class ProbToLabel:
     def __init__(self, metric_func, var, thresholds=None):
         self.metric_func = metric_func
-        self.var = var
+        self.var = var  # DSL string, e.g. '{target}' or 'node:(*)'
         self.thresholds = thresholds
         self._classes = None
 
-    def _normalize_var(self):
-        v = self.var
-        if isinstance(v, str):
-            return [(None, v)]
-        if isinstance(v, tuple) and len(v) == 2 and not isinstance(v[0], tuple):
-            return [v]
-        return v  # already list
-
     def on_attach(self, experimenter):
-        edges = {'_y': self._normalize_var()}
+        edges = {'_y': self.var}
         data_dict = experimenter.get_test_data(edges, o_idx=0, i_idx=0)
         y_arr = data_dict['_y'].to_array().ravel()
         # np.unique returns sorted order — matches predict_proba column order
@@ -70,11 +62,15 @@ class MetricCollector(Collector):
             self.metric_func.on_attach(experimenter)
 
     def collect(self, context):
-        cols = resolve_columns(context['output_test'], self.output_var)
+        output_test = context['output_test']
+        if self.output_var is None:
+            cols = output_test.get_columns()
+        else:
+            cols = eval_expr(parse(self.output_var), output_test, processor=context['processor'])
         if len(cols) == 0:
             return None
 
-        prd_test = context['output_test'].select_columns(cols)
+        prd_test = output_test.select_columns(cols)
         result = {'test': self.metric_func(context['input'][2]['y'].data, prd_test.data)}
 
         if self.include_train and context.get('output_train') is not None:
@@ -138,11 +134,8 @@ class MetricCollector(Collector):
             ).fetchone()
         return row is not None
 
-    def has(self, node):
-        return self.has_node(node)
-
     def reset_nodes(self, nodes):
-        self._buf = {k: v for k, v in self._buf.items() if k not in set(nodes)}
+        super().reset_nodes(nodes)
         if self.path is not None and self._db_path.exists():
             with sqlite3.connect(str(self._db_path)) as conn:
                 conn.execute(
