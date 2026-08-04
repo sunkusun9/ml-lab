@@ -151,5 +151,6 @@ e = project.load_experimenter('cv5', df, aug_data=extra_df)
 ## Related
 
 - [Project & Pipeline](project-pipeline.md)
-- [Trainer & Collectors](trainer-collectors.md) — promoting a Trial and collecting what runs produce
+- [Collectors](collectors.md) — capturing what runs produce
+- [Trainer & Predictors](trainer-predictors.md) — promoting a Trial to a trained model
 - [State Model](../concepts/state-model.md)

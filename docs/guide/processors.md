@@ -92,7 +92,7 @@ Output column names are `{col}_freq`. Unseen values at transform time receive `0
 
 ### CrossFitTransformer
 
-Generates out-of-fold (OOF) predictions from a classifier or regressor during `fit_transform`, and uses a full-data fitted model during `transform`. Useful for creating meta-features for stacking within a Stage node.
+Generates out-of-fold (OOF) predictions from a classifier or regressor during `fit_transform`, and uses a full-data fitted model during `transform`. Useful for building stacking meta-features inside a pipeline node.
 
 ```python
 from mllabs.processor import CrossFitTransformer
@@ -123,15 +123,19 @@ CrossFitTransformer(
 
 Column names are accessible via `get_feature_names_out()`.
 
-**Usage in a Stage node:**
+**Usage as a node:**
 
 ```python
-exp.pipeline.set_node('meta_lgbm', role='stage', processor=CrossFitTransformer(
-    LGBMClassifier(n_estimators=100), cv=5, method='predict_proba'
-), edges={'X': [...], 'y': [(None, 'target')]})
+p.set_node('meta_lgbm',
+           processor='mllabs.processor.CrossFitTransformer',
+           method='fit_transform',
+           edges={'X': 'scale:(*)', 'y': '{target}'},
+           params={'estimator': {'__ref__': 'lightgbm.LGBMClassifier',
+                                 '__params__': {'n_estimators': 100}},
+                   'cv': 5, 'method': 'predict_proba'})
 ```
 
-The Stage node will produce OOF features during `exp()` and full-model predictions when used in `Trainer` or `Inferencer`.
+The node produces OOF features in an `Experimenter` and full-model predictions in a `Trainer` or `Inferencer` — the same definition, behaving correctly on both sides.
 
 ---
 
