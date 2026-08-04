@@ -1,34 +1,70 @@
 # Architecture
 
-ml-labs is composed of four core modules, each with a distinct responsibility.
-
 ```
-Pipeline ──────── defines the node graph (structure)
-    │
-Experimenter ──── executes builds and experiments (single dataset)
-    │
-Trainer ────────── trains with cross-validation splits
-    │
-Inferencer ─────── applies trained processors to new data
+Project ─────────── owns the directory layout and what is project-wide
+  │                 (pipelines, Collectors, TrialStore, cache, run names)
+  │
+  ├─ PipelineBuilder ──build()──► Pipeline    mutable definition → immutable graph
+  │
+  ├─ Experimenter ─── evaluates Trials with cross-validation      exp/{name}/
+  │
+  └─ Trainer ──────── trains Predictors on full data          trainers/{name}/
+        │
+        └─ to_inferencer() ──► Inferencer     standalone, no Trainer at serve time
 ```
 
-## Pipeline
+## Project
 
-`Pipeline` is a directed graph of nodes that describes the ML workflow structure — which processors exist, how they connect, and what parameters they use. It holds no data and performs no computation. It is the blueprint that `Experimenter` and `Trainer` read.
+`Project` hands out paths from one root and holds the state that spans runs:
 
-## Experimenter
+- the pipelines, each with its own version counter
+- the `Collectors` registry and its collection history
+- the `TrialStore` — every Trial definition and every fold outcome, from every Experimenter
+- the shared `DataCache`
+- an index of which Experimenters and Trainers exist — **names only**
 
-`Experimenter` takes a `Pipeline` and a dataset, then executes the graph node by node. It manages:
+Everything else belongs to an individual run. A `Project` is a convenience over the components, not a requirement: each of them takes a path and works standalone.
 
-- **Build** (`build()`): runs Stage nodes (transformers)
-- **Experiment** (`exp()`): runs Head nodes (predictors)
-- **Collectors**: pluggable objects that capture metrics, outputs, SHAP values, or stacking data during execution
-- **Cache**: LRU cache (capacity-based) to avoid recomputing Stage outputs
+## A run owns its own state
 
-## Trainer
+An `Experimenter` or `Trainer` keeps, inside its own directory, its splitter, the Pipeline it adopted, its node artifacts and its history. So a run reopens from its path alone:
 
-`Trainer` handles cross-validation. It splits data using a `splitter` and creates one `TrainFold` per split. Each `TrainFold` holds a `TrainDataFlow` (resolves stage transforms) and a `NodeStore` (persists fitted processors to disk). Training delegates to the same executor routines used by `Experimenter`. The result can be converted to an `Inferencer` via `to_inferencer()`.
+```python
+e = Experimenter.load_experimenter('exp/cv', df)     # no Project involved
+t = Trainer.load_trainer('trainers/final', df)
+```
+
+The `(pipeline_name, pipeline_version)` a run records is **provenance** — it names which project version its copy was taken from, and is not needed to reopen anything.
+
+This is why `Project` indexes run *names* and nothing more: there is no second copy of a run's state to drift out of sync.
+
+## Experimenter — evaluates Trials
+
+`Experimenter` splits the data with an outer splitter (`sp`) and an optional inner splitter (`sp_v`), then:
+
+- `build()` runs the Pipeline's nodes fold by fold
+- `exp(trials, trial_store)` runs **Trials** — the candidate models — against those node outputs
+
+Trials live outside the Pipeline. A Trial is a candidate *being compared*, which is why its definitions and per-fold outcomes go to the project-wide `TrialStore`: results only mean something next to other results.
+
+**Collectors** attach to Trial runs and capture what happens — metrics, model attributes, SHAP values, out-of-fold predictions for stacking.
+
+## Trainer — trains Predictors
+
+`Trainer` trains on splits of the full dataset, or on all of it when given no splitter. What it trains are **Predictors**, and `train(predictors)` takes them directly.
+
+A `Predictor` is a decision already made, so what matters is not comparability but **provenance** — `Predictor.from_trial(trial, experimenter=...)` records which Trial and which Experimenter justified it. Its registry is per-Trainer for the same reason.
+
+Predictors get their own artifact store under `trainers/{name}/__predictors/`, separate from the Pipeline nodes, so the two are told apart structurally rather than by which history table happened to record them.
 
 ## Inferencer
 
-`Inferencer` holds the fitted processors produced by `Trainer`. Given new data, it builds an `InferenceDataFlow` per split — an in-memory graph that resolves only `'X'` edges — and aggregates the results across splits (`mean`, `mode`, or a custom callable).
+`Inferencer` holds the fitted processors and the specs needed to wire them — not a Pipeline, since only `edges` is actually needed at serve time. Given new data it resolves the graph in memory, per split, and aggregates across splits (`mean`, `mode`, or a callable).
+
+It has no dependency on `Experimenter`, `Trainer` or `Project`, and serializes to a single file.
+
+## Related
+
+- [Pipeline](pipeline.md) — the builder/built split and what a node is
+- [State Model](state-model.md) — node states and how staleness is decided
+- [Data Flow](data-flow.md) — how a node's inputs get assembled

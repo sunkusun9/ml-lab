@@ -70,20 +70,19 @@ Used for any model not in the registry. Passes no extra fit parameters — suita
 
 Passes `eval_set` to `fit()`. Supports `early_stopping` and `eval_metric` as node `params` (they are moved from constructor to `fit()`).
 
-`early_stopping` accepts either a `lgb.early_stopping` callback instance or a plain dict of `lgb.early_stopping` constructor kwargs:
+`early_stopping` is given as a plain dict of `lgb.early_stopping` constructor kwargs, which the adapter turns into the callback. Since params reject live objects, this is the only way to specify it:
 
 ```python
-exp.set_node('lgbm', grp='lgbm_grp', params={
-    'n_estimators': 1000,
-    # callback instance
-    'early_stopping': early_stopping(50, verbose=False),
-    # or equivalently as a dict (preferred — avoids false rebuild detection)
-    'early_stopping': {'stopping_rounds': 50, 'verbose': False},
-    'eval_metric': 'auc',
-})
+Trial('lgbm', 'lightgbm.LGBMClassifier',
+      edges={'X': 'scale:(*)', 'y': '{target}'}, method='predict',
+      params={
+          'n_estimators': 1000,
+          'early_stopping': {'stopping_rounds': 50, 'verbose': False},
+          'eval_metric': 'auc',
+      })
 ```
 
-Using a dict is recommended: `_params_equal` compares plain dicts correctly, so changing other params won't trigger spurious rebuilds caused by callback object identity.
+Keeping it plain data is also what makes definitions comparable by value: a callback instance would compare by identity, so an unchanged definition could look changed.
 
 `result_objs`: `feature_importances`✓, `evals_result`✓, `trees`✗
 
@@ -137,38 +136,34 @@ The `gpu` key in node `params` controls GPU routing and injection. It is strippe
 LightGBM uses its own `device` param. To enable GPU:
 
 ```python
-exp.set_node('lgbm_gpu', grp='lgbm', params={
-    'n_estimators': 5000,
-    'device': 'cuda',   # or 'gpu'
-    'gpu': 'yes',       # routes to GPU worker
-})
+Trial('lgbm_gpu', 'lightgbm.LGBMClassifier', edges, method='predict',
+      params={'n_estimators': 5000,
+              'device': 'cuda',   # or 'gpu'
+              'gpu': 'yes'})      # routes to a GPU worker
 ```
 
 ### XGBoost
 
 ```python
-exp.set_node('xgb_gpu', grp='xgb', params={
-    'n_estimators': 5000,
-    'gpu': 'yes',   # injects device='cuda:{gpu_id}' automatically
-})
+Trial('xgb_gpu', 'xgboost.XGBClassifier', edges, method='predict',
+      params={'n_estimators': 5000,
+              'gpu': 'yes'})   # injects device='cuda:{gpu_id}' automatically
 ```
 
 ### CatBoost
 
 ```python
-exp.set_node('cb_gpu', grp='cb', params={
-    'n_estimators': 5000,
-    'gpu': 'yes',   # injects task_type='GPU', devices='{gpu_id}' automatically
-})
+Trial('cb_gpu', 'catboost.CatBoostClassifier', edges, method='predict',
+      params={'n_estimators': 5000,
+              'gpu': 'yes'})   # injects task_type='GPU', devices='{gpu_id}'
 ```
 
 ### NNClassifier / NNRegressor
 
 ```python
-exp.set_node('nn_gpu', grp='nn', params={
-    'epochs': 200,
-    'gpu': 'yes',   # injects device='/GPU:{gpu_id}' automatically
-})
+Trial('nn_gpu', 'mllabs.nn.NNClassifier', edges, method='predict',
+      params={'epochs': 200,
+              'gpu': 'yes'})   # injects device='/GPU:{gpu_id}' automatically
 ```
 
 ---
@@ -194,5 +189,13 @@ After registration, `MyAdapter` is resolved automatically whenever a node uses `
 To use an adapter on a specific node or group without registering it globally:
 
 ```python
-exp.set_node('my_node', grp='my_grp', adapter=MyAdapter())
+p.set_node('my_node', grp='my_grp', adapter='mypackage.MyAdapter')
+
+# with constructor arguments
+p.set_node('my_node', grp='my_grp',
+           adapter={'__ref__': 'mypackage.MyAdapter',
+                    '__params__': {'eval_mode': 'valid'}})
 ```
+
+An adapter is named by string or ref spec, never passed as an instance — like
+`processor` and `params`, it is resolved only when the processor is built.

@@ -1,48 +1,29 @@
 # Collectors
 
-::: mllabs.collector.Collector
-    options:
-      members:
-        - has
-        - has_node
-        - reset_nodes
-        - save
-        - load
+## Registry and history
 
-::: mllabs.collector.MetricCollector
-    options:
-      members:
-        - get_metric
-        - get_metrics
-        - get_metrics_agg
+::: mllabs.Collectors
 
-::: mllabs.collector.ProbToLabel
+::: mllabs.CollectHist
 
-::: mllabs.collector.StackingCollector
-    options:
-      members:
-        - get_dataset
+::: mllabs.CollectorStore
 
-::: mllabs.collector.ModelAttrCollector
-    options:
-      members:
-        - get_attr
-        - get_attrs
-        - get_attrs_agg
+::: mllabs.CollectorEntity
 
-::: mllabs.collector.SHAPCollector
-    options:
-      members:
-        - get_feature_importance
-        - get_feature_importance_agg
+## Collectors
 
-::: mllabs.collector.OutputCollector
-    options:
-      members:
-        - get_output
-        - get_outputs
+::: mllabs.Collector
 
-::: mllabs.collector.ProcessCollector
-    options:
-      members:
-        - get_output
+::: mllabs.MetricCollector
+
+::: mllabs.ProbToLabel
+
+::: mllabs.StackingCollector
+
+::: mllabs.ModelAttrCollector
+
+::: mllabs.SHAPCollector
+
+::: mllabs.OutputCollector
+
+::: mllabs.ProcessCollector

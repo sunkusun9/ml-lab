@@ -228,20 +228,20 @@ with open('model.pkl', 'rb') as f:
 `NNClassifier` and `NNRegressor` work directly as node processors in an `Experimenter`.
 
 ```python
-from mllabs.nn import NNClassifier, DenseHidden
+from mllabs import Trial
 
-exp.pipeline.set_node(
-    'nn_clf',
-    grp='model_grp',
-    processor=NNClassifier,
-    method='predict_proba',
-    params={
-        'epochs': 200,
-        'hidden': {'units': (256, 128), 'dropout': 0.3},
-        'early_stopping': 20,
-    },
-)
+Trial('nn_clf', 'mllabs.nn.NNClassifier',
+      edges={'X': 'scale:(*) + ohe:(*)', 'y': '{target}'},
+      method='predict_proba',
+      params={
+          'epochs': 200,
+          'hidden': {'units': (256, 128), 'dropout': 0.3},
+          'early_stopping': 20,
+      })
 ```
+
+Naming the processor by string is what keeps `import mllabs` from pulling in
+TensorFlow — the class is imported only when the Trial actually runs.
 
 ### NNAdapter
 
@@ -251,10 +251,10 @@ exp.pipeline.set_node(
 - Progress logging via `logger` (controlled by `verbose`)
 
 ```python
-from mllabs.adapter import NNAdapter
-
-# override defaults on a specific node
-exp.pipeline.set_node('nn_clf', ..., adapter=NNAdapter(eval_mode='valid', verbose=0.2))
+Trial('nn_clf', 'mllabs.nn.NNClassifier', edges, method='predict_proba',
+      adapter={'__ref__': 'mllabs.adapter.NNAdapter',
+               '__params__': {'eval_mode': 'valid', 'verbose': 0.2}},
+      params={'epochs': 200})
 ```
 
 ### ModelAttrCollector
@@ -262,13 +262,10 @@ exp.pipeline.set_node('nn_clf', ..., adapter=NNAdapter(eval_mode='valid', verbos
 `NNAdapter.result_objs` exposes `evals_result` for collection:
 
 ```python
-from mllabs.collector import ModelAttrCollector
-from mllabs import Connector
-
-collector = ModelAttrCollector(
-    'nn_evals',
-    Connector(processor=NNClassifier),
-    result_key='evals_result',
+collectors.set_collector(
+    'nn_evals', 'mllabs.collector.ModelAttrCollector',
+    {'__ref__': 'mllabs.Connector',
+     '__params__': {'processor': 'mllabs.nn.NNClassifier'}},
+    params={'result_key': 'evals_result'},
 )
-exp.add_collector(collector)
 ```

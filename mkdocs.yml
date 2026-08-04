@@ -29,8 +29,11 @@ nav:
     - concepts/state-model.md
     - concepts/data-flow.md
   - User Guide:
-    - guide/pipeline-experimenter.md
-    - guide/trainer-collectors.md
+    - guide/project-pipeline.md
+    - guide/edges-dsl.md
+    - guide/experimenter-trials.md
+    - guide/collectors.md
+    - guide/trainer-predictors.md
     - guide/adapters.md
     - guide/processors.md
     - guide/nn.md
@@ -38,16 +41,19 @@ nav:
     - serving/inferencer.md
   - API Reference:
     - reference/index.md
+    - reference/project.md
     - reference/pipeline.md
     - reference/experimenter.md
+    - reference/trials.md
     - reference/trainer.md
     - reference/inferencer.md
     - reference/collectors.md
-    - reference/adapters.md
-    - reference/nn.md
     - reference/connector.md
+    - reference/adapters.md
     - reference/processors.md
+    - reference/nn.md
     - reference/filters.md
+    - reference/logging.md
 
 plugins:
   - search

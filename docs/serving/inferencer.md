@@ -7,19 +7,20 @@
 After `train()` completes, call `to_inferencer()` to extract the fitted processors:
 
 ```python
-trainer.select_head(['lgbm_v1'])
-trainer.train()
+t.train([Predictor.from_trial(trial, experimenter=e.name)])
 
-inferencer = trainer.to_inferencer(
-    v=None,   # optionally filter output columns (same as Trainer.process v)
+inf = t.to_inferencer(
+    v=None,   # optional DSL filter on the output columns, as in Trainer.process
 )
 ```
 
-`to_inferencer()` copies the processors out of the Trainer. The resulting `Inferencer` is independent — you can discard the Trainer afterwards.
+`to_inferencer()` copies the processors out of the Trainer. The result depends on
+nothing else — not the Trainer, not the Experimenter, not even a Pipeline, since
+only each node's `edges` is needed to wire them up at serve time.
 
 ## Saving and Loading
 
-The entire `Inferencer` — pipeline structure, all split processors, and configuration — is serialized into a single file.
+The entire `Inferencer` — node specs, every split's processors, and the output filter — is serialized into a single file.
 
 **Save:**
 
@@ -48,9 +49,9 @@ predictions = inferencer.process(test_df, agg='mean')
 
 Input can be any pandas/polars/numpy object that the pipeline was trained on.
 
-### Selecting Head Nodes
+### Selecting Predictors
 
-By default `process()` runs all selected Head nodes and concatenates their outputs column-wise. Pass `nodes` to restrict to a subset:
+By default `process()` runs every Predictor the Trainer trained and concatenates their outputs column-wise. Pass `nodes` to restrict it to a subset:
 
 ```python
 # Single head

@@ -6,11 +6,16 @@ Auto-generated from source docstrings via [mkdocstrings](https://mkdocstrings.gi
 
 | Module | Contents |
 |--------|----------|
-| [Pipeline](pipeline.md) | `Pipeline`, `PipelineGroup`, `PipelineNode` |
+| [Project](project.md) | `Project`, `TrialStore` |
+| [Pipeline](pipeline.md) | `PipelineBuilder`, `Pipeline`, `ProcessorSpec`, `ColSelector` |
 | [Experimenter](experimenter.md) | `Experimenter`, `DataCache` |
+| [Trials & Predictors](trials.md) | `Trial`, `make_trials`, `Predictor`, `PredictorStore` |
 | [Trainer](trainer.md) | `Trainer` |
 | [Inferencer](inferencer.md) | `Inferencer` |
-| [Collectors](collectors.md) | `Collector`, `MetricCollector`, `StackingCollector`, `ModelAttrCollector`, `SHAPCollector`, `OutputCollector` |
+| [Collectors](collectors.md) | `Collectors`, `CollectHist`, `Collector` and the built-in collectors |
 | [Adapters](adapters.md) | `ModelAdapter`, `LightGBMAdapter`, `XGBoostAdapter`, `CatBoostAdapter`, `KerasAdapter`, sklearn adapters |
 | [Connector](connector.md) | `Connector` |
 | [Filters](filters.md) | `DataFilter`, `RandomFilter`, `IndexFilter` |
+| [Processors](processors.md) | Built-in transformers |
+| [Neural Networks](nn.md) | `NNClassifier`, `NNRegressor` and components |
+| [Logging](logging.md) | `BaseLogger`, `DefaultLogger`, `ProgressSessionLogger` |

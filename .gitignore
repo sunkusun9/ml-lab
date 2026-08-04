@@ -65,3 +65,6 @@ result/
 catboost_info/
 model/
 exp/
+
+# mkdocs build output
+site/

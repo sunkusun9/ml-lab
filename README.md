@@ -22,55 +22,70 @@ pip install ml-labs[all]         # All optional dependencies
 
 ## Key Features
 
-- **Pipeline**: DAG-based node graph for defining ML workflows with stages (data transformation) and heads (model prediction)
-- **Experimenter**: Experiment execution engine with LRU caching, state management, and error resilience
-- **Trainer**: Cross-validation training pipeline with split management
-- **Collectors**: Extensible data collection — metrics, stacking outputs, model attributes, SHAP values, raw outputs
-- **Adapters**: Unified interface for scikit-learn, XGBoost, LightGBM, CatBoost, and Keras
-- **Data Flexibility**: Support for pandas, polars, cuDF, and NumPy arrays
+- **Project**: Owns the directory layout and what is project-wide — pipelines, Collectors, the Trial store, the shared cache
+- **PipelineBuilder → Pipeline**: A mutable builder producing an immutable node graph; definitions are declarations, resolved only at execution time
+- **Experimenter**: Evaluates **Trials** — candidate models — with nested cross-validation, caching and error resilience
+- **Trainer**: Trains **Predictors** — the candidates you chose — and exports a standalone `Inferencer`
+- **Collectors**: Extensible collection — metrics, stacking outputs, model attributes, SHAP values, raw outputs — with a per-fold history of what each one did
+- **Adapters**: Unified interface for scikit-learn, XGBoost, LightGBM, CatBoost and Keras
+- **Data Flexibility**: pandas, polars, cuDF and NumPy arrays
 
 ## Architecture Overview
 
 ```
-Pipeline          Define node graphs (stages + heads) with groups and edges
-    │
-Experimenter      Execute pipelines, manage cache and state
-    │
-  ├── ExpObj      Per-node build/experiment objects (StageObj, HeadObj)
-  ├── Trainer     Cross-validation training with split management
-  └── Collector   Collect metrics, predictions, model attributes, SHAP values
+Project ─────────── directory layout + pipelines, Collectors, TrialStore, cache
+  │
+  ├─ PipelineBuilder ──build()──► Pipeline    preprocessing nodes only
+  │
+  ├─ Experimenter ─── evaluates Trials, fold by fold          exp/{name}/
+  │
+  └─ Trainer ──────── trains Predictors on full data      trainers/{name}/
+        │
+        └─ to_inferencer() ──► Inferencer     standalone at serve time
 ```
+
+Each run keeps its splitter, its adopted Pipeline and its artifacts in its own
+directory, and reopens from that path alone — no `Project` required.
 
 **Node State Model:**
 ```
-init ──→ built ──→ finalized
-  │
-  └──→ error ──→ (reset) ──→ init
+init ──→ built
+  ▲
+  └──→ error ──→ (reset_nodes) ──→ init
 ```
 
 ## Quick Start
 
 ```python
-from mllabs import Experimenter, Connector, MetricCollector
+from mllabs import Project, Trial, Connector
 
-exp = Experimenter(data=df, path="exp/my_experiment")
+project = Project('exp')
 
-p = exp.pipeline
-p.set_grp("scale", role="stage", processor="StandardScaler")
-p.set_grp("model", role="head", processor="LogisticRegression",
-          parent="scale", edges={"X": [(None, None)], "y": [(None, "target")]})
+p = project.pipeline_builder('main')
+p.set_datasource({'age': 'numerical', 'income': 'numerical', 'target': 'binary'},
+                 targets=['target'])
+p.set_node('scale', processor='sklearn.preprocessing.StandardScaler',
+           method='fit_transform', edges={'X': '{age, income}'})
 
-p.set_node("lr_default", grp="model")
-p.set_node("lr_c01", grp="model", params={"C": 0.1})
+e = project.experimenter('cv', df, pipeline_name='main',
+                         pipeline_version=project.build_pipeline(p).version)
+e.build()
 
-mc = MetricCollector("accuracy", Connector(), output_var="prediction",
-                     metric_func=lambda y, pred: (y == pred).mean())
-exp.add_collector(mc)
+collectors = project.collectors()
+collectors.set_collector(
+    'acc', 'mllabs.collector.MetricCollector',
+    {'__ref__': 'mllabs.Connector', '__params__': {'edges': {'y': '{target}'}}},
+    params={'output_var': '-1:',
+            'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'}})
 
-exp.build(["lr_default", "lr_c01"])
-exp.exp(["lr_default", "lr_c01"])
+trials = [Trial(f'lr_{c}', 'sklearn.linear_model.LogisticRegression',
+                {'X': 'scale:(*)', 'y': '{target}'}, method='predict',
+                params={'C': c})
+          for c in (0.1, 1.0)]
 
-print(mc.get_metrics(["lr_default", "lr_c01"]))
+e.exp([(t, 0, 0) for t in trials], project.trials, collectors=collectors)
+
+print(collectors.get_collector('acc').get_metrics_agg(None)[0])
 ```
 
 ## Documentation
@@ -78,7 +93,7 @@ print(mc.get_metrics(["lr_default", "lr_c01"]))
 Full documentation is available at **https://sunkusun9.github.io/ml-labs/**
 
 - [Concepts](https://sunkusun9.github.io/ml-labs/concepts/architecture/) — Architecture, Pipeline, State model, Data flow
-- [User Guide](https://sunkusun9.github.io/ml-labs/guide/pipeline-experimenter/) — Pipeline & Experimenter, Trainer & Collectors, Adapters, Processors, Neural Networks
+- [User Guide](https://sunkusun9.github.io/ml-labs/guide/project-pipeline/) — Project & Pipeline, edges DSL, Experimenter & Trials, Trainer & Collectors, Adapters, Processors, Neural Networks
 - [Serving Guide](https://sunkusun9.github.io/ml-labs/serving/inferencer/) — Inferencer export and inference
 - [API Reference](https://sunkusun9.github.io/ml-labs/reference/index/) — Full API reference
 
