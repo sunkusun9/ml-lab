@@ -2,6 +2,7 @@ __version__ = "0.8.0"
 
 from ._logger import BaseLogger, DefaultLogger, ProgressSessionLogger, BaseProgressSession, TqdmProgressSession
 from ._experimenter import Experimenter
+from ._trainer import Trainer
 from ._inferencer import Inferencer
 from ._connector import Connector
 from ._pipeline import ColSelector, Pipeline, PipelineBuilder, ProcessorSpec
@@ -15,6 +16,7 @@ from .filter import DataFilter, RandomFilter, IndexFilter
 
 __all__ = [
     'Experimenter',
+    'Trainer',
     'Inferencer',
     'Connector',
     'Collector',
