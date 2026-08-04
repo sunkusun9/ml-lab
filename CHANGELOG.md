@@ -5,6 +5,128 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-05
+
+A rework of how a project, a pipeline and a run relate to each other. **Almost
+every entry point changed shape**; code written against 0.8.x will not run
+unmodified. Three ideas drive the rest:
+
+- **`Project` is the root.** It owns the directory layout and what is genuinely
+  project-wide; a run owns its own state and reopens from its own directory.
+- **Definitions are declarations.** A processor is named by string, inputs by a
+  DSL string, params by plain data — nothing is imported or instantiated until
+  it runs.
+- **Identity is by value.** No content hashes, no generation counters. Staleness
+  is a field-by-field diff between two Pipeline versions.
+
+### Added
+
+- `Project` (`mllabs/_project.py`): owns the directory layout, the pipelines,
+  the `Collectors` registry, the `TrialStore`, the shared cache, and an index of
+  run names. Factories: `pipeline_builder`, `collectors`, `experimenter`,
+  `trainer`, `load_experimenter`, `load_trainer`, `build_pipeline`,
+  `load_pipeline`, `list_pipeline_versions`
+- `PipelineBuilder` → `Pipeline`: a mutable, SQLite-backed builder and the
+  immutable node graph `build()` produces. `Experimenter`/`Trainer`/`Inferencer`
+  accept only the built form, so editing a builder cannot leak into a run in
+  progress. `Project.build_pipeline()` persists each build as the next version
+- `Trial` and `make_trials` (`mllabs/_trial.py`), `TrialStore`: models moved out
+  of the Pipeline. A Trial is a candidate being compared, so definitions and
+  per-fold outcomes live in a project-wide store
+- `Predictor` and `PredictorStore`: the Trainer-side counterpart. A Predictor is
+  a decision already made, so it carries provenance (`src_trial`,
+  `src_experimenter`) via `Predictor.from_trial()` and its registry is
+  per-Trainer
+- `ProcessorSpec`: the single execution-unit representation nodes, Trials and
+  Predictors all resolve to — `name`, `processor`, `edges`, `method`, `adapter`,
+  `params`
+- edges DSL (`mllabs/_edge_dsl.py`): `{a, b}` set literals, regex patterns,
+  `node:(...)` namespaces, `+`/`-`/`&`, Python slices, and `@selector` suffixes
+- Built-in dtype column selectors: `@numeric`, `@categorical`, `@binary`,
+  `@float`, `@int`, `@string`
+- `Collectors` registry with `CollectorStore`: definitions persist as parts to
+  reassemble — a plain-text row plus pickled constructor params — never as a
+  pickled instance. `set_collector` writes through
+- `CollectHist`: one row per (collector, experimenter, node, outer, inner), with
+  `status` split into `'collected'` / `'empty'` / `'error'`. `'empty'` is the
+  point — a mis-set `output_var` and a crash both produced `None` before
+- `Experimenter.open_os_log()` / `close_os_log()` / `os_log()`: capture
+  OS-level (fd 1/2) output from native libraries, per worker when `n_jobs > 1`
+- `stack_evals_result` (`mllabs/adapter/_base.py`), shared by all four adapters
+- `Trainer` is exported from the package root
+- Full documentation rewrite, including a page for the edges DSL
+
+### Changed
+
+- **`edges` is a DSL string**, not a list of `(node_name, var_spec)` tuples, and
+  stays one through inheritance, storage and comparison. Columns are resolved
+  only at execution time, against real data. `set_grp`/`set_node` validate
+  structure alone
+- **`processor` must be a `"module.ClassName"` string.** Class objects are
+  rejected at definition time. `adapter` takes a string or a `{"__ref__": ...}`
+  spec, and `params` takes plain data or ref specs — all resolved only when a
+  processor is constructed. This is also a correctness fix: `Connector` compares
+  `processor` as a plain string, so a class-defined node could never match a
+  string-configured Connector, silently collecting nothing
+- LightGBM `early_stopping` must be given as a dict of kwargs; a callback
+  instance is no longer accepted. `mllab_sampler` must be a ref spec
+- `Experimenter` and `Trainer` take no `Project` — only a `cache`. Each builds
+  its own store from its path, keeps its own `pipeline.pkl`, and reopens with
+  `Experimenter.load_experimenter(path, data)` / `Trainer.load_trainer(path, data)`.
+  `(pipeline_name, pipeline_version)` survives as provenance only
+- `set_pipeline(pipeline)` takes an already-built Pipeline object
+- `Experimenter.exp(trials, trial_store, ...)` takes explicit
+  `(trial, outer_idx, inner_idx)` triples and a required `trial_store`
+- `Trainer.train(predictors)` takes what to train directly
+- Pipeline definition is stored in SQLite, editable without a live kernel
+- `MetricCollector` writes to `metrics.db` as each inner fold completes,
+  replacing per-node pickle files (#120)
+- `NodeStore` is per run rather than per fold, and owns both artifacts and
+  history; `DataCache` is keyed by a per-flow scope id
+- `Trainer` accepts a native DataFrame as well as a `DataWrapper`; `wrap()` is
+  idempotent
+
+### Removed
+
+- Node `role` and the "stage" vocabulary. A Pipeline holds nodes only
+- Head nodes in the Pipeline — they are Trials and Predictors now
+- The `finalized` node state, and the Experimenter's open/closed session:
+  `finalize`, `reinitialize`, `close_exp`, `reopen_exp`, `open`, `close`,
+  `status`
+- Node `serial` and `Trial.content_key` — superseded by value comparison
+- `Experimenter.create` / `load` / `set_grp` / `set_node` / `add_collector` /
+  `get_collector` / `collect` / `get_collect_status` / `add_trainer` /
+  `process_ext`
+- `Trainer.select_head`, `Trainer.set_predictors`, `Trainer.load`
+- `Collector.save` / `load` and `Collector.warnings`, which was excluded from
+  neither `__getstate__` nor the worker round trip and so only ever worked in a
+  single process
+- `Inferencer.selected_heads` → `selected_predictors`
+
+### Fixed
+
+- A worker killed by the OOM killer or a native segfault no longer strands the
+  rest of the pool: `wait()` reports a closed pipe as readable, the resulting
+  `EOFError` escaped before the stop sentinel was sent, and the surviving
+  workers blocked forever holding memory and CUDA contexts. Worker death is an
+  outcome now and shutdown moved into a `finally`
+- Ragged `evals_result` curves (CatBoost records `eval_metric` on its own
+  cadence) no longer break collection; all four adapters shared the same latent
+  `pd.DataFrame({metric: list})` construction
+- `stack_evals_result` pins whether padded positions survive, which pandas 2.x
+  and `future_stack` disagree on — the same code gave different output per
+  environment
+- Multi-worker executor read completed artifacts from the flow's store instead
+  of the one it was passed, failing once a Trainer fed Predictors from the node
+  flow while storing them elsewhere
+- `Trainer.process()` lost Predictor edges after a reload and silently yielded
+  nothing
+- Executor errors are keyed by full job identity, so a trial failing on several
+  inner folds no longer loses all but one, and the success count is right
+- `ProbToLabel` had never been migrated to the DSL and was silently broken
+- `Collector` failures are recorded and no longer interrupt a run; an exception
+  in the parent's `push` used to orphan the worker pool
+
 ## [0.8.0] - 2026-05-16
 
 ### Added
