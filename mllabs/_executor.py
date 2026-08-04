@@ -9,6 +9,8 @@ from multiprocessing.connection import wait
 
 _mp_ctx = multiprocessing.get_context('spawn')
 
+_JOIN_TIMEOUT = 10
+
 from ._node_processor import ProgressMonitor
 from ._pipeline import _definition_of
 
@@ -32,6 +34,27 @@ def _prep_error_info(edges, exc):
             'type': type(exc).__name__,
             'message': str(exc),
             'traceback': traceback.format_exc(),
+        },
+    }
+
+
+def _worker_lost_info(edges, message):
+    """A worker died with a job in flight, or none was left to take one.
+
+    Same shape as :func:`_prep_error_info` — there is no exception to format
+    here, because the failure is the *absence* of the process that would have
+    raised one.
+    """
+    return {
+        'build_id': str(uuid.uuid4()),
+        'fit_time': 0.0,
+        'train_shape': None,
+        'edges': edges,
+        'status': 'error',
+        'error': {
+            'type': 'WorkerLost',
+            'message': message,
+            'traceback': None,
         },
     }
 
@@ -485,6 +508,24 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
     call — at worst an opportunistic cross-type dispatch is delayed one
     cycle, corrected on the next 'done'/'error' event.
 
+    A worker dying is a normal outcome here, not an exception. ``wait()``
+    reports a closed pipe as readable, so a worker killed by the OOM killer or
+    a segfault in a native library surfaces as ``EOFError`` out of ``recv()``.
+    That used to escape the dispatch loop entirely, which meant the shutdown
+    below never ran and every *other* worker stayed blocked in its own
+    ``recv()`` forever — daemon processes outlive nothing when the parent is a
+    notebook kernel that never exits, so they sat there holding their memory
+    and, for GPU workers, their CUDA context. The job in flight is recorded as
+    a ``WorkerLost`` error instead, the connection leaves ``all_conns`` (EOF is
+    a persistent state — polling it again would spin), and the run continues on
+    whatever workers are left. If none are, the jobs that never got to run are
+    recorded too, so the caller's ``len(jobs) - len(errors)`` still counts.
+
+    Shutdown is in a ``finally`` for the same reason: the loop has several ways
+    out that are not the normal one (a store read, a history write, a tracker
+    call), and any of them reaching the end of the function was what decided
+    whether the pool got cleaned up.
+
     Returns ``{(outer_idx, inner_idx, name): error_info}``, same shape and
     same reason as ``_execute_single``.
     """
@@ -505,9 +546,6 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
         child_conn.close()
         workers.append((w, parent_conn))
 
-    for _, conn in workers:
-        conn.recv()  # wait for 'ready'
-
     free_gpu = list(range(n_gpu))
     free_cpu = list(range(n_gpu, n_jobs))
     busy = {}         # conn -> Job
@@ -515,6 +553,41 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
     push_errors = {}  # {(collector, node, outer_idx, inner_idx): outcome}
     router = _TrackerRouter(0, tracker)
     all_conns = [conn for _, conn in workers]
+
+    def _teardown():
+        for _, conn in workers:
+            try:
+                conn.send(None)
+            except Exception:
+                pass
+        for w, _ in workers:
+            w.join(timeout=_JOIN_TIMEOUT)
+            if w.is_alive():
+                w.terminate()
+                w.join(timeout=_JOIN_TIMEOUT)
+        for _, conn in workers:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _worker_died(worker_idx, conn, reason):
+        if conn in all_conns:
+            all_conns.remove(conn)
+        for pool in (free_gpu, free_cpu):
+            if worker_idx in pool:
+                pool.remove(worker_idx)
+        job = busy.pop(conn, None)
+        if job is None:
+            return
+        info = _worker_lost_info(job.spec.edges, f"worker {worker_idx} {reason}")
+        errors[(job.outer_idx, job.inner_idx, job.name)] = info
+        if tracker:
+            tracker.error(worker_idx, job.name, job.outer_idx, job.inner_idx, info)
+        if collectors is not None:
+            for c in collectors:
+                if c.connector.match(job.spec):
+                    c.abort_node(job.name)
 
     def _collect_ready():
         in_flight = {(j.outer_idx, j.inner_idx, j.name) for j in busy.values()}
@@ -546,8 +619,13 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
             return
 
         _, conn = workers[worker_idx]
-        conn.send((job.spec, job.outer_idx, job.inner_idx, train_data, valid_data, test_data, ext_data))
         busy[conn] = job
+        try:
+            conn.send((job.spec, job.outer_idx, job.inner_idx,
+                       train_data, valid_data, test_data, ext_data))
+        except (EOFError, OSError):
+            _worker_died(worker_idx, conn, 'died before its job could be sent')
+            return
         (free_gpu if worker_idx < n_gpu else free_cpu).remove(worker_idx)
         if tracker:
             tracker.start(worker_idx, job.name, job.outer_idx, job.inner_idx)
@@ -569,76 +647,96 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
             else:
                 break
 
-    _try_dispatch()
+    try:
+        for worker_idx, (_, conn) in enumerate(workers):
+            try:
+                conn.recv()  # wait for 'ready'
+            except (EOFError, OSError):
+                _worker_died(worker_idx, conn, 'died before it was ready')
 
-    while busy:
-        for conn in wait(all_conns):
-            msg_type, *data = conn.recv()
-            worker_idx = next(i for i, (_, c) in enumerate(workers) if c is conn)
-            job = busy[conn]
-            outer_idx, inner_idx, node_name = job.outer_idx, job.inner_idx, job.name
+        _try_dispatch()
 
-            if msg_type == 'done':
-                info = data[0]
-                # Read back through *store*, not job.flow's own: the worker
-                # wrote where this call was told to write, and a caller can
-                # aim the two elsewhere (a Trainer feeds Predictors from the
-                # node flow while storing them separately).
-                obj, result = store.get_objs(node_name, outer_idx, inner_idx)
-                job.flow.set_objs(node_name, obj, result, {'edges': job.spec.edges})
-                del busy[conn]
-                (free_gpu if worker_idx < n_gpu else free_cpu).append(worker_idx)
+        while busy and all_conns:
+            for conn in wait(all_conns):
+                worker_idx = next(i for i, (_, c) in enumerate(workers) if c is conn)
+                try:
+                    msg_type, *data = conn.recv()
+                except (EOFError, OSError):
+                    _worker_died(worker_idx, conn, 'died with a job in flight')
+                    _try_dispatch()
+                    continue
+                job = busy.get(conn)
+
+                if msg_type in ('done', 'error') and job is None:
+                    continue
+                if job is not None:
+                    outer_idx, inner_idx, node_name = job.outer_idx, job.inner_idx, job.name
+
+                if msg_type == 'done':
+                    info = data[0]
+                    # Read back through *store*, not job.flow's own: the worker
+                    # wrote where this call was told to write, and a caller can
+                    # aim the two elsewhere (a Trainer feeds Predictors from the
+                    # node flow while storing them separately).
+                    obj, result = store.get_objs(node_name, outer_idx, inner_idx)
+                    job.flow.set_objs(node_name, obj, result, {'edges': job.spec.edges})
+                    del busy[conn]
+                    (free_gpu if worker_idx < n_gpu else free_cpu).append(worker_idx)
+                    if tracker:
+                        tracker.done(worker_idx, node_name, outer_idx, inner_idx, info)
+                    _try_dispatch()
+
+                elif msg_type == 'error':
+                    info = data[0]
+                    errors[(outer_idx, inner_idx, node_name)] = info
+                    del busy[conn]
+                    (free_gpu if worker_idx < n_gpu else free_cpu).append(worker_idx)
+                    if tracker:
+                        tracker.error(worker_idx, node_name, outer_idx, inner_idx, info)
+                    if collectors is not None:
+                        for c in collectors:
+                            if c.connector.match(job.spec):
+                                c.abort_node(node_name)
+                    _try_dispatch()
+
+                elif msg_type == 'collect':
+                    coll_name, n, o, i, res = data
+                    for c in (collectors or []):
+                        if c.name == coll_name:
+                            try:
+                                c.push(n, o, i, res)
+                            except Exception as e:
+                                push_errors[(coll_name, n, o, i)] = _collect_error(
+                                    c, 'push', e, n, o, i, router)
+                            break
+
+                elif msg_type == 'collect_hist':
+                    n, o, i, outcomes = data
+                    if tracker:
+                        tracker.collect(n, o, i, [
+                            push_errors.pop((oc['collector'], n, o, i), oc) for oc in outcomes
+                        ])
+
+                elif msg_type == 'progress':
+                    if tracker:
+                        tracker.progress(worker_idx, *data)
+                elif msg_type == 'warning':
+                    if tracker:
+                        tracker.message(worker_idx, data[0], typ = 'warning')
+                elif msg_type == 'info':
+                    if tracker:
+                        tracker.message(worker_idx, data[0])
+
+        if not all_conns:
+            for job in jobs:
+                key = (job.outer_idx, job.inner_idx, job.name)
+                if key in errors or job.name in job.flow.node_objs:
+                    continue
+                errors[key] = _worker_lost_info(job.spec.edges, 'no worker left to run it')
                 if tracker:
-                    tracker.done(worker_idx, node_name, outer_idx, inner_idx, info)
-                _try_dispatch()
-
-            elif msg_type == 'error':
-                info = data[0]
-                errors[(outer_idx, inner_idx, node_name)] = info
-                del busy[conn]
-                (free_gpu if worker_idx < n_gpu else free_cpu).append(worker_idx)
-                if tracker:
-                    tracker.error(worker_idx, node_name, outer_idx, inner_idx, info)
-                if collectors is not None:
-                    for c in collectors:
-                        if c.connector.match(job.spec):
-                            c.abort_node(node_name)
-                _try_dispatch()
-
-            elif msg_type == 'collect':
-                coll_name, n, o, i, res = data
-                for c in (collectors or []):
-                    if c.name == coll_name:
-                        try:
-                            c.push(n, o, i, res)
-                        except Exception as e:
-                            push_errors[(coll_name, n, o, i)] = _collect_error(
-                                c, 'push', e, n, o, i, router)
-                        break
-
-            elif msg_type == 'collect_hist':
-                n, o, i, outcomes = data
-                if tracker:
-                    tracker.collect(n, o, i, [
-                        push_errors.pop((oc['collector'], n, o, i), oc) for oc in outcomes
-                    ])
-
-            elif msg_type == 'progress':
-                if tracker:
-                    tracker.progress(worker_idx, *data)
-            elif msg_type == 'warning':
-                if tracker:
-                    tracker.message(worker_idx, data[0], typ = 'warning')
-            elif msg_type == 'info':
-                if tracker:
-                    tracker.message(worker_idx, data[0])
-
-    for _, conn in workers:
-        conn.send(None)
-    for w, _ in workers:
-        w.join()
-    for _, conn in workers:
-        conn.close()
+                    tracker.error(0, job.name, job.outer_idx, job.inner_idx, errors[key])
+    finally:
+        _teardown()
 
     return errors
 

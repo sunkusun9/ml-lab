@@ -110,6 +110,27 @@ class WarnPredictor:
         return np.zeros(len(X), dtype=int)
 
 
+class SuicidalProcessor:
+    """Takes its worker process down mid-fit.
+
+    os._exit skips every cleanup path — no exception, no 'error' message back
+    to the parent, just a closed pipe. That is what an OOM kill or a segfault
+    inside a native library looks like from the dispatch loop.
+    """
+    def __init__(self, **kwargs):
+        pass
+
+    def fit(self, X, y=None, **kwargs):
+        import os
+        os._exit(1)
+
+    def transform(self, X):
+        return X
+
+    def fit_transform(self, X, y=None, **kwargs):
+        self.fit(X, y)
+
+
 class BrokenCollector(Collector):
     """Raises inside collect — must be module-level so a path-backed
     Collectors registry can pickle it at registration time."""

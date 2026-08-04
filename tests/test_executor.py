@@ -459,3 +459,55 @@ class TestTrainerMulti:
 
         assert t.get_status('scaler') == 'built'
         assert t.get_status('dt') == 'built'
+
+
+def _fatal_pipeline(pipeline, exp):
+    """A stage whose fit kills its worker, alongside one that behaves."""
+    pipeline.set_grp('good', processor='sklearn.preprocessing.StandardScaler',
+                     method='transform', edges={'X': '{f1}'})
+    pipeline.set_node('good_node', grp='good')
+    pipeline.set_grp('fatal', processor='mock.SuicidalProcessor',
+                     method='transform', edges={'X': '{f2}'})
+    pipeline.set_node('fatal_node', grp='fatal')
+    exp.set_pipeline(pipeline.build())
+
+
+class TestWorkerDeath:
+    """A worker dying used to escape the dispatch loop as an unhandled
+    EOFError, which skipped the shutdown at the end of _execute_multi and left
+    every other worker blocked in recv() for the life of the parent."""
+
+    def test_the_run_terminates_and_records_the_lost_job(self, exp, pipeline):
+        _fatal_pipeline(pipeline, exp)
+
+        exp.build(n_jobs=2)
+
+        assert _stage_errored(exp, 'fatal_node')
+        errors = [r for r in exp.node_store.get_hist(node_name='fatal_node')
+                  if r['status'] == 'error']
+        assert len(errors) == exp.get_n_splits()
+        assert any(r['info']['error']['type'] == 'WorkerLost' for r in errors)
+
+    def test_no_worker_outlives_the_call(self, exp, pipeline):
+        import multiprocessing
+
+        _fatal_pipeline(pipeline, exp)
+        before = {p.pid for p in multiprocessing.active_children()}
+
+        exp.build(n_jobs=2)
+
+        leaked = {p.pid for p in multiprocessing.active_children()} - before
+        assert not leaked
+
+    def test_a_clean_run_also_leaves_nothing_behind(self, exp, pipeline, trial_store):
+        import multiprocessing
+
+        _setup_full(pipeline, exp)
+        before = {p.pid for p in multiprocessing.active_children()}
+
+        exp.build(n_jobs=2)
+        exp.exp(_folds(_model(), exp), trial_store, n_jobs=2)
+
+        leaked = {p.pid for p in multiprocessing.active_children()} - before
+        assert not leaked
+        assert exp.get_status('scaler') == 'built'
