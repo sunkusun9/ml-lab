@@ -29,7 +29,9 @@ nav:
     - concepts/state-model.md
     - concepts/data-flow.md
   - User Guide:
-    - guide/pipeline-experimenter.md
+    - guide/project-pipeline.md
+    - guide/edges-dsl.md
+    - guide/experimenter-trials.md
     - guide/trainer-collectors.md
     - guide/adapters.md
     - guide/processors.md

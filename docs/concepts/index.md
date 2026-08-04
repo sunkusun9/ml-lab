@@ -1,27 +1,27 @@
 # Concepts
 
-This section explains the core ideas behind ml-labs — how it models ML workflows, manages state, and moves data through a pipeline.
+This section explains the model behind the API — how ml-labs describes an ML workflow, decides what has to be re-run, and moves data through the graph.
 
 ---
 
 ## [Architecture](architecture.md)
 
-ml-labs is built around four cooperating modules: **Pipeline**, **Experimenter**, **Trainer**, and **Inferencer**. Each has a single, well-defined responsibility. Understanding how they relate to each other is the starting point for everything else.
+`Project` owns what is project-wide; each **run** — an `Experimenter` or a `Trainer` — owns its own state and reopens from its own directory. An Experimenter evaluates **Trials**, a Trainer trains **Predictors**, and an `Inferencer` serves the result standalone.
 
 ---
 
 ## [Pipeline](pipeline.md)
 
-A `Pipeline` is a directed node graph that describes *what* to run and *how* nodes connect — not *when* or *with what data*. Nodes are organised into **groups** for shared configuration, and **edges** specify which upstream outputs feed into each node.
+A mutable `PipelineBuilder` produces an immutable `Pipeline` — preprocessing nodes only, with group inheritance already resolved. Definitions are declarations: a processor is named by string and nothing is instantiated until it runs.
 
 ---
 
 ## [State Model](state-model.md)
 
-Every node tracks its own lifecycle: `init → built → finalized` (or `error`). At the `Experimenter` level, a session is either **open** or **closed**. Knowing the state model helps you understand when results are available, when resources are held, and how to recover from errors.
+A node is `init`, `built`, or `error`, per fold. What gets skipped is decided from disk and history, not by comparing definitions — so redefining a Trial does not re-run it. Adopting a new Pipeline version is the one thing that invalidates work automatically, by diffing the two versions.
 
 ---
 
 ## [Data Flow](data-flow.md)
 
-Data travels from **DataSource** through **Stage** nodes to **Head** nodes, assembled at each step according to the node's `edges`. This page explains the `data_dict` structure that processors receive, how the LRU cache works, and how X-less nodes (e.g. `LabelEncoder`) are handled.
+`edges` stays a DSL string everywhere and becomes actual columns only at execution time, against real data. This page covers the `data_dict` a processor receives, the shared cache and how it is keyed, and why inference can run on data with no target column.
