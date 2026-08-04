@@ -21,6 +21,9 @@ class TestStackEvalsResult:
         assert len(s) == 6
 
     def test_ragged_curves_in_one_split(self):
+        """The padded tail is dropped rather than left as NaN — whether
+        .stack() itself drops it depends on the pandas version, so the helper
+        settles it instead of inheriting that default."""
         s = stack_evals_result({
             'learn': {'MultiClass': [1.0, 0.9, 0.8]},
             'validation': {'MultiClass': [1.1, 1.0, 0.95], 'AUC': [0.5, 0.6]},
@@ -28,6 +31,19 @@ class TestStackEvalsResult:
         assert s[(1, 'AUC', 'validation')] == 0.6
         assert s[(2, 'MultiClass', 'validation')] == 0.95
         assert (2, 'AUC', 'validation') not in s.index
+        assert not s.isna().any()
+
+    def test_metric_absent_from_a_split_leaves_no_row(self):
+        """CatBoost records AUC on validation only, so (iter, 'AUC', 'learn')
+        is NaN for every iteration. Those rows were dropped before this helper
+        existed, and get_attrs_agg's groupby/mean still assumes they are."""
+        s = stack_evals_result({
+            'learn': {'MultiClass': [1.0, 0.9]},
+            'validation': {'MultiClass': [1.1, 1.0], 'AUC': [0.5, 0.6]},
+        })
+        assert [k for k in s.index if k[1] == 'AUC'] == [
+            (0, 'AUC', 'validation'), (1, 'AUC', 'validation')
+        ]
 
     def test_ragged_result_matches_the_equal_length_path(self):
         """Padding must not invent values: the rows a short curve does have are

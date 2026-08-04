@@ -19,7 +19,7 @@ def stack_evals_result(evals_result):
          .stack().rename(name)
          for name, split in evals_result.items()],
         axis=1,
-    ).stack()
+    ).stack().dropna()
 
 
 class ModelAdapter(ABC):

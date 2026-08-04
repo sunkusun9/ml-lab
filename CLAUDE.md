@@ -554,7 +554,8 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
   - `CatBoostAdapter`: `_catboost_supports_polars()` (>=1.3.0) 기반 분기 — 구버전이면 polars→pandas (`get_fit_params`도 동일 적용)
 - `result_objs`: `{name: (callable, mergeable_bool)}`
 - **`stack_evals_result(evals_result)`(`_base.py`, 2026-08-04)**: `{split: {metric: [iteration별 값]}}` → 하나의 stacked Series. XGBoost/LightGBM/CatBoost/NN 네 어댑터의 `_get_evals_result`가 전부 이걸 씀
-  - **한 split 안에서 metric 곡선 길이가 달라도 됨** — 예전엔 넷 다 `pd.DataFrame({metric: list})`를 만들어서 `ValueError: All arrays must be of the same length`로 터졌음. 각 곡선을 `pd.Series`로 감싸면 iteration 인덱스로 정렬되고 짧은 쪽은 `.stack()`이 그냥 떨궈서(NaN을 만들어 넣지 않음) 길이가 같을 때와 결과가 동일
+  - **한 split 안에서 metric 곡선 길이가 달라도 됨** — 예전엔 넷 다 `pd.DataFrame({metric: list})`를 만들어서 `ValueError: All arrays must be of the same length`로 터졌음. 각 곡선을 `pd.Series`로 감싸면 iteration 인덱스로 정렬되고 짧은 쪽은 NaN으로 패딩됨
+  - **`.stack()` 뒤의 `.dropna()`가 명시적인 이유(2026-08-04)**: 패딩된 자리를 남길지 떨굴지가 pandas 버전에 따라 다름 — 2.x의 `.stack()`은 NaN을 떨구고 `future_stack` 동작은 유지함. 기본값에 기대면 **같은 코드가 환경에 따라 다른 모양을 냄**(실제로 pandas 2.2 환경에선 통과하고 신 pandas 환경에선 테스트가 깨졌음). 떨구는 쪽으로 고정한 건 그게 기존 동작이기 때문 — CatBoost는 AUC를 validation에만 기록해서 `(iter, 'AUC', 'learn')`이 전 iteration NaN인데, 이게 남으면 `ModelAttrCollector.get_attrs_agg`의 groupby/mean에 섞여 들어감. 결과적으로 길이가 같을 때의 출력과도 동일
   - 실제로 걸린 사례: CatBoost `eval_metric='AUC'` + early stopping. 정지 iteration에 따라 loss와 AUC의 기록 길이가 어긋나서, **같은 설정의 trial 중 일부만** 수집에 실패했음(s6e6 phase2에서 cb2/cb4만 실패, cb1/cb3/cb5는 성공 — 단일 fold·고정 seed라 피처 집합이 정지 지점을 바꾼 결과). 나머지 셋은 같은 코드를 복사한 잠복 상태였음
   - 빈 `evals_result`는 빈 Series (예전 `_nn.py`만 `pd.DataFrame()`을 돌려줘 혼자 달랐음)
 - `__eq__`: `type(self) is type(other) and self.__dict__ == other.__dict__`
