@@ -55,7 +55,7 @@ def _all_folds(trial, e):
     return [(trial, o, i) for o in range(e.get_n_splits()) for i in range(e.get_n_splits_inner())]
 
 
-def _run(built, *trials, collectors=None):
+def _run(built, *trials, collectors=None, collect_hist=None, n_jobs=1):
     """Runs every fold of the given trials (default: the fixture's own) with *collectors*.
 
     Collection happens during exp() dispatch only — a fold already recorded
@@ -66,7 +66,8 @@ def _run(built, *trials, collectors=None):
     """
     trials = trials or (built.trial,)
     folds = [f for t in trials for f in _all_folds(t, built.e)]
-    built.e.exp(folds, built.project.trials, collectors=collectors)
+    built.e.exp(folds, built.project.trials, collectors=collectors,
+                collect_hist=collect_hist, n_jobs=n_jobs)
 
 
 @pytest.fixture
@@ -747,21 +748,139 @@ class TestBaseCollector:
 
 
 class TestCollectorErrorHandling:
-    def test_exp_warning_contains_traceback(self, built_exp):
-        bc = built_exp.project.collectors().set_collector('broken', 'mock.BrokenCollector', Connector())
-        _run(built_exp, collectors=[bc])
-        w = bc.warnings[0]
-        assert 'traceback' in w
-        assert 'RuntimeError' in w['traceback']
-        assert 'collect error' in w['traceback']
+    """A failing Collector is recorded, never raised: it must not take down an
+    experiment whose Trials already ran, and in a worker the exception object
+    never reaches the parent — only what the hist row carries."""
+
+    def test_collect_error_is_recorded_with_its_traceback(self, built_exp):
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('broken', 'mock.BrokenCollector', Connector())
+        _run(built_exp, collectors=collectors)
+
+        rows = collectors.hist.get_hist(collector_name='broken')
+        assert rows and all(r['status'] == 'error' for r in rows)
+        info = rows[0]['info']
+        assert info['phase'] == 'collect'
+        assert info['type'] == 'RuntimeError'
+        assert 'collect error' in info['traceback']
 
     def test_exp_continues_other_collectors_after_error(self, built_exp):
         collectors = built_exp.project.collectors()
-        bc = collectors.set_collector('broken', 'mock.BrokenCollector', Connector())
+        collectors.set_collector('broken', 'mock.BrokenCollector', Connector())
         mc = collectors.set_collector('acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
-        _run(built_exp, collectors=[bc, mc])
+        _run(built_exp, collectors=collectors)
+
         assert mc.has_node('dt')
-        assert len(bc.warnings) > 0
+        assert collectors.hist.get_hist(collector_name='broken', status='error')
+        assert collectors.hist.get_hist(collector_name='acc', status='collected')
+
+    def test_push_failure_is_recorded_as_its_own_phase(self, built_exp):
+        """A Collector whose collect() works but whose store step blows up —
+        the fold that triggered the flush is the one that carries the error."""
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('badpush', 'mock.BrokenPushCollector', Connector())
+        _run(built_exp, collectors=collectors)
+
+        rows = collectors.hist.get_hist(collector_name='badpush')
+        assert rows and all(r['status'] == 'error' for r in rows)
+        assert rows[0]['info']['phase'] == 'push'
+
+
+class TestCollectHist:
+    """One row per (collector, experimenter, node, outer, inner) — the fold
+    keys are what make an error locatable, which is the whole point of
+    recording an outcome the Collector itself no longer keeps."""
+
+    @staticmethod
+    def _folds(e):
+        return {(o, i) for o in range(e.get_n_splits())
+                for i in range(e.get_n_splits_inner())}
+
+    def test_a_row_per_collector_and_fold(self, built_exp_inner):
+        collectors = built_exp_inner.project.collectors()
+        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        _run(built_exp_inner, collectors=collectors)
+
+        rows = collectors.hist.get_hist(collector_name='count')
+        assert {(r['outer_idx'], r['inner_idx']) for r in rows} == self._folds(built_exp_inner.e)
+        assert all(r['node_name'] == 'dt' and r['status'] == 'collected' for r in rows)
+
+    def test_row_carries_the_run_it_came_from(self, built_exp):
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        _run(built_exp, collectors=collectors)
+
+        row = collectors.hist.get_hist(collector_name='count')[0]
+        assert row['experimenter'] == built_exp.e.name
+        assert row['pipeline_version'] == built_exp.e.pipeline_version
+        assert row['collect_date'] is not None
+        assert row['elapsed'] >= 0
+
+    def test_collecting_nothing_is_not_an_error(self, built_exp):
+        """The base Collector returns None — that used to be indistinguishable
+        from a failed collect, since both produced None."""
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('noop', 'mllabs.Collector', Connector())
+        _run(built_exp, collectors=collectors)
+
+        rows = collectors.hist.get_hist(collector_name='noop')
+        assert rows and all(r['status'] == 'empty' and r['info'] is None for r in rows)
+
+    def test_only_matched_collectors_get_rows(self, built_exp):
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('count', 'mock.CountingCollector', Connector(node_query='^dt'))
+        collectors.set_collector('other', 'mock.CountingCollector', Connector(node_query='^nope'))
+        _run(built_exp, collectors=collectors)
+
+        assert collectors.hist.get_hist(collector_name='count')
+        assert collectors.hist.get_hist(collector_name='other') == []
+
+    def test_get_status_is_keyed_by_node_and_fold(self, built_exp_inner):
+        collectors = built_exp_inner.project.collectors()
+        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        _run(built_exp_inner, collectors=collectors)
+
+        status = collectors.hist.get_status('count', built_exp_inner.e.name)
+        assert set(status) == {('dt', o, i) for o, i in self._folds(built_exp_inner.e)}
+        assert set(status.values()) == {'collected'}
+
+    def test_multi_worker_records_the_same_rows(self, built_exp):
+        """_run_collectors runs in the worker, so the outcome has to travel
+        back over the pipe — only the parent ever writes the hist."""
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        _run(built_exp, collectors=collectors, n_jobs=2)
+
+        rows = collectors.hist.get_hist(collector_name='count')
+        assert {(r['outer_idx'], r['inner_idx']) for r in rows} == self._folds(built_exp.e)
+        assert all(r['status'] == 'collected' for r in rows)
+
+    def test_multi_worker_records_a_collect_error(self, built_exp):
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('broken', 'mock.BrokenCollector', Connector())
+        _run(built_exp, collectors=collectors, n_jobs=2)
+
+        rows = collectors.hist.get_hist(collector_name='broken')
+        assert rows and all(r['status'] == 'error' for r in rows)
+        assert 'collect error' in rows[0]['info']['traceback']
+
+    def test_a_bare_list_records_nothing(self, built_exp):
+        """A list has no project-global place to write to; a registry does."""
+        collectors = built_exp.project.collectors()
+        c = collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        _run(built_exp, collectors=[c])
+
+        assert collectors.hist.get_hist() == []
+
+    def test_collect_hist_argument_overrides_the_registry(self, built_exp, tmp_path):
+        from mllabs import CollectHist
+        hist = CollectHist(tmp_path / 'elsewhere')
+        collectors = built_exp.project.collectors()
+        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        _run(built_exp, collectors=collectors, collect_hist=hist)
+
+        assert hist.get_hist(collector_name='count')
+        assert collectors.hist.get_hist() == []
 
 
 class TestProcessCollector:

@@ -115,3 +115,19 @@ class BrokenCollector(Collector):
     Collectors registry can pickle it at registration time."""
     def collect(self, context):
         raise RuntimeError("collect error")
+
+
+class BrokenPushCollector(Collector):
+    """collect() succeeds, storing its result does not — the phase a
+    StackingCollector fails in when its node file cannot be written."""
+    def collect(self, context):
+        return 1
+
+    def push(self, node, outer_idx, inner_idx, result):
+        raise RuntimeError("push error")
+
+
+class CountingCollector(Collector):
+    """Returns a result for every fold, so every fold gets a 'collected' row."""
+    def collect(self, context):
+        return (context['outer_idx'], context['inner_idx'])

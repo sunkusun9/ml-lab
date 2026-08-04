@@ -68,12 +68,18 @@ from ._run_common import resolve_common_status, require_built_pipeline
 
 
 def _resolve_collectors(collectors):
-    """Accept a Collectors registry, a list of instances, or None."""
+    """``(instances, CollectHist | None)`` from a registry, a list, or None.
+
+    A registry brings its own history — it owns the project-global path both
+    the Collectors and their history live under. A bare list has no such
+    place, so its outcomes go unrecorded unless ``exp(collect_hist=...)``
+    names one.
+    """
     if collectors is None:
-        return []
+        return [], None
     if hasattr(collectors, 'resolve'):
-        return collectors.resolve(None)
-    return list(collectors)
+        return collectors.resolve(None), getattr(collectors, 'hist', None)
+    return list(collectors), None
 
 
 class OuterFold:
@@ -555,7 +561,8 @@ class Experimenter():
                     jobs.append(Job(name, spec, outer_idx, inner_idx, flow, need_gpu=need_gpu))
         return jobs
 
-    def exp(self, trials, trial_store, collectors=None, n_jobs=1, gpu_id_list=None, logger=None):
+    def exp(self, trials, trial_store, collectors=None, collect_hist=None,
+            n_jobs=1, gpu_id_list=None, logger=None):
         """Run *trials* against the Stage graph and invoke matching Collectors.
 
         Args:
@@ -568,6 +575,10 @@ class Experimenter():
                 folds are skipped as already built (see :meth:`_make_jobs`).
             collectors: :class:`~mllabs.Collectors` registry, a list of
                 Collector instances, or ``None`` to collect nothing.
+            collect_hist (CollectHist, optional): Where each Collector's
+                per-fold outcome is recorded. Defaults to the registry's own
+                ``hist`` when *collectors* is a registry; a bare list has none
+                unless one is named here.
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
             gpu_id_list (list, optional): GPU IDs to use for GPU-enabled trials.
             logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
@@ -583,7 +594,8 @@ class Experimenter():
         pipeline = self._require_pipeline()
         pipeline.check_data_compatibility(self.data)
 
-        collectors = _resolve_collectors(collectors)
+        collectors, registry_hist = _resolve_collectors(collectors)
+        collect_hist = collect_hist if collect_hist is not None else registry_hist
         jobs = self._make_jobs(trials, trial_store)
         if not jobs:
             logger.info("No trials to run")
@@ -598,6 +610,7 @@ class Experimenter():
         tracker = TrialHistTracker(
             LoggerExecuteTracker(len(jobs), n_jobs, logger),
             trial_store, self.name, self.pipeline_version,
+            collect_hist=collect_hist,
         )
 
         try:

@@ -38,6 +38,10 @@ class ExecuteTracker:
     def message(self, worker_idx, msg, typ='info'):
         self._on_update('message', worker_idx=worker_idx, msg=msg, typ=typ)
 
+    def collect(self, node_name, outer_idx, inner_idx, outcomes):
+        self._on_update('collect', node_name=node_name, outer_idx=outer_idx,
+                        inner_idx=inner_idx, outcomes=outcomes)
+
     def block(self, node_name, outer_idx, inner_idx):
         self.records[(node_name, outer_idx, inner_idx)] = {'status': 'blocked'}
         self._on_update('block', node_name=node_name,
@@ -140,19 +144,29 @@ class TrialHistTracker(ExecuteTracker):
     disk after the run — cannot tell a fold that just ran from one that was
     already built, and duplicates work the tracker has done anyway.
 
+    Collect outcomes ride along here rather than in a third wrapper: they are
+    keyed by the same ``experimenter`` and stamped with the same
+    ``pipeline_version`` this class already holds, and they arrive on the same
+    parent-process event stream for the same reason (``_run_collectors`` runs
+    in the worker, so only the parent sees every fold's outcome).
+
     Args:
         tracker (ExecuteTracker): The display/logging tracker to delegate to.
         store (TrialStore): Where history is written.
         experimenter (str): Experimenter name — half of the history key.
         pipeline_version (int): The Experimenter's ``pipeline_version`` for the run.
+        collect_hist (CollectHist, optional): Where Collector outcomes are
+            written. ``None`` records nothing — a Collector list passed without
+            a registry has nowhere project-global to write.
     """
 
-    def __init__(self, tracker, store, experimenter, pipeline_version):
+    def __init__(self, tracker, store, experimenter, pipeline_version, collect_hist=None):
         super().__init__(tracker.total, len(tracker.workers))
         self._tracker = tracker
         self._store = store
         self._experimenter = experimenter
         self._pipeline_version = pipeline_version
+        self._collect_hist = collect_hist
 
     def _record(self, node_name, outer_idx, inner_idx, status, info=None):
         self._store.record(
@@ -182,6 +196,19 @@ class TrialHistTracker(ExecuteTracker):
     def message(self, worker_idx, msg, typ='info'):
         super().message(worker_idx, msg, typ)
         self._tracker.message(worker_idx, msg, typ)
+
+    def collect(self, node_name, outer_idx, inner_idx, outcomes):
+        super().collect(node_name, outer_idx, inner_idx, outcomes)
+        if self._collect_hist is not None:
+            for outcome in outcomes:
+                self._collect_hist.record(
+                    outcome['collector'], self._experimenter, node_name,
+                    outer_idx, inner_idx,
+                    pipeline_version=self._pipeline_version,
+                    status=outcome['status'], elapsed=outcome.get('elapsed'),
+                    info=outcome.get('info'),
+                )
+        self._tracker.collect(node_name, outer_idx, inner_idx, outcomes)
 
     def block(self, node_name, outer_idx, inner_idx):
         super().block(node_name, outer_idx, inner_idx)
@@ -243,6 +270,10 @@ class NodeInfoTracker(ExecuteTracker):
     def message(self, worker_idx, msg, typ='info'):
         super().message(worker_idx, msg, typ)
         self._tracker.message(worker_idx, msg, typ)
+
+    def collect(self, node_name, outer_idx, inner_idx, outcomes):
+        super().collect(node_name, outer_idx, inner_idx, outcomes)
+        self._tracker.collect(node_name, outer_idx, inner_idx, outcomes)
 
     def block(self, node_name, outer_idx, inner_idx):
         super().block(node_name, outer_idx, inner_idx)

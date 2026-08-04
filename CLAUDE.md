@@ -240,10 +240,11 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
   - `sys.stdout`/`stderr`는 원본 fd의 dup으로 rebind되므로, capture가 열려 있어도 `DefaultLogger`의 진행률 표시 등 Python 레벨 출력은 그대로 콘솔에 보임 — dup2로 fd 1/2만 로그 파일로 돌리기 때문에 native(C-level) 직접 write만 잡힘
 - **pipeline 필요** (`_require_pipeline()`로 미설정 시 에러):
   - `build(nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None)` — 노드 빌드
-  - **`exp(trials, trial_store, collectors=None, n_jobs=1, gpu_id_list=None, logger=None)`(2026-08-01, `trial_store` 필수 인자로 추가)**
+  - **`exp(trials, trial_store, collectors=None, collect_hist=None, n_jobs=1, gpu_id_list=None, logger=None)`(2026-08-01 `trial_store` 추가, 2026-08-04 `collect_hist` 추가)**
     - `trials`: **`[(Trial, outer_idx, inner_idx), ...]`** 튜플 리스트. fold 전개를 여기서 하므로 executor는 목록을 그대로 실행
     - `trial_store`(`TrialStore`): 필수 — Trial 정의 등록/fold 스킵 판정/이력 기록 전부 여기로 함(호출부가 넘겨야 함, 보통 `project.trials`)
     - `collectors`: `Collectors` 레지스트리 / Collector 인스턴스 리스트 / `None`
+    - `collect_hist`(`CollectHist`, optional): 수집 이력. 안 주면 **레지스트리를 넘겼을 때만** 그 `collectors.hist`가 쓰임 — 맨 리스트는 쓸 프로젝트 전역 자리가 없어서 기록 안 됨(`_resolve_collectors`가 `(instances, hist)` 반환)
     - `_make_jobs(trials, trial_store)`가 `Job(name, spec, outer_idx, inner_idx, flow, need_gpu)` 리스트를 만듦(노드/Trial 공용 클래스 — 아래 `_executor.py` 섹션 참조). skip 판정은 `trial_store.get_status(name, self.name)`(= `TrialStore.experiment_hist`)의 fold별 status로만 함 — `'built'`면 스킵, 그 외(`'error'`/기록 없음)면 job 생성. GPU 판정도 여기서 하고, adapter resolve는 **trial 이름당 1회**
     - Trial 정의를 *trial_store*에 등록하고, `TrialHistTracker`가 fold별 done/error를 이력에 기록
   - `n_jobs`는 실제 작업 수로 상한 처리 (`min(n_jobs, len(jobs))`) — 유휴 워커/progress bar 방지
@@ -364,11 +365,25 @@ predictors(name PK, desc, processor, method, adapter, params, edges, tag,
   - `get_collector`/`remove_collector`(store 행+params 파일까지 삭제)/`names()`/`in`/`len`/`iter`
   - **`resolve(names)`**: 미등록 이름이면 `KeyError` — 조용히 넘어가면 "아무것도 수집 안 됨"과 구분이 안 되기 때문
   - `match(spec, names=None)`
+  - **`hist`(2026-08-04)**: 같은 path의 `CollectHist`. path 없으면 `None`. 레지스트리가 프로젝트 전역이라 이력도 여기 붙음 — 메트릭이 한곳에 모여야 비교 가능한 것과 같은 이유
   - 여러 실행이 한 레지스트리를 공유하면 메트릭이 한곳에 모여 비교 가능
+
+- **CollectHist** (`collector/_collect_hist.py`, 2026-08-04): 수집 이력
+  ```sql
+  collect_hist(collector_name, experimenter, node_name, outer_idx, inner_idx,  -- PK
+               pipeline_version, status, collect_date, elapsed, info)
+  ```
+  - **키가 fold 단위인 이유**: Collector가 자기 상태를 다루는 단위는 노드(`has_node`/`abort_node`/`reset_nodes`/`_save_node`)지만, 실패는 fold 하나에서 나고 그게 어느 fold였는지가 분석의 시작점. 노드로 접으면 그 정보가 사라짐
+  - `status`: `'collected'`(결과 반환) / `'empty'`(예외 없이 `None`) / `'error'`. **`empty`를 가른 게 핵심** — 예전엔 실패도 "수집할 게 없음"도 똑같이 `None`이라 구분 불가였음(보통 `output_var` 설정 실수)
+  - `info`(에러 시 JSON): `{phase, type, message, traceback}`. `phase`는 `'output'`(공용 `obj.process` 준비) / `'ext'`(ProcessCollector의 `output_ext`) / `'collect'` / `'push'`
+  - `elapsed`는 **`collect()` 호출 시간만** — 단일/멀티 워커에서 같은 의미가 되도록(멀티에선 push가 부모에서 돎)
+  - `record`/`record_all`/`get_hist(collector_name=, experimenter=, node_name=, status=, pipeline_version=)`/`get_status`/`get_info`/`get_errors`/`remove_hist`
+  - `get_status`/`get_info`의 키는 `(node_name, outer_idx, inner_idx)`
+  - **게이트가 아니라 로그** — `experiment_hist`와 달리 이걸 보고 뭘 스킵하지 않음. 다만 "`'built'`로 스킵된 fold엔 수집 기록이 없다"가 조회로 드러남(이미 다 돌린 실험에 collector를 새로 붙여 `exp()`를 다시 부르면 아무것도 수집 안 되는 것이 예전엔 무증상이었음)
 
 - **CollectorStore / CollectorEntity** (`collector/_store.py`, 2026-08-04): Collector 정의 저장소
   - `collectors(name PK, collector TEXT, connector TEXT, path TEXT)` + `{path}/__params/{name}.pkl`
-  - **인스턴스를 저장하지 않는다** — 조립 부품 두 쪽(entity 행 + params pkl)만 남기고 로드 때 `build_collector(entity, params)`로 **다시 조립**. `set_collector`와 완전히 같은 경로를 타므로 등록과 복원이 구조적으로 같아짐. 실행 중 인스턴스에 붙는 값(`warnings`, `_n_outer/_n_inner`)은 애초에 영속화 대상이 아님
+  - **인스턴스를 저장하지 않는다** — 조립 부품 두 쪽(entity 행 + params pkl)만 남기고 로드 때 `build_collector(entity, params)`로 **다시 조립**. `set_collector`와 완전히 같은 경로를 타므로 등록과 복원이 구조적으로 같아짐. 실행 중 인스턴스에 붙는 값(`_n_outer`/`_n_inner`)은 애초에 영속화 대상이 아님
   - `params`가 **pkl 파일**인 이유: `ProcessCollector(ext_data=df)`처럼 정의로 표현 불가능한 산 객체가 params에 들어옴 — 노드/Trial처럼 JSON 강제를 할 수 없어서 이 한 조각만 pickle. 나머지 4개는 평문 컬럼이라 **unpickle 없이** 목록/내용 조회 가능(`list_entities()`)
   - `CollectorEntity`(`__slots__`: `name`/`collector`/`connector`/`path`) — 한 행의 표현. `of(name, collector, connector, path)`가 준 대로의 **문자 원형**으로 정규화(클래스를 넘겼으면 `_obj_to_ref`, `Connector` 인스턴스면 `{__ref__, __params__}`)
   - `register(entity, params)` / `build(name)` / `load_all()` / `get_entity` / `list_entities` / `get_params` / `names` / `remove`
@@ -377,10 +392,11 @@ predictors(name PK, desc, processor, method, adapter, params, edges, tag,
 
 - **Collector** (`_base.py`): 기본 클래스
   - `__init__(name, connector)`, `path`는 `Collectors.set_collector` 시 설정
-  - 라이프사이클: `_start(node)`, `_collect(node, idx, inner_idx, context)`, `_end_idx(node, idx)`, `_end(node)`
-  - 에러 처리: `_collect`/`_end_idx`는 safe wrapper로 try/except 래핑; `_start`/`_end`는 직접 호출 — 에러 시 `warnings` 리스트에 저장 후 warning 로그
+  - 라이프사이클: `collect(context)` → `push(node, outer_idx, inner_idx, result)` → (inner 버퍼가 차면) `_flush_outer(node, outer_idx, inner_list)` → (서브클래스에 따라) `_save_node(node)`
+  - **에러 처리(2026-08-04 개정)**: `_executor._safe_collect`가 `ext`/`collect`/`push` 세 구간을 전부 try/except로 감싸 `CollectHist`에 기록하고 실행을 계속함. **`Collector.warnings` 필드는 제거됨** — `__getstate__`에서 제외되지 않아 워커로 pickle돼 나갔다가 거기서 append되고 버려져, 실질적으로 단일 프로세스에서만 동작하던 필드였음. 이력은 항상 부모 프로세스가 씀(`TrialHistTracker`)이라 두 모드가 같은 경로
+  - `push`를 감싼 이유는 기록만이 아님 — 멀티워커에선 부모 메시지 루프가 `c.push()`를 부르므로, 여기서 예외가 나면 워커에 종료 sentinel이 안 가서 **좀비 프로세스로 남았음**
   - `on_attach(experimenter)`: `exp()`가 호출 — experimenter identity 비교로 중복 재계산 방지; `_on_attach(experimenter)` no-op 훅을 subclass에서 override
-  - `_experimenter`: pickle 제외 (save/load 시 None으로 초기화)
+  - `_experimenter`: pickle 제외 (`__getstate__`/`__setstate__` — 워커로 보낼 때 None으로 초기화)
   - `has_node(node)`: 수집 결과 보유 여부 (구 `has()`는 중복이라 제거됨)
   - `reset_nodes(nodes)`(base: `self._buf`에서 해당 노드 제거 — 서브클래스는 `super().reset_nodes(nodes)` 먼저 호출 후 자신의 disk/cache 정리). **`save()`/`load()` 없음(2026-08-04 제거)** — 정의는 `CollectorStore`가, 데이터는 각 서브클래스가 자기 `path`에 이미 즉시 기록함
   - `_get_nodes(nodes, available)`: None/list/str(regex) 패턴 매칭
@@ -537,6 +553,10 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
   - `LightGBMAdapter`: polars→pandas 변환 (LightGBM polars 미지원); `early_stopping` dict 수락 → 내부에서 `lgb_early_stopping` 콜백으로 변환 (params에 콜백 인스턴스를 넣을 수 없으므로 이 dict 형태가 유일한 지정 방법)
   - `CatBoostAdapter`: `_catboost_supports_polars()` (>=1.3.0) 기반 분기 — 구버전이면 polars→pandas (`get_fit_params`도 동일 적용)
 - `result_objs`: `{name: (callable, mergeable_bool)}`
+- **`stack_evals_result(evals_result)`(`_base.py`, 2026-08-04)**: `{split: {metric: [iteration별 값]}}` → 하나의 stacked Series. XGBoost/LightGBM/CatBoost/NN 네 어댑터의 `_get_evals_result`가 전부 이걸 씀
+  - **한 split 안에서 metric 곡선 길이가 달라도 됨** — 예전엔 넷 다 `pd.DataFrame({metric: list})`를 만들어서 `ValueError: All arrays must be of the same length`로 터졌음. 각 곡선을 `pd.Series`로 감싸면 iteration 인덱스로 정렬되고 짧은 쪽은 `.stack()`이 그냥 떨궈서(NaN을 만들어 넣지 않음) 길이가 같을 때와 결과가 동일
+  - 실제로 걸린 사례: CatBoost `eval_metric='AUC'` + early stopping. 정지 iteration에 따라 loss와 AUC의 기록 길이가 어긋나서, **같은 설정의 trial 중 일부만** 수집에 실패했음(s6e6 phase2에서 cb2/cb4만 실패, cb1/cb3/cb5는 성공 — 단일 fold·고정 seed라 피처 집합이 정지 지점을 바꾼 결과). 나머지 셋은 같은 코드를 복사한 잠복 상태였음
+  - 빈 `evals_result`는 빈 Series (예전 `_nn.py`만 `pd.DataFrame()`을 돌려줘 혼자 달랐음)
 - `__eq__`: `type(self) is type(other) and self.__dict__ == other.__dict__`
 - `__hash__`: `id(self)` — set/dict 키로 사용 가능
 - **adapter 지정 방식** (`set_grp`/`set_node`의 `adapter=`): `"module.ClassName"` 문자열 / `{"__ref__": ..., "__params__": {...}}` / `None`만 허용(**인스턴스는 `TypeError`**) — **저장 시점엔 resolve 안 함**, `_node_processor.py`가 인스턴스 생성 시 `resolve_node_adapter(processor, adapter)`로 resolve(`adapter.resolve_node_adapter`, `adapter/__init__.py`)
@@ -580,14 +600,19 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
     - **워커 배정 fallback 정책은 옛 `_experiment_multi` 쪽을 채택**(노드에도 동일 적용) — "내 타입" job이 아직 남아있으면 그 타입 몫 worker를 다른 타입에 안 뺏기는 정책(`elif free_cpu and not cpu_ready and gpu_fallback_cpu`)이 옛 `_build_flow_multi`의 무조건 fallback보다 나음. 단, ready 목록을 매 사이클 재계산하는 탓에 같은 `_try_dispatch()` 호출 안에서 GPU pass가 막 dispatch한 job이 CPU pass의 "내 타입 남았나" 판정에는 그 사이클 안에서 반영 안 됨(다음 'done'/'error' 이벤트에서 바로잡힘) — 무시할 만한 수준의 부정확
     - `ProcessWorker(conn, collectors or [], store, ...)`로 `store`를 그대로 넘김(2026-08-01) — 워커 메시지 튜플에서 `node_path`가 빠짐(`spec, outer_idx, inner_idx, train_data, valid_data, test_data, ext_data` — 워커가 `store.write_objs(spec.name, outer_idx, inner_idx, obj, result)`로 직접 이름/fold를 쓰므로 경로를 미리 조립해 보낼 필요가 없어짐)
   - `ProcessWorker`(spawn): job 경계에서 `del` + `gc.collect()`로 이전 job의 데이터·모델을 놓아줌(안 하면 피크 = 이전 데이터 + 모델 + 새 데이터). 워커 로그 fd는 dup2 직후 close
+  - **`_run_collectors`는 `(warn_msgs, outcomes)`를 반환(2026-08-04)** — `outcomes`는 매칭된 Collector당 하나씩 `{collector, status, elapsed, info}`. 실제 캐칭은 `_safe_collect`가 `ext`/`collect`/`push` 세 구간에 대해 하고, 공용 `obj.process` 준비(`output_test`/`output_train`)가 깨지면 매칭된 전원에게 `phase='output'` outcome을 하나씩 발급 — 이 준비는 Trial이 이미 `'built'`로 기록된 **뒤에** 돌기 때문에 여기서 예외가 나면 실행 전체가 죽었음
+    - 멀티워커: 워커가 결과는 기존 `('collect', ...)` 메시지로, outcome은 새 `('collect_hist', node, o, i, outcomes)` 메시지로 보냄(둘 다 같은 파이프라 순서 보장). 부모는 `('collect', ...)` 처리에서 `c.push()`를 try로 감싸 실패를 `push_errors`에 담아뒀다가 `collect_hist` 도착 시 해당 outcome을 교체해 기록. **결과가 picklable하지 않아 `('collect', ...)` send 자체가 실패해도** `_safe_collect`가 `phase='push'`로 잡고, outcome은 문자열뿐이라 따로 전달됨
+    - 기록은 항상 부모(`tracker.collect(...)` → `TrialHistTracker`) — 워커가 SQLite를 직접 쓰면 N프로세스 경합이 생기고, `TrialStore`가 그렇게 안 하는 이유와 같음
 - **_tracker.py**: `ExecuteTracker` 기반
   - `LoggerExecuteTracker` — 워커 이벤트→logger. `typ`에 따라 `logger.info`/`warning` 라우팅
-  - **`TrialHistTracker(tracker, store, experimenter, pipeline_version)`** — 로깅 tracker를 감싸 `done`/`error` 시점에 `TrialStore`에 이력 기록(`pipeline_version`은 그 Experimenter의 정수 버전, 해시 아님). 이벤트 시점이라 멀티워커도 그대로 커버되고, 사후에 디스크를 다시 읽지 않아도 됨
+  - **`TrialHistTracker(tracker, store, experimenter, pipeline_version, collect_hist=None)`** — 로깅 tracker를 감싸 `done`/`error` 시점에 `TrialStore`에 이력 기록(`pipeline_version`은 그 Experimenter의 정수 버전, 해시 아님). 이벤트 시점이라 멀티워커도 그대로 커버되고, 사후에 디스크를 다시 읽지 않아도 됨
+    - `collect_hist`를 주면 새 `collect(node_name, outer_idx, inner_idx, outcomes)` 이벤트에서 `CollectHist`에도 기록(2026-08-04). **세 번째 wrapper 클래스를 안 만든 이유**: 수집 이력의 키/스탬프가 이 클래스가 이미 들고 있는 `experimenter`/`pipeline_version` 그대로고, 부모 프로세스 이벤트 스트림을 타야 하는 이유도 같음(`_run_collectors`는 워커에서 돌아서 부모만 전체 fold의 outcome을 봄)
+    - `ExecuteTracker.collect(...)`는 base에 no-op으로 있고 `NodeInfoTracker`도 위임만 함 — 노드/Predictor 경로엔 매칭될 Collector가 없어 실제로 호출되지 않음
 - **_describer.py**: desc_spec, desc_pipeline, desc_node, compare_nodes (`desc_status`는 죽은 코드라 제거됨)
 - **_logger.py**: BaseLogger, DefaultLogger (start/update/end_progress, adhoc_progress, rename_progress)
 - **col.py**: `@name` column-selector 레지스트리 — 위 "col.py" 섹션 참조
 - **_connector.py**: Connector (노드 매칭)
-- **collector/**: Collector, Collectors, CollectorStore/CollectorEntity, MetricCollector, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector
+- **collector/**: Collector, Collectors, CollectorStore/CollectorEntity, CollectHist, MetricCollector, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector
 - **filter/**: DataFilter, RandomFilter(n/frac/random_state), IndexFilter(index)
 - **adapter/**: sklearn, xgboost, lightgbm, catboost, keras, `_nn.py` (NNAdapter)
 - **processor/**: CatConverter, CatPairCombiner, CatOOVFilter, FrequencyEncoder, TypeConverter, CrossFitTransformer (`ColSelector`는 `_pipeline.py`에 있음 — processor/ 소속 아님)
@@ -619,6 +644,11 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
                                     #   connector, path). 정의의 평문 절반
     __params/{name}.pkl             #   정의의 나머지 절반 — 생성자 params (산 객체가
                                     #   들어올 수 있어 pickle). 이 둘로 재조립
+    collect_hist.db                 # CollectHist — collect_hist(collector_name,
+                                    #   experimenter, node_name, outer_idx, inner_idx PK,
+                                    #   pipeline_version, status, collect_date,
+                                    #   elapsed, info). 정의(위)와 별도 파일 —
+                                    #   CollectorStore는 정의만 갖는다는 경계 유지
     {name}/                         # Collector가 소유하는 저장 위치 — 데이터만
       metrics.db                    # MetricCollector (node, idx, inner_idx, split, value)
       {node}.pkl                    # StackingCollector — {'folds': [[inner 결과...], ...]}

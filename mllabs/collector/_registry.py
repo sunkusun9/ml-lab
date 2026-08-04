@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from ._collect_hist import CollectHist
 from ._store import CollectorEntity, CollectorStore, build_collector
 
 
@@ -16,16 +17,23 @@ class Collectors:
     registry over that path rebuilds every Collector registered before from
     those two halves — the instance itself is never stored.
 
+    ``hist`` is the :class:`~mllabs.CollectHist` over the same path — one row
+    per (collector, experimenter, node, fold) describing what that collect
+    call did. It sits with the registry, not with a run, because a registry is
+    project-global and its history has to stay comparable across runs for the
+    same reason its metrics do.
+
     Args:
         path (str | Path, optional): Base directory. A Collector registered
             without an explicit ``path`` gets ``{path}/{name}``. Without a path
-            the registry is memory-only — nothing is persisted.
+            the registry is memory-only — nothing is persisted, history included.
     """
 
     def __init__(self, path=None):
         self.path = Path(path) if path is not None else None
         self._store = CollectorStore(self.path) if self.path is not None else None
         self.collectors = {c.name: c for c in self._store.load_all()} if self._store else {}
+        self.hist = CollectHist(self.path) if self.path is not None else None
 
     # ------------------------------------------------------------------
     # registration

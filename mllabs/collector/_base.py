@@ -5,7 +5,6 @@ class Collector:
         self.name = name
         self.connector = connector
         self.path = None
-        self.warnings = []
         self._n_outer = None
         self._n_inner = None
         self._buf = {}  # {node: {outer_idx: {inner_idx: result}}}

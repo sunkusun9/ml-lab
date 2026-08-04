@@ -1,4 +1,5 @@
 from ._base import Collector
+from ._collect_hist import CollectHist
 from ._registry import Collectors
 from ._store import CollectorEntity, CollectorStore
 from ._metric import MetricCollector, ProbToLabel

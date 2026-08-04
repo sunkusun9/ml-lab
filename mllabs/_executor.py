@@ -88,17 +88,53 @@ def _process(spec, train_data, valid_data, fit_process, monitor, gpu_id_list=Non
     return obj, result, info
 
 
-def _safe_collect_call(collector, context, monitor):
+COLLECT_OK = 'collected'
+COLLECT_EMPTY = 'empty'
+COLLECT_ERROR = 'error'
+
+
+def _collect_error(collector, phase, exc, node_name, outer_idx, inner_idx, monitor, elapsed=None):
+    tb = traceback.format_exc()
+    monitor.message(
+        f"[Collector:{collector.name}] {phase} failed on {node_name} "
+        f"fold {outer_idx}_{inner_idx}: {type(exc).__name__}: {exc}\n{tb}", typ='warning')
+    return {
+        'collector': collector.name,
+        'status': COLLECT_ERROR,
+        'elapsed': elapsed,
+        'info': {'phase': phase, 'type': type(exc).__name__,
+                 'message': str(exc), 'traceback': tb},
+    }
+
+
+def _safe_collect(collector, context, on_collect, node_name, outer_idx, inner_idx,
+                  obj, ext_data, monitor):
+    if ext_data and collector.name in ext_data:
+        try:
+            context['output_ext'] = obj.process(ext_data[collector.name])
+        except Exception as e:
+            return _collect_error(collector, 'ext', e, node_name, outer_idx, inner_idx, monitor)
+
+    started = time.perf_counter()
     try:
-        return collector.collect(context)
+        result = collector.collect(context)
     except Exception as e:
-        tb = traceback.format_exc()
-        msg = f"[Collector:{collector.name}] collect failed: {type(e).__name__}: {e}\n{tb}"
-        monitor.message(msg, typ = 'warning')
-        collector.warnings.append({
-            'method': 'collect', 'type': type(e).__name__, 'message': str(e), 'traceback': tb,
-        })
-        return None
+        return _collect_error(collector, 'collect', e, node_name, outer_idx, inner_idx,
+                              monitor, time.perf_counter() - started)
+    elapsed = time.perf_counter() - started
+
+    try:
+        on_collect(collector, node_name, outer_idx, inner_idx, result)
+    except Exception as e:
+        return _collect_error(collector, 'push', e, node_name, outer_idx, inner_idx,
+                              monitor, elapsed)
+
+    return {
+        'collector': collector.name,
+        'status': COLLECT_OK if result is not None else COLLECT_EMPTY,
+        'elapsed': elapsed,
+        'info': None,
+    }
 
 
 def _default_on_collect(collector, node_name, outer_idx, inner_idx, result):
@@ -109,7 +145,8 @@ def _run_collectors(collectors, spec, obj, result, info, train_data, valid_data,
                     outer_idx, inner_idx, monitor, on_collect=_default_on_collect):
     matched = [c for c in collectors if c.connector.match(spec)]
     if not matched:
-        return []
+        return [], []
+    outcomes = []
     # Capture predict/collect-time warnings (e.g. XGBoost device-mismatch on
     # process()) so they flow through the logger channel like fit warnings,
     # instead of leaking raw to stderr.
@@ -131,16 +168,20 @@ def _run_collectors(collectors, spec, obj, result, info, train_data, valid_data,
             'outer_idx': outer_idx,
             'inner_idx': inner_idx,
         }
-        if proc_test:
-            context['output_test'] = obj.process(test_data) if test_data else None
-        if proc_train:
-            context['output_valid'] = obj.process(valid_data) if valid_data else None
-            context['output_train'] = (result if result is not None else obj.process(train_data))
-        for c in matched:
-            if ext_data is not None and c.name in ext_data:
-                context['output_ext'] = obj.process(ext_data[c.name])
-            on_collect(c, spec.name, outer_idx, inner_idx, _safe_collect_call(c, context, monitor))
-    return [f"{w.category.__name__}: {w.message}" for w in caught]
+        try:
+            if proc_test:
+                context['output_test'] = obj.process(test_data) if test_data else None
+            if proc_train:
+                context['output_valid'] = obj.process(valid_data) if valid_data else None
+                context['output_train'] = (result if result is not None else obj.process(train_data))
+        except Exception as e:
+            outcomes = [_collect_error(c, 'output', e, spec.name, outer_idx, inner_idx, monitor)
+                        for c in matched]
+        else:
+            for c in matched:
+                outcomes.append(_safe_collect(c, context, on_collect, spec.name,
+                                              outer_idx, inner_idx, obj, ext_data, monitor))
+    return [f"{w.category.__name__}: {w.message}" for w in caught], outcomes
 
 
 
@@ -233,12 +274,14 @@ class ProcessWorker(_mp_ctx.Process):
                 def _send_collect(collector, node_name, outer_idx, inner_idx, res):
                     self.conn.send(('collect', collector.name, node_name, outer_idx, inner_idx, res))
 
-                collect_warns = _run_collectors(
+                collect_warns, outcomes = _run_collectors(
                     self.collectors, spec, obj, result, info, train_data, valid_data, test_data, ext_data,
                     outer_idx, inner_idx, monitor, on_collect=_send_collect,
                 )
                 for w in collect_warns:
                     logger.warning(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}")
+                if outcomes:
+                    self.conn.send(('collect_hist', node_name, outer_idx, inner_idx, outcomes))
                 self.conn.send(('done', info))
             finally:
                 # Release this job's inputs and fitted model before blocking on the
@@ -403,13 +446,15 @@ def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None
                 tracker.done(0, node_name, outer_idx, inner_idx, info)
 
             if matched:
-                collect_warns = _run_collectors(
+                collect_warns, outcomes = _run_collectors(
                     matched, job.spec, obj, result, info,
                     train_data, valid_data, test_data, ext_data,
                     outer_idx, inner_idx, router,
                 )
                 for w in collect_warns:
                     router.message(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}", typ='warning')
+                if tracker:
+                    tracker.collect(node_name, outer_idx, inner_idx, outcomes)
 
     return errors
 
@@ -465,8 +510,10 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
 
     free_gpu = list(range(n_gpu))
     free_cpu = list(range(n_gpu, n_jobs))
-    busy = {}    # conn -> Job
-    errors = {}  # {(outer_idx, inner_idx, name): error_info}
+    busy = {}         # conn -> Job
+    errors = {}       # {(outer_idx, inner_idx, name): error_info}
+    push_errors = {}  # {(collector, node, outer_idx, inner_idx): outcome}
+    router = _TrackerRouter(0, tracker)
     all_conns = [conn for _, conn in workers]
 
     def _collect_ready():
@@ -562,8 +609,19 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
                 coll_name, n, o, i, res = data
                 for c in (collectors or []):
                     if c.name == coll_name:
-                        c.push(n, o, i, res)
+                        try:
+                            c.push(n, o, i, res)
+                        except Exception as e:
+                            push_errors[(coll_name, n, o, i)] = _collect_error(
+                                c, 'push', e, n, o, i, router)
                         break
+
+            elif msg_type == 'collect_hist':
+                n, o, i, outcomes = data
+                if tracker:
+                    tracker.collect(n, o, i, [
+                        push_errors.pop((oc['collector'], n, o, i), oc) for oc in outcomes
+                    ])
 
             elif msg_type == 'progress':
                 if tracker:
