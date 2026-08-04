@@ -25,7 +25,7 @@
 
 ::: mllabs.nn.RegressionOutput
 
-::: mllabs.adapter.NNAdapter
+::: mllabs.adapter._nn.NNAdapter
     options:
       members:
         - get_fit_params
