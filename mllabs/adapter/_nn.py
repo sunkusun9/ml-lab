@@ -1,5 +1,4 @@
-import pandas as pd
-from ._base import ModelAdapter, GPU_NO, GPU_POSSIBLE, GPU_YES
+from ._base import ModelAdapter, GPU_NO, GPU_POSSIBLE, GPU_YES, stack_evals_result
 
 try:
     import tensorflow as tf
@@ -76,11 +75,7 @@ class NNAdapter(ModelAdapter):
     def _get_evals_result(processor):
         obj = processor.obj
         evals_result = getattr(obj, 'evals_result_', {})
-        if not evals_result:
-            return pd.DataFrame()
-        return pd.concat(
-            [pd.DataFrame(v).stack().rename(k) for k, v in evals_result.items()], axis=1
-        ).stack()
+        return stack_evals_result(evals_result)
 
 
 NNAdapter.result_objs = {
