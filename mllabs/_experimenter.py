@@ -406,13 +406,16 @@ class Experimenter():
         ]
 
     def get_status(self, node_name):
-        """Return the disk status of a node across all folds.
+        """Return the disk status of a Pipeline node across all folds.
 
-        One :class:`NodeStore` covers this whole run — Stages and Trials
-        always shared its directory, and every fold now shares the same
-        store instance too (told apart by ``outer_idx``/``inner_idx``).
-        Returns the common status if all folds agree, or ``'inconsistent'``
-        if they differ.
+        One :class:`NodeStore` covers this whole run, every fold sharing the
+        same instance (told apart by ``outer_idx``/``inner_idx``). Returns
+        the common status if all folds agree, or ``'inconsistent'`` if they
+        differ.
+
+        Nodes only. A Trial persists nothing, so it is always ``None`` here
+        no matter how many times it has run — its per-fold status lives in
+        ``TrialStore.get_status(trial_name, experimenter)``.
 
         Returns:
             ``'built'``, ``'error'``, ``None`` (init), or ``'inconsistent'``.
@@ -424,9 +427,13 @@ class Experimenter():
         )
 
     def reset_nodes(self, nodes):
-        """Reset nodes to ``init`` state.
+        """Reset Pipeline nodes to ``init`` state.
 
         Removes node objects and clears cache entries for the affected nodes.
+
+        Pipeline nodes only — the artifacts a build produced. A Trial has
+        none to remove, and rerunning one is
+        ``TrialStore.remove_hist(trial_name=, experimenter=)`` instead.
 
         Args:
             nodes (list[str]): Node names to reset.
@@ -519,9 +526,10 @@ class Experimenter():
             if n_jobs > 1:
                 log_dir = self.path / '__worker_logs' if self._os_log_state is not None else None
                 errors = _execute_multi(jobs, n_jobs, self.node_store, gpu_id_list=gpu_id_list,
-                                        tracker=tracker, log_dir=log_dir)
+                                        tracker=tracker, log_dir=log_dir, chained=True)
             else:
-                errors = _execute_single(jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=tracker)
+                errors = _execute_single(jobs, self.node_store, gpu_id_list=gpu_id_list,
+                                         tracker=tracker, chained=True)
         finally:
             tracker.close()
 
@@ -616,11 +624,11 @@ class Experimenter():
         try:
             if n_jobs > 1:
                 log_dir = self.path / '__worker_logs' if self._os_log_state is not None else None
-                errors = _execute_multi(jobs, n_jobs, self.node_store, gpu_id_list=gpu_id_list,
+                errors = _execute_multi(jobs, n_jobs, trial_store, gpu_id_list=gpu_id_list,
                                         collectors=collectors, tracker=tracker,
                                         log_dir=log_dir)
             else:
-                errors = _execute_single(jobs, self.node_store, gpu_id_list=gpu_id_list,
+                errors = _execute_single(jobs, trial_store, gpu_id_list=gpu_id_list,
                                          collectors=collectors, tracker=tracker)
         finally:
             tracker.close()
@@ -640,13 +648,10 @@ class Experimenter():
         it recorded as ``'built'`` — a fold recorded as ``'error'``, or with
         no history row at all, gets a job. Whether the Trial's definition
         changed since that history was recorded is not checked here; history
-        is the sole source of truth for what still needs to run.
-
-        A fold that does get a job has its NodeStore entry reset first — the
-        write on rerun would overwrite the on-disk artifact regardless, but
-        without this, a flow's in-memory info cache (populated by an earlier
-        ``get_info``/``get_status`` call in this same process) would keep
-        returning the stale pre-rerun info even after the new write lands.
+        is the sole source of truth for what still needs to run, and it can
+        be, since a Trial leaves nothing on disk that could disagree with it.
+        Rerunning one is therefore ``TrialStore.remove_hist(...)`` and
+        nothing else.
         """
         from ._executor import Job
         from .adapter import resolve_node_adapter
@@ -663,7 +668,6 @@ class Experimenter():
                 hist_cache[trial.name] = trial_store.get_status(trial.name, self.name)
             if hist_cache[trial.name].get((outer_idx, inner_idx)) == 'built':
                 continue
-            flow.reset_node(trial.name)
 
             if trial.name not in gpu_cache:
                 adapter = resolve_node_adapter(spec.processor, spec.adapter)
@@ -709,6 +713,12 @@ class Experimenter():
         return "\n".join(lines)
 
     def get_objs(self, node_name, outer_idx = 0, inner_idx = 0):
+        """``(obj, result)`` for one built Pipeline node in one fold.
+
+        Nodes only — a Trial's fitted model is never written anywhere, so
+        naming one here raises ``FileNotFoundError``. What a Trial produced
+        is whatever its Collectors kept.
+        """
         return self.outer_folds[outer_idx].train_data_flows[inner_idx].get_objs(node_name)
 
     def get_worker_logs(self, worker=None):

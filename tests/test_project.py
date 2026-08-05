@@ -3,7 +3,8 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import ShuffleSplit
 
-from mllabs import Project, TrialStore, Trial, Predictor, PipelineBuilder, make_trials
+from mllabs import (Project, TrialStore, Trial, Predictor, PipelineBuilder, make_trials,
+                    Connector, MetricCollector)
 
 
 TREE = 'sklearn.tree.DecisionTreeClassifier'
@@ -32,6 +33,10 @@ def store(tmp_path):
 
 def _trial(name='dt', params=None):
     return Trial(name, TREE, EDGES, params=params or {'max_depth': 3})
+
+
+def dummy_metric(y, pred):
+    return 0.5
 
 
 class TestProjectLayout:
@@ -446,7 +451,6 @@ class TestExperimenterUnderProject:
         trial = make_trials('dt', processor=TREE, edges=EDGES,
                              params={'max_depth': 3, 'random_state': 0})[0]
         e.exp([(trial, 0, 0), (trial, 1, 0)], project.trials)
-        assert e.get_status('dt') == 'built'
         assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built', (1, 0): 'built'}
 
         # history is keyed by the two names, matching the layout on disk
@@ -508,9 +512,84 @@ class TestExperimenterUnderProject:
         trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0})
         bad_trial = Trial('bad', 'mock.BadPredictor', EDGES)
         e.exp([(trial, 0, 0), (trial, 1, 0), (bad_trial, 0, 0)], project.trials, n_jobs=2)
-        assert e.get_status('dt') == 'built'
         assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built', (1, 0): 'built'}
         assert project.trials.get_status('bad', 'run_a')[(0, 0)] == 'error'
+
+
+class TestRemoveTrial:
+    """A Trial leaves no artifact, so everything it produced sits in stores
+    that don't know about each other — TrialStore (definition + history),
+    CollectHist (per-fold collect outcomes) and each Collector's own data.
+    Project is the only thing that sees all three."""
+
+    def _run(self, project, builder, sample_data):
+        version = project.build_pipeline(builder).version
+        e = project.experimenter(
+            'run_a', sample_data,
+            sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=0),
+            pipeline_name='main', pipeline_version=version,
+        )
+        e.build()
+        collectors = project.collectors()
+        collectors.set_collector('acc', MetricCollector, Connector(),
+                                 params={'output_var': None, 'metric_func': dummy_metric})
+        trial = _trial()
+        e.exp([(trial, 0, 0), (trial, 1, 0)], project.trials, collectors=collectors)
+        return e, collectors
+
+    def test_store_remove_drops_the_definition_only(self, store):
+        store.register(_trial())
+        store.record('dt', 'exp-1', 0, 0, status='built')
+        store.remove('dt')
+        assert store.get_by_name('dt') is None
+        assert store.list_trials() == []
+        assert store.get_hist(trial_name='dt')  # what ran stays readable
+
+    def test_removing_an_unregistered_name_is_a_no_op(self, project):
+        project.remove_trial('never_registered')
+
+    def test_removes_definition_history_and_collected_data(self, project, builder, sample_data):
+        e, collectors = self._run(project, builder, sample_data)
+        assert project.trials.get_by_name('dt') is not None
+        assert project.trials.get_status('dt', 'run_a')
+        assert collectors.hist.get_hist(node_name='dt')
+        assert collectors.get_collector('acc').get_metric('dt') is not None
+
+        project.remove_trial('dt')
+
+        assert project.trials.get_by_name('dt') is None
+        assert project.trials.get_status('dt', 'run_a') == {}
+        assert collectors.hist.get_hist(node_name='dt') == []
+        assert project.collectors().get_collector('acc').get_metric('dt') is None
+
+    def test_leaves_other_trials_alone(self, project, builder, sample_data):
+        e, collectors = self._run(project, builder, sample_data)
+        other = _trial('dt2')
+        e.exp([(other, 0, 0), (other, 1, 0)], project.trials, collectors=collectors)
+
+        project.remove_trial('dt')
+
+        assert project.trials.get_by_name('dt2') is not None
+        assert project.trials.get_status('dt2', 'run_a')
+        assert collectors.hist.get_hist(node_name='dt2')
+        assert project.collectors().get_collector('acc').get_metric('dt2') is not None
+
+    def test_cleans_the_registry_it_is_given(self, project, builder, sample_data):
+        """collectors() builds a fresh registry each call, and a Collector may
+        answer from an in-memory cache — so the caller's own registry has to be
+        cleanable, not just whatever Project happens to construct."""
+        e, collectors = self._run(project, builder, sample_data)
+        acc = collectors.get_collector('acc')
+        assert acc.has_node('dt')
+        project.remove_trial('dt', collectors=collectors)
+        assert not acc.has_node('dt')
+
+    def test_a_removed_trial_runs_again_from_scratch(self, project, builder, sample_data):
+        e, collectors = self._run(project, builder, sample_data)
+        project.remove_trial('dt')
+        trial = _trial()
+        e.exp([(trial, 0, 0), (trial, 1, 0)], project.trials, collectors=collectors)
+        assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built', (1, 0): 'built'}
 
 
 class TestTrainerUnderProject:

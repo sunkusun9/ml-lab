@@ -49,12 +49,12 @@ class DataFlow:
         (obj.pkl/result.pkl) carries neither anymore.
 
         A node with no matching history row is left unloaded rather than
-        guessed at either way. That is also what keeps fitted models out of
-        memory here without this having to ask what kind of node it is
-        looking at: a Trial's outcome is only ever recorded in
-        ``TrialStore.experiment_hist``, and a Trainer's Predictors have a
-        store of their own, so neither has a row in the store this flow
-        reads.
+        guessed at either way.
+
+        Only Pipeline nodes are ever here to load. A Trial persists nothing
+        at all, and a Trainer's Predictors go to a store of their own — so
+        neither leaves an artifact in the store this flow reads, and no
+        fitted model comes into memory from either.
         """
         fold_info = self.store.get_fold_info(self.outer_idx, self.inner_idx)
         for name in self.store.list_nodes(self.outer_idx, self.inner_idx):

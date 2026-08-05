@@ -131,6 +131,18 @@ def _trial_errored(trial_store, trial_name, exp):
     return any(s == 'error' for s in trial_store.get_status(trial_name, exp.name).values())
 
 
+def _trial_built(trial_store, trial_name, exp):
+    """Whether every fold of *exp* recorded *trial_name* as clean.
+
+    A Trial leaves no artifact, so ``Experimenter.get_status``/
+    ``NodeStore.status`` (both disk) can never answer this —
+    ``experiment_hist`` is the whole record."""
+    expected = {(o, i) for o in range(exp.get_n_splits())
+                for i in range(exp.get_n_splits_inner())}
+    status = trial_store.get_status(trial_name, exp.name)
+    return set(status) == expected and set(status.values()) == {'built'}
+
+
 class TestBuildFlowMulti:
     """Exercise _build_flow_multi's worker-pool dispatch (ProcessWorker, n_jobs>1)."""
 
@@ -190,7 +202,7 @@ class TestNJobsCap:
         worker_sessions = [s for s in logger.created if s != 0]
         assert worker_sessions == [1, 2]
         assert sorted(logger.created) == sorted(logger.removed)
-        assert exp.get_status('dt') == 'built'
+        assert _trial_built(trial_store, 'dt', exp)
 
 
 class TestWorkerLogCapture:
@@ -369,7 +381,7 @@ class TestDataPrepErrors:
         exp.build(n_jobs=1)
         exp.exp(_folds(_bad_edges(), exp), trial_store, n_jobs=1)
 
-        assert exp.get_status('dt') == 'built'
+        assert _trial_built(trial_store, 'dt', exp)
         assert _trial_errored(trial_store, 'bad_dt', exp)
 
     def test_exp_multi_reports_error_and_continues(self, exp, pipeline, trial_store):
@@ -378,11 +390,8 @@ class TestDataPrepErrors:
         exp.build(n_jobs=2)
         exp.exp(_folds(_bad_edges(), exp), trial_store, n_jobs=2)
 
-        assert exp.get_status('dt') == 'built'
+        assert _trial_built(trial_store, 'dt', exp)
         assert _trial_errored(trial_store, 'bad_dt', exp)
-        for outer_fold in exp.outer_folds:
-            for store in outer_fold.train_data_flows:
-                assert store.status('dt') == 'built'
 
 
 class TestErrorKeyShape:
@@ -435,11 +444,8 @@ class TestExperimentMulti:
         exp.build(n_jobs=2)
         exp.exp(_folds(_bad_edges(), exp), trial_store, n_jobs=2)
 
-        assert exp.get_status('dt') == 'built'
+        assert _trial_built(trial_store, 'dt', exp)
         assert _trial_errored(trial_store, 'bad_dt', exp)
-        for outer_fold in exp.outer_folds:
-            for store in outer_fold.train_data_flows:
-                assert store.status('dt') == 'built'
 
 
 class TestTrainerMulti:
