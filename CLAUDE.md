@@ -9,6 +9,9 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 
 코드 검증은 `tests/`에서 적절한 `.py`를 찾아 테스트 케이스를 추가하여 진행한다. `python -c` 같은 임시 실행은 하지 않는다.
 
+**이 문서는 현재 구조만 기술한다.** 변경 이력·날짜·"예전엔 이랬다"는 적지 않는다 — 그건 git log와 GitHub Issues의 몫이다.
+설계 근거(왜 이 모양인가)는 현재 코드를 이해하는 데 필요할 때만 현재형으로 남긴다.
+
 ## CLI 버전
 - git 2.43.0
 - gh 2.45.0
@@ -18,7 +21,7 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
   - 예: `gh issue view 40 --json title,body,comments`
 - `--repo` 플래그 없이도 현재 디렉토리의 remote origin에서 자동 추론됨
 
-# modeler 모듈 요약
+# mllabs 모듈 요약
 
 ## 아키텍처 개요
 ```
@@ -37,9 +40,10 @@ Project(path, cache_maxsize)          경로·캐시 소유. 프로젝트 전역
 **경계**: run 하나에 대한 것(splitter, 채택한 Pipeline, 아티팩트/이력, 학습할 Predictor)은 전부 그 run
 디렉토리 안. Project는 "이 프로젝트에 뭐가 있나"만 답한다 → **어떤 run이든 Project 없이 열 수 있다**
 (`Experimenter.load_experimenter(path, data)` / `Trainer.load_trainer(path, data)`).
-- **Project** (`_project.py`): 디렉토리 레이아웃 소유 + `TrialStore`/`ProjectStore`. Pipeline 버전은 Project가 색인하지 않음 — 각 pipeline이 자기 db에 자기 버전을 직접 관리(`build_pipeline` 참조). **모든 컴포넌트가 단독 동작 가능** — Experimenter는 `cache`만, Trainer는 `cache`/`pipeline`만 주입받음. Project가 진짜로 소유하는 건 프로젝트 전역인 것들뿐(pipelines, Collectors, TrialStore, cache, **run 이름 목록**)이고 개별 run에 관한 정보는 전부 그 run 디렉토리에 있음(2026-08-03)
+
+- **Project** (`_project.py`): 디렉토리 레이아웃 + `TrialStore`/`ProjectStore`/`cache`. 프로젝트 전역인 것만 소유하고, Pipeline 버전조차 색인하지 않는다(각 pipeline이 자기 db에서 관리)
 - **PipelineBuilder / Pipeline** (`_pipeline.py`): 가변 빌더 + `build()`가 만드는 불변 **노드 전용** 그래프
-- **Trial / make_trials** (`_trial.py`): 평가할 구성 하나 = 예전의 Head 노드. Pipeline 밖에 있음
+- **Trial / make_trials** (`_trial.py`): 평가할 구성 하나. Pipeline 밖에 있음
 - **TrialStore** (`_trial_store.py`): `trials`(정의) + `experiment_hist`(fold별 실행 이력)
 - **Predictor** (`_predictor.py`): Trainer가 학습하는 끝지점 출력 노드. Trial과 같은 실행 정의 + 출처(`src_trial`/`src_experimenter`)
 - **PredictorStore** (`_predictor_store.py`): `predictors`(정의) 하나뿐 — 이력은 Trainer의 두 번째 `NodeStore`가 가짐
@@ -48,9 +52,9 @@ Project(path, cache_maxsize)          경로·캐시 소유. 프로젝트 전역
 - **Experimenter** (`_experimenter.py`): CV 실험 실행/관리. 생성자=신규, 복원=`load_experimenter()`
 - **Trainer** (`_trainer.py`): 학습 실행/관리 (split 기반). 생성자=신규, 복원=`load_trainer()`, 학습 대상은 `train(predictors)`로 직접 전달
 - **Inferencer** (`_inferencer.py`): 학습된 processor를 새 데이터에 적용
-- **NodeStore** (`_store.py`): run 하나당 하나 — 노드 아티팩트(obj.pkl/result.pkl) + 실행 이력(`node_hist`, 구 NodeInfoStore 통합) 둘 다 소유
-- **DataFlow / TrainDataFlow** (`_flow.py`): fold별 데이터 흐름 및 노드 빌드 (DataFlow는 NodeStore를 컴포지션으로 보유, outer_idx/inner_idx도 보유)
-- **_executor.py**: `_execute_single`(단일 프로세스) + `_execute_multi`(멀티 워커) — 둘 다 노드/Trial 공용, `collectors` 인자로 구분 — 실제 실행
+- **NodeStore** (`_store.py`): run 하나당 하나 — 노드 아티팩트(obj.pkl/result.pkl) + 실행 이력(`node_hist`) 둘 다 소유
+- **DataFlow / TrainDataFlow** (`_flow.py`): fold별 데이터 흐름 및 노드 빌드 (NodeStore를 컴포지션으로 보유, outer_idx/inner_idx도 보유)
+- **_executor.py**: `_execute_single`(단일 프로세스) + `_execute_multi`(멀티 워커) — 둘 다 노드/Trial 공용, `collectors` 인자로 구분
 
 ## Node/Trial 상태 모델
 
@@ -63,24 +67,16 @@ Project(path, cache_maxsize)          경로·캐시 소유. 프로젝트 전역
 | **built** | O | 빌드 완료, 결과 추출 가능 |
 | **error** | info only | 실행 중 에러 발생, 내역 보존 |
 
-- **finalized 상태 없음(2026-08-01 제거)**: obj/result를 지우고 메모리만 비우는 중간 상태였는데,
-  Experimenter의 open/close 개념 자체가 없어지면서(아래) 존재 이유가 사라짐 — `NodeStore.finalize()`,
-  `Experimenter.finalize()`/`reinitialize()`/`close_exp()`/`reopen_exp()` 전부 제거. 이제 아티팩트를
-  없애려면 `reset_nodes()`(완전 삭제, `init`으로 되돌림)만 있음
-
-### Experimenter 상태 없음(2026-08-01, open/close 제거)
-Experimenter엔 이제 상태 게이트가 없음 — `build()`/`exp()`는 언제나 호출 가능. `open()`/`close()`/
-`status` 속성/`experimenters` 테이블의 `status` 컬럼 전부 제거됨. Trial 아티팩트는 다음 `exp()`
-호출까지 그대로 남아있는 게 기본값이고(`set_pipeline`이 Trial을 stale 취급 안 하는 것과
-같은 이유 — 아래 "Staleness" 섹션 참조), 명시적으로 지우고 싶으면 `reset_nodes()`를 직접 호출
+- 중간 상태(finalize)는 없다. 아티팩트를 없애는 방법은 `reset_nodes()`(완전 삭제, `init`으로 복귀) 하나뿐
+- **Experimenter엔 상태 게이트가 없다** — `open`/`close`/`status` 개념 자체가 없고 `build()`/`exp()`는 언제나 호출 가능. Trial 아티팩트는 다음 `exp()` 호출까지 그대로 남아있는 게 기본값이고(`set_pipeline`이 Trial을 stale 취급 안 하는 것과 같은 이유 — "Staleness" 섹션), 지우려면 `reset_nodes()`를 명시적으로 호출
 
 ## 핵심 클래스
 
 ### Node 역할
 - **DataSource** (`_DataSourceNode`, key=`None`): 원본 데이터 스키마 및 target 정의
-- **노드**: 전처리/변환 (TransformProcessor). **Pipeline에 담기는 유일한 종류**. `role`이 없어진 뒤로 Pipeline 안엔 이것뿐이라 "stage"라는 별도 명칭도 제거(2026-08-02) — 그냥 노드
-- **Trial**: 모델링/예측 (PredictProcessor). Pipeline 밖, Experimenter 쪽 — `_trial.py` 참조
-- **Predictor**: 같은 자리(끝지점 출력)의 Trainer 쪽 대응물 — `_predictor.py` 참조. Trial과 **일부러 별도 클래스**(아래 "Predictor" 섹션)
+- **노드**: 전처리/변환 (TransformProcessor). **Pipeline에 담기는 유일한 종류** — 그래서 별도 명칭 없이 그냥 "노드"
+- **Trial**: 모델링/예측 (PredictProcessor). Pipeline 밖, Experimenter 쪽 — `_trial.py`
+- **Predictor**: 같은 자리(끝지점 출력)의 Trainer 쪽 대응물 — `_predictor.py`. Trial과 **일부러 별도 클래스**(아래 "Predictor" 섹션)
 
 ### PipelineBuilder / Pipeline 분리 (`_pipeline.py`)
 ```
@@ -88,53 +84,54 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   └─ .build() ──► Pipeline  — 불변 스냅샷. grp 상속 해소 완료, 순수 데이터
 ```
 - **Experimenter/Trainer/Inferencer는 `Pipeline`만 보유** — builder를 넘기면 `TypeError`(`_run_common.require_built_pipeline`). builder를 나중에 수정해도 진행 중인 실행에 새어 들어가지 않음
-- **Pipeline은 노드 전용** — `role` 개념이 코드 어디에도 없음(2026-08-01 완전 제거). 예전엔 `_PipelineNode`/`_DataSourceNode`/`_BuiltNode`/`_BuiltDataSource`의 `get_attrs()`가 전부 `role`(`'stage'`/`'datasource'`)을 실었고 `Connector(role=)`가 그걸로 노드와 Trial을 갈랐지만, Trial 쪽 `role`이 없어지면서(아래 "Trial" 섹션) 남은 소비자가 하나도 없어져 4곳 모두에서 삭제. `_BuiltDataSource.__slots__`의 `role`, `_BuiltNode.role` 클래스 상수도 같이 제거
-- grp는 build를 넘어가지 않음 — 원래 그룹명은 표시용 `label`로만 남음 (`_BuiltNode.label`에만 남고, `ProcessorSpec`엔 `grp`/`label` 둘 다 안 실림)
-- 노드에 `tag` 없음 (Trial로 이동)
+- **Pipeline은 노드 전용** — `role` 개념이 코드 어디에도 없다. 노드와 Trial을 구분하는 필드 자체가 없고, 구분이 필요한 자리도 없음(Collector는 Trial job에만 붙는다)
+- grp는 build를 넘어가지 않음 — 원래 그룹명은 표시용 `label`로만 남음 (`_BuiltNode.label`에만 있고 `ProcessorSpec`엔 `grp`/`label` 둘 다 없음)
+- 노드에 `tag` 없음 (Trial 쪽에만 있음)
 
 #### PipelineBuilder
 - `VAR_TYPES = frozenset({'numerical', 'ordinal', 'nominal', 'text', 'binary', 'datetime'})`
-- **`_params_equal(a, b)`**: `a == b` 한 줄 — params가 순수 데이터/ref spec만 담도록 강제되므로 `__dict__` 재귀 비교 같은 우회가 불필요해짐
+- `_params_equal(a, b)`: `a == b` 한 줄 — params가 순수 데이터/ref spec만 담도록 강제되므로 `__dict__` 재귀 비교 같은 우회가 필요 없음
 - `nodes`: `{name: _PipelineNode}` (`None` → `_DataSourceNode`), `grps`: `{name: _PipelineGroup}` (`'__datasource__'` 항상 존재)
 - `datasource`: `nodes[None]` 반환 property
 - `set_datasource(schema, targets=None)`: DataSource 스키마/target 설정
 - `set_grp(exist='diff'|'skip'|'error'|'replace')`, `set_node(exist=...)`, `rename_grp`, `remove_grp`, `remove_node`
-  - **`role` 파라미터 없음** (노드 전용), **`tag` 파라미터 없음**
-  - **`processor`/`adapter`/`params` 스펙 검증** (`_validate_processor`/`_validate_adapter`/`_validate_params`) — 산 객체를 넘기면 `TypeError`. 아래 "Lazy resolution" 참조
+  - `role`/`tag` 파라미터 없음
+  - **`processor`/`adapter`/`params` 스펙 검증** (`_validate_processor`/`_validate_adapter`/`_validate_params`) — 산 객체를 넘기면 `TypeError`. "Lazy resolution" 섹션 참조
 - `build()` → `Pipeline`
 - `get_node_names(query)`, `get_node_spec(name)`, `_find_descendants(name)`
 - `sync()`: DB가 source of truth. 그룹/노드 필드를 직접 값 비교(`diff()`)해 갱신하고, **그룹이 바뀌면 그 그룹(+자식 그룹) 소속 노드들의 attrs 캐시도 함께 무효화**해 `changes['nodes']['updated']`에 포함시킴(노드 자신의 행은 안 바뀌었어도 상속받는 값이 바뀌었으므로)
-- **`serial` 없음(2026-08-01 제거)**: 예전엔 정의 변경마다 새 UUID를 부여해 staleness/버전 판정에 썼지만, 지금은 두 용도 모두 다른 방식으로 대체됨 — staleness는 `Pipeline.diff_from`(아래)의 값 비교, 버전은 해시/dedup 없이 `PipelineStore`가 관리하는 단순 `max+1` 카운터(`Pipeline.content_key`도 없음 — 아래 "저장 구조" 참조)
+- **`serial` 없음** — 정의 변경을 표시하는 전역 신호를 두지 않는다. staleness는 `Pipeline.diff_from`의 값 비교, 버전은 `PipelineStore`의 단순 `max+1` 카운터가 담당(해시/dedup 없음)
 - `copy()`, `copy_nodes(node_names)` — 선택적 복사 (builder→builder)
 - `compare_nodes(nodes)` → `{processor_name: DataFrame}` (params 차이 + edges['X'] 노드별 변수 차이)
 - `desc_pipeline(max_depth, direction)`, `desc_node(node_name, direction, show_params)`: Mermaid 다이어그램 — grp 계층이 필요하므로 **builder 전용**
 
 #### Pipeline (빌드 결과)
 - `nodes`: `{name: _BuiltNode}` — `None` 키는 `_BuiltDataSource` (builder와 동일한 관례)
-- `_BuiltNode` 속성(`__slots__`): `name`, `label`, `processor`, `edges`, `method`, `adapter`, `params`, `desc`, `output_edges` (`role` 없음 — 위 참조)
+- `_BuiltNode` 속성(`__slots__`): `name`, `label`, `processor`, `edges`, `method`, `adapter`, `params`, `desc`, `output_edges`
 - `pipeline_id`(builder 신원) / `build_id`(빌드 호출마다 새 UUID) / `version`(`int | None`) — **`Project.build_pipeline()`이 저장할 때만 세팅**. `builder.build()`를 직접 부르면 `None`(미저장 in-memory 빌드)
 - `get_node(name)`, `get_node_spec(name)`(ProcessorSpec — 노드 전용, DataSource는 `pipeline.datasource`로), `get_node_names(query=None)`
 - `topo_order()`: DataSource에서 내려오는 깊이순 노드명 (DataSource 제외) — 빌드 시 1회 계산해 캐시
 - `descendants(name)`, `check_data_compatibility(data)`
-- **`diff_from(old)`** → `set[str]`: 아래 "staleness" 섹션 참조
+- `diff_from(old)` → `set[str]`: "Staleness" 섹션 참조
 - `subset(node_names)`: 지정 노드 + 조상만 담은 새 Pipeline
 - **불변성의 한계**: `params`/`edges`는 shallow copy — 중첩 값은 builder와 공유. "수정하지 않는다"는 관례로 지킴
 
+#### 내부 노드 클래스
 - **`_DataSourceNode`** (`_PipelineNode` 서브클래스):
   - `schema`: `{col: var_type}` — var_type은 VAR_TYPES 중 하나
   - `targets`: `list[str]` — 타겟 컬럼 목록 (타입과 별도)
-  - `get_attrs(grps=None)`: `name`, `grp`, `schema`, `targets` **dict** 반환 — DataSource는 실행 대상이 아니라 `ProcessorSpec`을 만들 게 없어서 `get_spec`을 **오버라이드하지 않음**(같은 이름의 다형 메소드가 서로 다른 모양을 반환하는 걸 피하려고 아예 이름을 분리)
+  - `get_attrs(grps=None)`: `name`/`grp`/`schema`/`targets` **dict** 반환 — DataSource는 실행 대상이 아니라 만들 Processor가 없어서 `get_spec`을 오버라이드하지 않는다(같은 이름의 다형 메소드가 서로 다른 모양을 반환하는 걸 피하려고 이름을 분리)
 
 - **`_PipelineGroup`**: 노드 그룹 — builder 내부 전용
   - 속성: `name`, `processor`, `edges`, `method`, `parent`, `adapter`, `params`, `desc`
   - `children`: 자식 그룹명 리스트, `nodes`: 소속 노드명 리스트
-  - `get_attrs(grps)`: 상위 그룹 속성 병합하여 **dict** 반환 (`desc`는 상속 안 됨, 각 요소 독립) — 그룹은 실행 단위가 아니라 상속 해소용이라 `ProcessorSpec`이 아님(캐시 `self.attrs`/`update_attrs()`도 그대로)
+  - `get_attrs(grps)`: 상위 그룹 속성 병합하여 **dict** 반환 (`desc`는 상속 안 됨) — 그룹은 실행 단위가 아니라 상속 해소용이라 `ProcessorSpec`이 아님. 캐시는 `self.attrs`/`update_attrs()`
   - `diff(processor, edges, method, parent, adapter, params)`: 달라진 필드명 리스트 반환 (`desc` 제외 → desc-only 변경은 rebuild 미유발)
 
 - **`_PipelineNode`**: 개별 노드 — builder 내부 전용
   - 속성: `name`, `grp`, `processor`, `edges`, `method`, `adapter`, `params`, `desc`
   - `output_edges`: 이 노드를 입력으로 사용하는 노드명 리스트
-  - `get_spec(grps)`: 그룹 속성과 노드 속성을 병합해 `ProcessorSpec` 반환(캐시는 `self.spec`, 무효화는 `update_spec()`)
+  - `get_spec(grps)`: 그룹 속성과 노드 속성을 병합해 `ProcessorSpec` 반환(캐시 `self.spec`, 무효화 `update_spec()`)
   - `diff(grp, processor, edges, method, adapter, params)`: 달라진 필드명 리스트 반환 (`desc` 제외)
   - `set_grp`/`set_node`: `desc` 파라미터 수락; exist='diff' skip 경로에서도 `desc`는 업데이트됨
 
@@ -143,26 +140,26 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   - **params에는 인스턴스가 아니라 ref-dict로 지정**: `{"__ref__": "mllabs.ColSelector", "__params__": {"dsl_string": "*@categorical"}}` (인스턴스는 `set_grp`/`set_node`가 `TypeError`로 거부)
   - `_node_processor`가 Processor 생성 시 `resolve_ref_values()`로 인스턴스화하고, fit 시점에 `_resolve_col_selectors`가 `eval_expr(parse(v.dsl_string), data)`로 컬럼 확정
 
-### ProcessorSpec (`_pipeline.py`, 2026-08-02)
-**노드/Trial/Predictor가 공통으로 resolve되는 단 하나의 실행 단위 표현.** 예전엔 `get_attrs()`가 dict를 돌려줬는데, 클래스로 바꾸면서 필드가 정확히 6개로 고정됨:
+### ProcessorSpec (`_pipeline.py`)
+**노드/Trial/Predictor가 공통으로 resolve되는 단 하나의 실행 단위 표현.** 필드는 정확히 6개:
 `name`, `processor`, `edges`, `method`, `adapter`, `params` (`__slots__`, immutable 취급, 값 기반 `__eq__`)
 
 - 이 중 **5개(`name`/`processor`/`method`/`adapter`/`params`)가 Processor 생성자 인자 그대로** — `_node_processor.py`의 `TransformProcessor`/`PredictProcessor`가 받는 것과 1:1
-- **`edges`는 Processor한테 안 넘어감** — flow가 "무엇을 먹일지" 정하는 입력 배선이고, 실행 시점에 실제 데이터에 대해서만 lazily 컬럼으로 확정됨. 그래서 이름이 `ProcessorAttr`가 아니라 `ProcessorSpec`("아직 resolve 안 된 선언"이라는 뜻으로 이 모듈이 이미 쓰고 있는 어휘)
-- **표시 전용 필드는 일부러 뺌** — 노드의 `label`(원래 grp명), Trial의 `desc`/`tag`. 전부 원본 객체에서 직접 꺼낼 수 있고, attrs dict 시절에도 이 경로로는 아무도 안 읽었음(제거 전 전수 조사로 확인)
-- 만드는 쪽: `_BuiltNode.get_spec()`, `_PipelineNode.get_spec(grps)`(그룹 상속 해소 + `self.spec` 캐시/`update_spec()`), `Trial.get_spec()`, `Predictor.get_spec()`
+- **`edges`는 Processor한테 안 넘어감** — flow가 "무엇을 먹일지" 정하는 입력 배선이고, 실행 시점에 실제 데이터에 대해서만 lazily 컬럼으로 확정됨. 이름이 `ProcessorAttr`가 아니라 `ProcessorSpec`인 이유("아직 resolve 안 된 선언")
+- **표시 전용 필드는 일부러 뺌** — 노드의 `label`(원래 grp명), Trial의 `desc`/`tag`. 전부 원본 객체에서 직접 꺼낼 수 있음
+- 만드는 쪽: `_BuiltNode.get_spec()`, `_PipelineNode.get_spec(grps)`, `Trial.get_spec()`, `Predictor.get_spec()`
 - 쓰는 쪽: `Job.spec` → `_process()`(Processor 생성) / `_definition_of()`(staleness·info) / flow의 입력 준비 / `Connector.match(spec)` / `_describer` / `Inferencer.node_specs`
-- **DataSource는 여기 안 들어감** — `_DataSourceNode.get_attrs(grps=None)`/`_BuiltDataSource.get_attrs()`는 `name`/`grp`/`schema`/`targets` **dict**를 그대로 반환. 실행 대상이 아니라 만들 Processor가 없어서, `get_spec`을 오버라이드하지 않고 이름을 아예 분리함(같은 이름의 다형 메소드가 서로 다른 모양을 반환하는 걸 피함). 접근은 `pipeline.datasource` / `builder.datasource`
-- `_PipelineGroup.get_attrs(grps)`도 dict 그대로 — 그룹은 실행 단위가 아니라 상속 해소 중간 단계라 `ProcessorSpec`이 아님
+- **DataSource는 여기 안 들어감** — `_DataSourceNode.get_attrs()`/`_BuiltDataSource.get_attrs()`가 `name`/`grp`/`schema`/`targets` **dict**를 반환. 접근은 `pipeline.datasource` / `builder.datasource`
+- `_PipelineGroup.get_attrs(grps)`도 dict — 그룹은 실행 단위가 아니라 상속 해소 중간 단계
 
 ### Trial (`_trial.py`)
-Head를 Pipeline에서 떼어낸 결과. **Experiment 클래스는 없음** — Trial 리스트를 직접 넘긴다.
+평가할 구성 하나. **Experiment 클래스는 없음** — Trial 리스트를 직접 넘긴다.
 
-- **`Trial`**: 평가할 구성 하나. `name`, `processor`, `method`, `adapter`, `params`, `edges`, `desc`, `tag`
-  - `desc`(2026-08-01, `label`에서 이름 변경): 순수 표시용 설명 문자열 — `PipelineBuilder`의 `desc`와 같은 역할(매칭/diff/저장 식별에 전혀 관여 안 함). 예전 `label`은 `make_trials()`가 `label=name`으로 자동 채워 sweep 그룹핑 용도로도 썼는데, "설명"이라는 새 의미와 안 맞아서 그 자동 채움은 제거 — `desc`는 명시적으로 안 주면 그냥 `None`
-  - `get_spec()`: 노드의 `Pipeline.get_node_spec()`과 **똑같은 `ProcessorSpec`**을 반환. `role` 키는 2026-08-01에 제거 — Connector가 Trial과 노드를 구분할 목적으로 쓸모가 없었음(Collector는 애초에 Trial job에만 붙고 노드 job엔 안 붙으므로 `role='head'`로 걸러야 할 대상이 없었음). `Connector(role='head')`로 필터하던 곳은 이제 `Connector()`(무필터)로
+- **`Trial`**: `name`, `processor`, `method`, `adapter`, `params`, `edges`, `desc`, `tag`
+  - `desc`: 순수 표시용 설명 문자열 — `PipelineBuilder`의 `desc`와 같은 역할(매칭/diff/저장 식별에 전혀 관여 안 함). 안 주면 `None`
+  - `get_spec()`: 노드의 `Pipeline.get_node_spec()`과 **똑같은 `ProcessorSpec`** 반환
   - **이름이 식별자**. 디스크 아티팩트 디렉토리명이자 `TrialStore`(`trials` 테이블 PK)의 키 — 재정의하면 아티팩트도 `TrialStore` row도 덮어씀
-  - **`content_key()` 없음(2026-08-01 제거)**: 정의를 값으로 비교하는 유틸이었으나 실제 호출부가 전혀 없었음(저장/식별 어디에도 안 쓰임 — `TrialStore.has()`는 애초부터 필드별 직접 비교)
+  - 정의를 값으로 비교하는 별도 유틸(content_key 류)은 없다 — `TrialStore.has()`가 필드별로 직접 비교
   - `node_names()`: edges가 참조하는 노드 이름 집합
 
 - **`make_trials(name, processor, edges, method, adapter, params, param_grid, tags)`** → `list[Trial]`
@@ -176,38 +173,24 @@ Project는 순수 "조각을 짜맞춰주는 팩토리"일 뿐 필수 의존성�
 1. 경로(`exp_path`/`trainer_path`)와 `cache` 제공
 2. `ProjectStore`에 이름 등록
 3. `pipeline_version`을 줬으면 `load_pipeline()`으로 `Pipeline` 객체로 바꿔 채택시킴
-   (Experimenter는 생성 후 `set_pipeline`, Trainer는 생성자 인자)
 
 `load_experimenter()`/`load_trainer()`는 **Pipeline을 resolve하지 않고** 각 클래스의 복원 진입점에
-위임한다 — run이 자기 디렉토리에서 다 읽어온다.
-
-**경계**: run 하나에 대한 정보(splitter, data_key, 채택한 Pipeline, 노드 아티팩트/이력)는 전부 그 run
-디렉토리에 있고, Project는 "이 프로젝트에 뭐가 있나"만 답한다(2026-08-03). 그래서 어떤 run이든
-Project 없이 열 수 있고, ProjectStore는 이름 목록이라 동기화가 어긋날 두 번째 진실 원본이 되지 않는다.
+위임한다 — run이 자기 디렉토리에서 다 읽어온다. 그래서 어떤 run이든 Project 없이 열 수 있고,
+ProjectStore는 이름 목록이라 동기화가 어긋날 두 번째 진실 원본이 되지 않는다.
 
 - `Project(path, cache_maxsize=4GB)` — `DataCache`를 소유하고 모든 Experimenter/Trainer가 공유
 - 경로: `pipeline_path(name)`, `exp_path(name)`, `trainer_path(name)`, `inferencer_path(name)`, `collectors_path()`
 - 팩토리: `pipeline_builder(name)`, `collectors()`, `experimenter(name, data, pipeline_name=, pipeline_version=, **kw)`, `load_experimenter(name, data, data_key=, aug_data=)`, `trainer(name, data, pipeline_name=, pipeline_version=, **kw)`, `load_trainer(name, data, aug_data=)`
-  - `load_experimenter`는 `Experimenter.load_experimenter(path, data, ...)`에, `load_trainer`는 `Trainer.load_trainer(path, data, aug_data=, cache=)`에 위임. **둘 다 Pipeline을 resolve하지 않음** — run이 자기 `pipeline.pkl`을 읽는다
-- **Pipeline 버전**: `build_pipeline(builder)` → `builder.build()` 호출 후 결과를 다음 버전(1부터, `builder._store`가 관리하는 카운터의 `max+1`)으로 저장하고 `pipeline.version`에 세팅해 반환. **content dedup 없음** — 내용이 같아도 호출할 때마다 새 버전(`builder`에 path가 없으면 `ValueError`)
-  - 카운터/버전 파일은 **Project가 아니라 각 pipeline 자신의 db**(`pipelines/{name}/{name}.db`)가 소유 — `build_pipeline`은 `builder._store.save_version()`에 위임할 뿐, 프로젝트 전역 색인이 없음
-  - `load_pipeline(name, version=None)`, `list_pipeline_versions(name)` — 둘 다 내부적으로 `PipelineStore(pipeline_path(name), name)`를 통해 조회
-  - 저장은 pkl (`v{n}.pkl`) — 형식은 `PipelineStore.save_version`/`load_version` 뒤에 숨어 있어 나중에 교체 가능
+- **Pipeline 버전**: `build_pipeline(builder)` → `builder.build()` 후 결과를 다음 버전(1부터, `max+1`)으로 저장하고 `pipeline.version`에 세팅해 반환. **content dedup 없음** — 내용이 같아도 호출할 때마다 새 버전(`builder`에 path가 없으면 `ValueError`)
+  - 카운터/버전 파일은 **각 pipeline 자신의 db**(`pipelines/{name}/{name}.db`)가 소유 — `build_pipeline`은 `builder._store.save_version()`에 위임할 뿐, 프로젝트 전역 색인이 없음
+  - `load_pipeline(name, version=None)`, `list_pipeline_versions(name)` — 둘 다 `PipelineStore(pipeline_path(name), name)`를 통해 조회
+  - 저장은 pkl (`v{n}.pkl`) — 형식은 `PipelineStore.save_version`/`load_version` 뒤에 숨어 있어 교체 가능
 - `trials`: `TrialStore`, `store`: `ProjectStore`, `list_experimenters()`, `list_trainers()`
 
-### ArtifactStore (`_store.py`, 공통 인터페이스, 2026-08-01)
-`NodeStore`/`TrialStore`가 공유하는 메소드 모양의 base class. 두 그룹으로 나뉨:
-- **아티팩트** (`write_objs`/`write_obj`/`write_result`/`get_objs`/`get_obj`/`get_result`/
-  `list_nodes`/`status`/`reset_node`) — **`NodeStore`만 전부 구현**. `TrialStore`는
-  `ArtifactStore`를 상속만 할 뿐 하나도 오버라이드하지 않음 — Trial의 obj/result는 (노드와 같은
-  디렉토리를 쓰는) 그 run의 `NodeStore`가 갖고, `TrialStore`는 정의(`trials`)+실행 이력
-  (`experiment_hist`)만 가지므로 쌓을 obj/result 자체가 없음. 상속만 해두는 이유는 base의 기본
-  동작이 `NotImplementedError`를 던지는 것이라 — `TrialStore`에서 이 메소드들을 호출하면 (없는
-  메소드라 `AttributeError`가 나는 대신) 의도가 분명한 `NotImplementedError`가 남
-- **히스토리** (`record`/`get_hist`/`get_status`/`get_info`/`remove_hist`) — 둘 다 실제로
-  구현(각자 자기 테이블에 대해). 모양만 여기 문서화해두는 것 — `TrialStore`가 (이미 한 run에
-  스코프된 `NodeStore`엔 없는) experimenter 이름을 하나 더 키로 쓰기 때문에 override 시그니처가
-  서로 다름(`record`/`get_hist` 등은 base에서 `*args, **kwargs`로만 선언)
+### ArtifactStore (`_store.py`, 공통 인터페이스)
+`NodeStore`/`TrialStore`가 공유하는 메소드 모양의 base class. 두 그룹:
+- **아티팩트** (`write_objs`/`write_obj`/`write_result`/`get_objs`/`get_obj`/`get_result`/`list_nodes`/`status`/`reset_node`) — **`NodeStore`만 전부 구현**. `TrialStore`는 상속만 하고 하나도 오버라이드하지 않음 — Trial의 obj/result는 (노드와 같은 디렉토리를 쓰는) 그 run의 `NodeStore`가 갖고, `TrialStore`는 정의+이력만 가지므로 쌓을 obj/result 자체가 없음. 상속해두는 이유는 base가 `NotImplementedError`를 던져서, `TrialStore`에서 호출하면 `AttributeError` 대신 의도가 분명한 에러가 나기 때문
+- **히스토리** (`record`/`get_hist`/`get_status`/`get_info`/`remove_hist`) — 둘 다 각자 자기 테이블에 대해 구현. `TrialStore`가 (이미 한 run에 스코프된 `NodeStore`엔 없는) experimenter 이름을 키로 하나 더 쓰기 때문에 override 시그니처가 서로 달라, base에선 `*args, **kwargs`로만 선언
 
 ### TrialStore (`_trial_store.py`)
 ```sql
@@ -215,119 +198,114 @@ trials(name PK, desc, processor, method, adapter, params, edges, tag)
 experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
                 pipeline_version, status)
 ```
-- **인조식별자도 content hash도 없음.** 두 테이블 다 **이름이 PK**(`trials`는 trial 이름 하나, 이력은 trial 이름 + experimenter 이름). `pipeline_version`은 해시가 아니라 **정수** — 그 실행의 `Experimenter.pipeline_version`을 그대로 기록
-- 이름으로 키잉하는 이유: 아티팩트가 이미 이름으로 키잉돼 있음(`{exp}/__folds/{o}/{i}/{trial_name}/`, `{project}/exp/{name}`). 맞춰두면 조인 없이 읽히고, **정의를 바꿔 재실행 = 아티팩트 덮어쓰기 = 행 덮어쓰기**가 두 테이블 모두 일관됨(`register`는 `INSERT OR REPLACE`)
-- **content_key 컬럼 없음(2026-08-01 제거)**: params가 평문 데이터로 강제된 덕에 정의 일치 여부는 값 비교 하나로 충분(`has()`) — 해시 컬럼은 이걸 재서술할 뿐이었음. `experiment_hist`는 실행 로그일 뿐 정의의 출처가 아니라서, 이름이 재정의되면 예전 정의 자체를 복원하는 기능은 애초에 없음(`Trial.content_key()` 메소드 자체도 실호출부가 없어 2026-08-01에 완전히 삭제됨 — 값 비교 유틸이 존재하는 것과 그걸 실제로 쓰는 코드가 있는 것은 별개였음)
-- **아티팩트 rebuild 필요 여부는 `info['definition']`이 아니라 `experiment_hist`가 판정(2026-08-01 개정)**: `Experimenter._make_jobs`는 더 이상 디스크의 `info['definition']`을 트리거의 정의와 비교하지 않음 — `experiment_hist`에서 그 fold의 `status`만 확인해서 `'built'`면 스킵, `'error'`거나 기록이 없으면 job을 만듦. 즉 trial을 재정의해도 이미 `'built'`로 기록된 fold는 자동으로 재실행되지 않음(원하면 `reset_nodes`로 명시적으로 지워야 함) — `NodeStore`를 아예 들여다보지 않음
-- `register(trial)`/`register_all(trials)`: 이름 기준 upsert(반환값 없음). `has(trial)`: 그 이름에 저장된 게 **지금** 이 정의와 같은지 필드별 비교. `get_by_name(name)`, `list_trials()`
+- **인조식별자도 content hash도 없다.** 두 테이블 다 **이름이 PK**(`trials`는 trial 이름, 이력은 trial 이름 + experimenter 이름). `pipeline_version`은 해시가 아니라 **정수**로, 그 실행의 `Experimenter.pipeline_version`을 그대로 기록
+- 이름으로 키잉하는 이유: 아티팩트가 이미 이름으로 키잉돼 있음(`{exp}/__folds/{o}/{i}/{trial_name}/`). 맞춰두면 조인 없이 읽히고, **정의를 바꿔 재실행 = 아티팩트 덮어쓰기 = 행 덮어쓰기**가 두 테이블 모두 일관됨(`register`는 `INSERT OR REPLACE`)
+- 정의 일치 여부는 값 비교 하나로 충분해서(`has()`) 해시 컬럼을 두지 않는다. `experiment_hist`는 실행 로그일 뿐 정의의 출처가 아니므로, 이름이 재정의되면 예전 정의를 복원하는 기능은 없다
+- **아티팩트 rebuild 필요 여부는 `experiment_hist`가 판정한다** — `Experimenter._make_jobs`는 `NodeStore`를 아예 들여다보지 않고 `experiment_hist`의 fold별 `status`만 본다: `'built'`면 스킵, `'error'`거나 기록이 없으면 job 생성. 즉 trial을 재정의해도 이미 `'built'`인 fold는 자동 재실행되지 않으며, 돌리려면 `reset_nodes`로 명시적으로 지워야 함
+- `register(trial)`/`register_all(trials)`: 이름 기준 upsert. `has(trial)`: 그 이름에 저장된 게 **지금** 이 정의와 같은지 필드별 비교. `get_by_name(name)`, `list_trials()`
 - `record(trial_name, experimenter, outer_idx, inner_idx, pipeline_version, status)`, `get_hist(...)`, `get_status(...)`, `remove_hist(...)`
 
 ### Experimenter (`_experimenter.py`)
-- **Project 의존성 없음. 주입받는 건 `cache` 하나(2026-08-03 개정)** — 생성자: `Experimenter(path, name, data, data_names=, sp=, sp_v=, splitter_params=, title=, data_key=, aug_data=, cache=)`. `experimenter_store`/`pipeline`/`pipeline_name`/`_save`는 **인자가 아님** — store는 `ExperimenterStore(self.path)`로 **자기가 만들고**, Pipeline은 `set_pipeline()`으로만 채택
-  - `data`는 native/`DataWrapper` 아무거나(2026-08-05) — `self.data = wrap(data)`, splitter에 넘기는 `data_native = unwrap(data)`
-  - **생성자 = 신규 생성**. split을 다시 계산하고 상태를 새로 씀 → 기존 디렉토리에 대고 부르면 재개가 아니라 처음부터 다시 시작. 복원은 **`Experimenter.load_experimenter(path, data, data_key=None, aug_data=None, cache=None)`** staticmethod
-  - `load_experimenter`는 `{path}/__exp.db`가 없으면 `KeyError` — store를 만들기 **전에** 검사한다(안 그러면 없는 run의 디렉토리와 빈 db를 만들어놓고 실패함)
-  - `Project.experimenter(name, data, pipeline_name=, pipeline_version=)`가 하는 일은 경로 + `cache` + ProjectStore 이름 등록 + (버전을 줬으면) `set_pipeline` 뿐
-- **이름이 식별자**: 경로는 `{project}/exp/{name}`, `TrialStore` 이력의 키도 이 이름. `exp_id` 같은 UUID 없음
-- **Pipeline은 객체로 지정** — `set_pipeline(pipeline, pipeline_name=None)`이 이미 로드된 `Pipeline`을 그대로 받아 채택. 이 클래스는 이름/버전으로 파이프라인을 **로드할 방법 자체가 없음**(project 참조가 없어서) — 버전 번호로 지정하고 싶으면 `Project.experimenter(..., pipeline_version=)`을 쓸 것. `self.pipeline_version`은 별도로 안 들고 `pipeline.version`에서 그대로 읽음(단일 출처). 채택한 Pipeline은 **실험 디렉토리의 `pipeline.pkl`로 저장되고 생성자가 그걸 다시 읽음** — `pipeline=` 없이 같은 경로로 생성하면 마지막에 채택한 Pipeline이 복원됨(Project 불필요, 2026-08-03)
-  - 버전 전환 시 `pipeline.diff_from(self.pipeline)`으로 stale 판정 → `reset_nodes()`로 해당 노드 아티팩트만 제거. Trial은 건드리지 않음(아래 "Staleness" 섹션 참조)
-- `cache`(`DataCache`, optional) — `None`이면 캐시 없이 동작. store는 optional이 아님(자기가 만듦)이라 standalone Experimenter도 meta/splitter/Pipeline이 전부 저장됨
-- **상태 게이트 없음(2026-08-01, open/close 제거)**: `build()`/`exp()`는 언제나 호출 가능. `finalize`/`reinitialize`/`close_exp`/`reopen_exp`/`open`/`close`/`set_status`/`status` 속성 전부 제거됨
-- **OS log capture** (`open_os_log`/`close_os_log`/`os_log`) — 위 상태 게이트와 무관한 별개 기능:
-  - `open_os_log(log_path=None)`: 이 프로세스의 OS-level stdout/stderr(fd 1/2)를 `{path}/__worker_logs/master.log`(기본값)로 dup2 리다이렉트 시작 — `self._os_log_state`에 원본 fd/`sys.stdout`·`stderr` 백업 보관. 이미 open이면 에러
-  - `close_os_log()`: 리다이렉트 원복(`sys.stdout`/`stderr` 및 fd 1/2 복구). open 안 된 상태에서 호출하면 no-op
-  - `os_log(log_path=None)`: 위 둘을 감싼 컨텍스트 매니저 — `with e.os_log(): e.build(n_jobs=1); e.exp(n_jobs=4)`
-  - open~close 구간 동안: `n_jobs=1`인 `build`/`exp`는 같은 프로세스에서 돌기 때문에 마스터 리다이렉트가 그대로 캡처(별도 처리 불필요). `n_jobs>1`이면 그 구간에 한해 `log_dir`이 전달되어 워커별 리다이렉트도 같이 동작(위 `build`/`exp` 항목 참조)
-  - `sys.stdout`/`stderr`는 원본 fd의 dup으로 rebind되므로, capture가 열려 있어도 `DefaultLogger`의 진행률 표시 등 Python 레벨 출력은 그대로 콘솔에 보임 — dup2로 fd 1/2만 로그 파일로 돌리기 때문에 native(C-level) 직접 write만 잡힘
+- **Project 의존성 없음. 주입받는 건 `cache` 하나** — 생성자: `Experimenter(path, name, data, data_names=, sp=, sp_v=, splitter_params=, title=, data_key=, aug_data=, cache=)`. store는 `ExperimenterStore(self.path)`로 **자기가 만들고**, Pipeline은 `set_pipeline()`으로만 채택
+  - `data`는 native/`DataWrapper` 아무거나 — `self.data = wrap(data)`, splitter에는 `unwrap(data)`를 넘김
+  - **생성자 = 신규 생성**. split을 다시 계산하고 상태를 새로 씀 → 기존 디렉토리에 대고 부르면 재개가 아니라 처음부터 다시 시작
+  - 복원은 **`Experimenter.load_experimenter(path, data, data_key=None, aug_data=None, cache=None)`** staticmethod. `{path}/__exp.db`가 없으면 `KeyError` — store를 만들기 **전에** 검사한다(안 그러면 없는 run의 디렉토리와 빈 db를 만들어놓고 실패함)
+  - `Project.experimenter(...)`가 하는 일은 경로 + `cache` + ProjectStore 이름 등록 + (버전을 줬으면) `set_pipeline` 뿐
+- **이름이 식별자**: 경로는 `{project}/exp/{name}`, `TrialStore` 이력의 키도 이 이름. UUID 없음
+- **Pipeline은 객체로 지정** — `set_pipeline(pipeline, pipeline_name=None)`이 이미 로드된 `Pipeline`을 받아 채택. 이 클래스는 이름/버전으로 파이프라인을 **로드할 방법 자체가 없다**(project 참조가 없음) — 버전 번호로 지정하려면 `Project.experimenter(..., pipeline_version=)`. `self.pipeline_version`은 별도로 안 들고 `pipeline.version`에서 읽음(단일 출처)
+  - 채택한 Pipeline은 **실험 디렉토리의 `pipeline.pkl`로 저장되고 `load_experimenter()`가 그걸 다시 읽는다**(`_experimenter.py:284`) — Project 없이도 마지막에 채택한 Pipeline이 복원됨. **생성자는 안 읽는다** — `self.pipeline = None`으로 두고 `_save()`가 meta의 `pipeline_name`/`pipeline_version`까지 기본값으로 덮어쓰므로, 기존 디렉토리에 대고 생성자를 부르면 provenance가 사라진다(GitHub #128)
+  - 버전 전환 시 `pipeline.diff_from(self.pipeline)`으로 stale 판정 → `reset_nodes()`로 해당 노드 아티팩트만 제거. Trial은 건드리지 않음("Staleness" 섹션)
+- `cache`(`DataCache`, optional) — `None`이면 캐시 없이 동작. store는 optional이 아니라(자기가 만듦) standalone Experimenter도 meta/splitter/Pipeline이 전부 저장됨
 - **pipeline 필요** (`_require_pipeline()`로 미설정 시 에러):
   - `build(nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None)` — 노드 빌드
-  - **`exp(trials, trial_store, collectors=None, collect_hist=None, n_jobs=1, gpu_id_list=None, logger=None)`(2026-08-01 `trial_store` 추가, 2026-08-04 `collect_hist` 추가)**
+  - **`exp(trials, trial_store, collectors=None, collect_hist=None, n_jobs=1, gpu_id_list=None, logger=None)`**
     - `trials`: **`[(Trial, outer_idx, inner_idx), ...]`** 튜플 리스트. fold 전개를 여기서 하므로 executor는 목록을 그대로 실행
-    - `trial_store`(`TrialStore`): 필수 — Trial 정의 등록/fold 스킵 판정/이력 기록 전부 여기로 함(호출부가 넘겨야 함, 보통 `project.trials`)
+    - `trial_store`(`TrialStore`): 필수 — Trial 정의 등록/fold 스킵 판정/이력 기록 전부 여기로 함(보통 `project.trials`)
     - `collectors`: `Collectors` 레지스트리 / Collector 인스턴스 리스트 / `None`
     - `collect_hist`(`CollectHist`, optional): 수집 이력. 안 주면 **레지스트리를 넘겼을 때만** 그 `collectors.hist`가 쓰임 — 맨 리스트는 쓸 프로젝트 전역 자리가 없어서 기록 안 됨(`_resolve_collectors`가 `(instances, hist)` 반환)
-    - `_make_jobs(trials, trial_store)`가 `Job(name, spec, outer_idx, inner_idx, flow, need_gpu)` 리스트를 만듦(노드/Trial 공용 클래스 — 아래 `_executor.py` 섹션 참조). skip 판정은 `trial_store.get_status(name, self.name)`(= `TrialStore.experiment_hist`)의 fold별 status로만 함 — `'built'`면 스킵, 그 외(`'error'`/기록 없음)면 job 생성. GPU 판정도 여기서 하고, adapter resolve는 **trial 이름당 1회**
+    - `_make_jobs(trials, trial_store)`가 `Job(name, spec, outer_idx, inner_idx, flow, need_gpu)` 리스트를 만듦. skip 판정은 `trial_store.get_status(name, self.name)`의 fold별 status로만 함. GPU 판정도 여기서 하고, adapter resolve는 **trial 이름당 1회**
     - Trial 정의를 *trial_store*에 등록하고, `TrialHistTracker`가 fold별 done/error를 이력에 기록
   - `n_jobs`는 실제 작업 수로 상한 처리 (`min(n_jobs, len(jobs))`) — 유휴 워커/progress bar 방지
-  - `n_jobs > 1`이고 OS log capture가 open일 때만 워커 stdout/stderr를 `{path}/__worker_logs/worker_{i}.log`로 리다이렉트
   - `get_node_info()`: 노드 요약 Markdown
 - **pipeline 불필요** (디스크 상태만으로 동작): `get_status(node_name)`, `reset_nodes(nodes)`, `show_error_nodes(nodes=None, traceback=False, trial_store=None)`(trial_store 없으면 노드 에러만 보고), `get_objs(node_name, outer_idx=0, inner_idx=0)`
-  - fold당 `NodeStore`가 **하나**(`train_data_flows[j]`)라 예전의 이중 store stale 캐시 문제는 없음
-- **OS log capture** (`open_os_log`/`close_os_log`/`os_log`) — 위 상태 게이트와 무관한 별개 기능:
-  - `open_os_log(log_path=None)`: 이 프로세스의 fd 1/2를 `{path}/__worker_logs/master.log`로 dup2 리다이렉트
-  - `close_os_log()`: 원복. `os_log()`는 둘을 감싼 컨텍스트 매니저
-  - `sys.stdout`/`stderr`는 원본 fd의 dup으로 rebind되므로 진행률 등 Python 레벨 출력은 콘솔에 그대로 보임 — native(C-level) write만 잡힘
-- `get_worker_logs(worker=None)`: 캡처된 네이티브 출력 — `{worker_idx: text, 'master': text}`. 매 실행마다 덮어씀
+- **OS log capture** (`open_os_log`/`close_os_log`/`os_log`):
+  - `open_os_log(log_path=None)`: 이 프로세스의 OS-level stdout/stderr(fd 1/2)를 `{path}/__worker_logs/master.log`(기본값)로 dup2 리다이렉트 — `self._os_log_state`에 원본 fd/`sys.stdout`·`stderr` 백업 보관. 이미 open이면 에러
+  - `close_os_log()`: 리다이렉트 원복. open 안 된 상태에서 호출하면 no-op
+  - `os_log(log_path=None)`: 위 둘을 감싼 컨텍스트 매니저 — `with e.os_log(): e.build(n_jobs=1); e.exp(n_jobs=4)`
+  - open~close 구간 동안 `n_jobs=1`인 `build`/`exp`는 같은 프로세스라 마스터 리다이렉트가 그대로 캡처하고, `n_jobs>1`이면 그 구간에 한해 `log_dir`이 전달돼 워커 stdout/stderr도 `{path}/__worker_logs/worker_{i}.log`로 리다이렉트됨
+  - `sys.stdout`/`stderr`는 원본 fd의 dup으로 rebind되므로 `DefaultLogger`의 진행률 등 Python 레벨 출력은 콘솔에 그대로 보인다 — dup2로 fd 1/2만 돌리기 때문에 native(C-level) 직접 write만 잡힘
+  - `get_worker_logs(worker=None)`: 캡처된 네이티브 출력 — `{worker_idx: text, 'master': text}`. 매 실행마다 덮어씀
 - `get_train_data(edges, o_idx=0, i_idx=0)` / `get_valid_data(...)` / `get_test_data(...)`: 출력 추출 헬퍼
 - `aug_data`: 외부 데이터를 DataSource 수준에서 inner train split에 append — 미퍼시스트
-- 저장/로드: **`Experimenter.load_experimenter(path, data, data_key=None, aug_data=None, cache=None)`** staticmethod가 복원 진입점. `project.load_experimenter(name, ...)`는 여기에 위임할 뿐
-  - meta/splitter는 **그 run의 `{exp_path}/__exp.db`**(`_experimenter_store.py`) — `experimenter(name PK, data_key, title, pipeline_name, pipeline_version, splitters BLOB)`. 프로젝트 전역 `experimenters.db`는 없음(2026-08-03)
-  - splitter 객체(`sp, sp_v, splitter_params`)는 ref-직렬화 불가라 컬럼이 아니라 **BLOB**(pickle). `__splitters.pkl` 파일은 폐지
+- 저장/로드: meta/splitter는 **그 run의 `{exp_path}/__exp.db`**(`_experimenter_store.py`) — `experimenter(name PK, data_key, title, pipeline_name, pipeline_version, splitters BLOB)`. 프로젝트 전역 experimenter db는 없다
+  - splitter 객체(`sp, sp_v, splitter_params`)는 ref-직렬화 불가라 컬럼이 아니라 **BLOB**(pickle)
 
 ### DataCache (`_cache.py`)
 - `cachetools.LRUCache` 기반, 용량(bytes) 단위 관리. `Project`가 소유(`project.cache`)해서 모든 Experimenter/Trainer가 공유
-- 키가 **`(scope, node, typ)`**(2026-08-01 개정, `outer_idx`/`inner_idx` 제거) — `scope`는 그 fold를 만든 `TrainDataFlow`가 **자기 생성자에서 만드는 랜덤 id**(`self.scope = uuid.uuid4().hex`), `str(store.path)`가 아님. 이전엔 경로 문자열을 `scope`로 썼는데, `Path(path)`를 `resolve()` 안 해서 — Experimenter/Trainer를 Project 없이 독립 생성하고 `cache=`를 외부 주입받을 수 있게 된 뒤로는 — 서로 다른 물리 디렉토리가 우연히 같은 상대경로 문자열이 되어 충돌할 여지가 실제로 있었음(발견된 문제, 이번에 해소)
-  - **`TrainDataFlow` 인스턴스 하나 = 정확히 그 (run, fold) 하나**(fold마다 새로 만들고 공유 안 함)라, 그 인스턴스 자신의 랜덤 id만으로 이미 "이 run의 이 fold"가 유일하게 식별됨 — 그래서 `outer_idx`/`inner_idx`를 키에 또 넣을 필요가 없어짐(중복 제거). 트레이드오프: 리로드(`Project.load_experimenter` 등, 새 Python 인스턴스 = 새 scope id)하면 이전 인스턴스가 캐싱해둔 항목은 다시 못 만남 — cache miss일 뿐 잘못된 값이 나오는 게 아니라 허용 가능한 손실로 판단
+- 키는 **`(scope, node, typ)`** — `scope`는 그 fold를 만든 `TrainDataFlow`가 **자기 생성자에서 만드는 랜덤 id**(`self.scope = uuid.uuid4().hex`). 경로 문자열을 쓰지 않는 이유: run을 Project 없이 독립 생성하고 `cache=`를 외부 주입받을 수 있으므로, 서로 다른 물리 디렉토리가 우연히 같은 상대경로 문자열이 되어 충돌할 수 있음
+  - **`TrainDataFlow` 인스턴스 하나 = 정확히 그 (run, fold) 하나**(fold마다 새로 만들고 공유 안 함)라, 인스턴스 자신의 랜덤 id만으로 이미 "이 run의 이 fold"가 유일하게 식별됨 — `outer_idx`/`inner_idx`를 키에 또 넣지 않는 이유
+  - 트레이드오프: 리로드하면(새 Python 인스턴스 = 새 scope id) 이전 인스턴스가 캐싱해둔 항목은 다시 못 만남 — cache miss일 뿐 잘못된 값이 나오는 게 아니라 허용 가능한 손실로 판단
 - `get_data(scope, node, typ)`, `put_data(scope, node, typ, data)`
-- `clear_nodes(nodes)`: 특정 노드들의 캐시 삭제(이름만 매칭 — scope 무관하게 지움. 여러 run이 같은 노드 이름을 우연히 쓰면 서로의 캐시까지 같이 지워짐 — 안전하지만(재계산될 뿐) 낭비이긴 함, 아직 미해결)
+- `clear_nodes(nodes)`: 특정 노드들의 캐시 삭제(이름만 매칭 — scope 무관하게 지움. 여러 run이 같은 노드 이름을 쓰면 서로의 캐시까지 같이 지워짐. 안전하지만 낭비 — 미해결)
 
 ### NodeStore (`_store.py`)
-- `ArtifactStore`(위 섹션 참조)를 상속해 그 아티팩트 메소드들을 전부 구현
-- **run 하나(Experimenter/Trainer 하나)당 인스턴스 하나(2026-08-01, NodeInfoStore와 통합)** — 예전엔 fold 하나당 인스턴스 하나였는데, 이제 `outer_idx`/`inner_idx`를 매 호출마다 받아서 그 fold의 경로/이력을 그때그때 계산. Experimenter/Trainer가 각자 자기 base path(`exp/{name}`, `trainers/{name}`)로 생성자에서 한 번만 만들고, 그 run의 모든 fold가 같은 인스턴스를 공유
+- `ArtifactStore`를 상속해 아티팩트 메소드를 전부 구현
+- **run 하나(Experimenter/Trainer 하나)당 인스턴스 하나** — `outer_idx`/`inner_idx`를 매 호출마다 받아서 그 fold의 경로/이력을 그때그때 계산. Experimenter/Trainer가 각자 자기 base path(`exp/{name}`, `trainers/{name}`)로 생성자에서 한 번만 만들고, 그 run의 모든 fold가 같은 인스턴스를 공유
 - 아티팩트: `{path}/{outer_idx}/{inner_idx}/{node_name}/`
-  - `obj.pkl` — processor 객체, `result.pkl` — fit_transform/fit_predict 출력. **info.pkl 없음**(status/definition/fit_time/edges/train_shape/error 전부 안 남음)
-  - `node_path(name, outer_idx, inner_idx)`가 경로 조립. `write_objs(name, outer_idx, inner_idx, obj, result)`/`write_obj(name, outer_idx, inner_idx, obj)`/`write_result(name, outer_idx, inner_idx, result)` — 전부 일반 instance 메소드로 `node_path()`를 내부에서 호출해 경로를 조립함(2026-08-01, staticmethod에서 전환) — get_*/status/reset_node와 시그니처가 통일됨. 서브프로세스 워커는 살아있는 인스턴스가 필요 없는 대신, 이제 스폰 시점에 이 `store` 인스턴스 자체를 넘겨받음(`NodeStore`는 열린 커넥션을 `self`에 들고 있지 않아 picklable — `ProcessWorker(conn, collectors, store, ...)` 참조)
-  - `get_objs(name, outer_idx, inner_idx)`/`get_obj(...)`/`get_result(...)`/`list_nodes(outer_idx, inner_idx)`/`status(name, outer_idx, inner_idx)`(`None`/`'built'` — obj.pkl 존재만 봄, `'error'`는 여기서 절대 안 보임)/`reset_node(name, outer_idx, inner_idx)` — 전부 instance 메소드, 인자로 fold를 받음
-- **history(구 NodeInfoStore, 여기 통합됨)**: SQLite `node_hist(node_name, outer_idx, inner_idx, pipeline_version, status, info)` — PK는 `(node_name, outer_idx, inner_idx)`뿐(run_name 컬럼 없음 — store 자체가 이미 그 run에 스코프돼 있어서 불필요)
-  - `record(name, outer_idx, inner_idx, pipeline_version=, status=, info=)` — `info`는 `status` 제외 나머지 전부(`build_id`, `definition`, `fit_time`, `edges`, `train_shape`, `warnings`, 실패 시 `error`) JSON 인코딩, `NodeInfoTracker`(`_tracker.py`)가 기록
-  - `get_hist(node_name=, outer_idx=, inner_idx=, pipeline_version=)`(각 필터 optional)/`get_status(node_name)`/`get_info(node_name)`(`{(outer_idx, inner_idx): ...}`)/`get_fold_info(outer_idx, inner_idx)`(fold 하나의 `{node_name: info}` 전체 — `DataFlow.load()`가 씀)/`remove_hist(node_name=)`
+  - `obj.pkl` — processor 객체, `result.pkl` — fit_transform/fit_predict 출력. **info.pkl 없음** — status/definition/fit_time/edges/train_shape/error는 전부 history에
+  - `node_path(name, outer_idx, inner_idx)`가 경로 조립. `write_objs`/`write_obj`/`write_result`/`get_objs`/`get_obj`/`get_result`/`list_nodes`/`status`/`reset_node` 전부 fold를 인자로 받는 instance 메소드
+  - `status(name, outer_idx, inner_idx)`는 `None`/`'built'`만 반환(obj.pkl 존재만 봄) — `'error'`는 여기서 절대 안 보임
+  - `NodeStore`는 열린 커넥션을 `self`에 들고 있지 않아 picklable — 서브프로세스 워커에 스폰 시점에 인스턴스 자체를 넘긴다(`ProcessWorker(conn, collectors, store, ...)`)
+- **history**: SQLite `node_hist(node_name, outer_idx, inner_idx, pipeline_version, status, info)` — PK는 `(node_name, outer_idx, inner_idx)`(run_name 컬럼 없음 — store 자체가 이미 그 run에 스코프돼 있음)
+  - `record(name, outer_idx, inner_idx, pipeline_version=, status=, info=)` — `info`는 `status` 제외 나머지 전부(`build_id`, `definition`, `fit_time`, `edges`, `train_shape`, `warnings`, 실패 시 `error`) JSON 인코딩. `NodeInfoTracker`(`_tracker.py`)가 기록
+  - `get_hist(node_name=, outer_idx=, inner_idx=, pipeline_version=)`/`get_status(node_name)`/`get_info(node_name)`(`{(outer_idx, inner_idx): ...}`)/`get_fold_info(outer_idx, inner_idx)`(fold 하나의 `{node_name: info}` 전체 — `DataFlow.load()`가 씀)/`remove_hist(node_name=)`
   - `'error'`는 오직 여기서만 보임 — `Experimenter.show_error_nodes`/`Trainer.get_node_error`가 조회
 
 ### DataFlow / TrainDataFlow (`_flow.py`)
-- **DataFlow(2026-08-01, NodeStore 상속 → 컴포지션 전환 + outer_idx/inner_idx를 여기로 이동)**: 생성자가 `NodeStore` 인스턴스(`self.store`, run 전체가 공유) + 이 fold의 `outer_idx`/`inner_idx`를 받음. `status`/`get_obj`/`get_objs`/`get_result`/`list_nodes`/`node_path`는 `self.store.X(name, self.outer_idx, self.inner_idx)`로 위임하는 얇은 메소드. `reset_node`만 위임 + `node_objs`/`_node_edges`에서도 같이 지우는 조합 동작
-  - `node_objs`: `{name: (obj, result)}`(info 없음), `_node_edges`: `{name: edges}`
-  - **`load()`가 `self.store.get_fold_info(self.outer_idx, self.inner_idx)`를 한 번 조회**해서 `edges`까지 복원한 뒤 `load_objs(name, edges=...)`. history에 행이 없는 노드는 로드 안 함(안전한 기본값) — Trial도 이 규칙으로 자연히 걸러짐(Trial 결과는 `TrialStore.experiment_hist`에만 기록되고 이 run의 `node_hist`엔 절대 안 들어가서, 학습된 모델이 메모리로 딸려 들어오지 않음). 예전의 `role == 'head'` 명시적 스킵은 2026-08-01 `role` 전면 제거와 함께 삭제
+- **DataFlow**: 생성자가 `NodeStore` 인스턴스(`self.store`, run 전체가 공유) + 이 fold의 `outer_idx`/`inner_idx`를 받음. `status`/`get_obj`/`get_objs`/`get_result`/`list_nodes`/`node_path`는 `self.store.X(name, self.outer_idx, self.inner_idx)`로 위임하는 얇은 메소드. `reset_node`만 위임 + `node_objs`/`_node_edges`에서도 같이 지우는 조합 동작
+  - `node_objs`: `{name: (obj, result)}`, `_node_edges`: `{name: edges}`
+  - **`load()`가 `self.store.get_fold_info(...)`를 한 번 조회**해서 `edges`까지 복원한 뒤 `load_objs(name, edges=...)`. history에 행이 없는 노드는 로드 안 함(안전한 기본값) — Trial도 이 규칙으로 자연히 걸러진다(Trial 결과는 `TrialStore.experiment_hist`에만 기록되고 이 run의 `node_hist`엔 안 들어가서, 학습된 모델이 메모리로 딸려 들어오지 않음)
   - `get_data(source_data, edges)` → `{key: data}`
-- **TrainDataFlow** (DataFlow 상속): 노드 빌드 기능 추가. 생성자는 `store`(run이 공유하는 NodeStore)를 그대로 받아 `super().__init__(store, outer_idx=, inner_idx=)`로 넘김 — 더 이상 `path`를 안 받고, fold별로 자기 NodeStore를 새로 안 만듦
+- **TrainDataFlow** (DataFlow 상속): 노드 빌드 기능 추가. `store`를 그대로 받아 `super().__init__(store, outer_idx=, inner_idx=)`로 넘김 — fold별로 자기 NodeStore를 새로 만들지 않음
   - `data_source`: DataWrapperProvider (train/valid/**test** 제공 — `test_idx` 보유)
-  - `outer_idx`/`inner_idx`는 NodeStore 키(아티팩트 경로, history row) — **DataCache 키에는 더 이상 안 들어감**(위 "DataCache" 섹션 참조, `self.scope`가 생성자에서 만드는 랜덤 id로 대체). **Trainer도 자연스러운 `(split_idx, 0)`을 그대로 씀**, 예전처럼 음수 offset이나 별도 `info_fold` 개념 없음
-  - `get_train(edges)`, `get_valid(edges)`, **`get_test(edges)`** — flow 하나로 job의 모든 입력을 만들 수 있어야 `Job`이 자족적이 됨
-  - `set_objs(name, obj, result, info)`(현재 fit의 즉석 info에서 `edges`만 추출 — 디스크/history 안 거침). `get_available_stages`/`get_missing_stages`는 호출부가 하나도 없어 2026-08-02에 삭제
+  - `outer_idx`/`inner_idx`는 NodeStore 키(아티팩트 경로, history row) 전용 — DataCache 키에는 안 들어감(`self.scope`가 대신함). **Trainer도 자연스러운 `(split_idx, 0)`을 그대로 쓴다**
+  - `get_train(edges)`, `get_valid(edges)`, `get_test(edges)` — flow 하나로 job의 모든 입력을 만들 수 있어야 `Job`이 자족적이 됨
+  - `set_objs(name, obj, result, info)`: 현재 fit의 즉석 info에서 `edges`만 추출 — 디스크/history를 안 거침
 
 ### Trainer (`_trainer.py`)
-- **Project 의존성 없음. 주입받는 건 `cache` 하나(2026-08-03 개정, Experimenter와 동형)** — 생성자: `Trainer(path, name, data, splitter=None, splitter_params=None, aug_data=None, cache=None)`. `pipeline`/`pipeline_name`은 **인자가 아님** — store(`TrainerStore(self.path)`)는 자기가 만들고, Pipeline은 `set_pipeline()`으로만
-  - **`data`는 native/`DataWrapper` 아무거나 — 생성자와 `load_trainer()` 둘 다 `wrap(data)`(2026-08-05 수정)**. 예전엔 `self.data = data`라 wrapped만 받았고, `Project.trainer(name, df)`처럼 native를 넘기면 `_make_train_folds`의 `self.data.get_shape()`에서 `AttributeError`가 났음(splitter_params가 있으면 `_make_splits`의 `select_columns`에서도). 테스트 헬퍼가 `data=wrap(...)`로 미리 감싸 넘기고 있어 안 잡혔던 것 — Experimenter는 raw를, Trainer는 wrapped를 요구하는 정반대 계약이 고정돼 있었음
-  - **생성자 = 신규 생성**, 복원은 **`Trainer.load_trainer(path, data, aug_data=None, cache=None)`** staticmethod(구 `load()`). `{path}/__trainer.db`가 없으면 `KeyError`이고, Experimenter와 같은 이유로 **store를 만들기 전에** 검사
+- **Project 의존성 없음. 주입받는 건 `cache` 하나**(Experimenter와 동형) — 생성자: `Trainer(path, name, data, splitter=None, splitter_params=None, aug_data=None, cache=None)`. store(`TrainerStore(self.path)`)는 자기가 만들고, Pipeline은 `set_pipeline()`으로만
+  - `data`는 native/`DataWrapper` 아무거나 — 생성자와 `load_trainer()` 둘 다 `wrap(data)`
+  - **생성자 = 신규 생성**, 복원은 **`Trainer.load_trainer(path, data, aug_data=None, cache=None)`** staticmethod. `{path}/__trainer.db`가 없으면 `KeyError`이고, Experimenter와 같은 이유로 **store를 만들기 전에** 검사
   - 복원 시 split은 **재계산이 아니라 저장된 `split_indices`를 그대로** 씀 — splitter가 아예 없는 Trainer(단일 full-data fold)도 있고, 학습된 fold와 정확히 같아야 하므로
 - 경로 `{project}/trainers/{name}`
-- **`set_pipeline(pipeline, pipeline_name=None)`**: 이미 로드된 `Pipeline` 객체를 받음(버전 번호 아님) — `self.pipeline_version`은 `pipeline.version`에서 그대로 읽음. 버전 전환 시 `diff_from`으로 stale 제거
-- **저장소가 넷(2026-08-03)**:
-  - `_store`: `TrainerStore({path})` — meta + splits BLOB + `pipeline.pkl`. `__trainer.pkl`은 폐지
-  - `node_store`: `NodeStore({path})` — Pipeline 노드 아티팩트+이력. **경로 그대로**(기존 디렉토리 무효화 없음)
+- **`set_pipeline(pipeline, pipeline_name=None)`**: 이미 로드된 `Pipeline` 객체를 받음 — `self.pipeline_version`은 `pipeline.version`에서 읽음. 버전 전환 시 `diff_from`으로 stale 제거
+- **저장소가 넷**:
+  - `_store`: `TrainerStore({path})` — meta + splits BLOB + `pipeline.pkl`
+  - `node_store`: `NodeStore({path})` — Pipeline 노드 아티팩트+이력
   - `predictor_store`: `NodeStore({path}/__predictors)` — Predictor 아티팩트+이력. 같은 클래스, 다른 디렉토리
   - `predictor_defs`: `PredictorStore({path}/__predictors)` — Predictor **정의**
-  - **디렉토리 분리는 강제** — 두 `NodeStore`가 한 디렉토리를 쓰면 `__node_hist.db` 파일명이 충돌. 덤으로 노드/Predictor가 디스크에서 구조적으로 갈림(예전엔 "어느 history에 기록됐는지"로만 구분 가능했음)
-  - 이 구조가 없애는 것들: Predictor 이력을 담을 run 이름 컬럼, `exp/{name}`↔`trainers/{name}` 네임스페이스 충돌, 전용 tracker — store가 이미 run 스코프라 `NodeInfoTracker`를 그대로 씀
-- **`set_predictors()` 없음(2026-08-03 제거)** — 별도 "선택" 단계를 두지 않고 `train(predictors)`가 직접 받는다. 없앤 것: 저장된 것과 비교하지 않고 **무조건** `reset_nodes(selected_nodes + predictor_names())`를 부르던 동작(같은 선택을 다시 넘기기만 해도 학습이 통째로 날아갔음)
-- **`predictors`/`selected_nodes`는 이제 property** — `predictors`는 `predictor_defs.list_predictors()`(상태로 안 들고 있음 → 리로드가 공짜), `selected_nodes`는 `_nodes_for(self.predictors)`로 매번 계산(Predictor가 없으면 전 노드)
+  - **디렉토리 분리는 강제** — 두 `NodeStore`가 한 디렉토리를 쓰면 `__node_hist.db` 파일명이 충돌. 덤으로 노드/Predictor가 디스크에서 구조적으로 갈림
+  - 이 구조 덕에 Predictor 이력용 run 이름 컬럼도, `exp/{name}`↔`trainers/{name}` 네임스페이스 충돌도, 전용 tracker도 필요 없다 — store가 이미 run 스코프라 `NodeInfoTracker`를 그대로 씀
+- **선택 단계(`set_predictors()` 류)는 없다** — `train(predictors)`가 직접 받는다
+- **`predictors`/`selected_nodes`는 property** — `predictors`는 `predictor_defs.list_predictors()`(상태로 안 들고 있음 → 리로드가 공짜), `selected_nodes`는 `_nodes_for(self.predictors)`로 매번 계산(Predictor가 없으면 전 노드)
 - `predictor_names()`, `predictor_specs()`
 - `train_folds`: `[TrainFold]` — split당 `TrainDataFlow` 하나
-- **`train(predictors=None, n_jobs=1, gpu_id_list=None, logger=None)`**: 노드 먼저(위상 순서), 그 다음 Predictor `Job` 실행. 두 실행은 별개 executor 호출이라 각자 자기 store와 자기 `NodeInfoTracker`를 받음. skip 판정은 양쪽 다 디스크 기반(`store.status(name, split_idx, 0) == 'built'`) — **재정의는 그 자체로 재학습을 유발하지 않음**(강제하려면 `reset_nodes([name])`)
-  - `predictors`는 `predictor_defs.register_all()`로 **upsert 등록**(replace 아님) — 이전 호출에서 학습한 Predictor의 정의와 아티팩트가 살아남음. replace로 지우면 아티팩트만 남고 정의가 사라져 읽을 수 없게 됨
+- **`train(predictors=None, n_jobs=1, gpu_id_list=None, logger=None)`**: 노드 먼저(위상 순서), 그 다음 Predictor `Job` 실행. 두 실행은 별개 executor 호출이라 각자 자기 store와 자기 `NodeInfoTracker`를 받음. skip 판정은 양쪽 다 디스크 기반(`store.status(name, split_idx, 0) == 'built'`) — **재정의는 그 자체로 재학습을 유발하지 않는다**(강제하려면 `reset_nodes([name])`)
+  - `predictors`는 `predictor_defs.register_all()`로 **upsert 등록**(replace 아님) — 이전 호출에서 학습한 Predictor의 정의와 아티팩트가 살아남는다. replace로 지우면 아티팩트만 남고 정의가 사라져 읽을 수 없게 됨
   - `predictors=None`이면 이미 등록된 것들을 그대로 이어서 학습(중단된 학습 재개)
   - `Trial`을 넘기면 `TypeError` — `Predictor.from_trial(trial, experimenter=)`로 명시 승격해야 출처가 기록됨
   - 학습 대상 노드는 **넘긴 predictors 기준**(`_nodes_for(predictors)`)이지 등록된 전체가 아님
   - `Job.flow`는 Predictor에도 **노드 flow**가 들어감(입력을 만드는 건 노드 그래프) — 아티팩트만 다른 store로 감
-- `get_status(node_name)` / `get_node_error(node_name)`: `_store_for(name)`으로 두 store 중 하나를 골라 조회. **Predictor 에러도 이제 기록됨**(예전엔 Trainer에 기록할 곳이 없었음)
-- `process(data, v=None)`: generator, split마다 Predictor output을 `v`(DSL 문자열)로 필터 후 concat하여 yield. Predictor 모델은 `flow.load()`가 안 집어오므로(이력이 다른 store에 있음 — 그게 메모리에 안 딸려오게 하는 장치) `predictor_store`에서 on-demand로 꺼내고, **edges는 정의에서 채움** — 아티팩트에도 이 flow의 이력에도 없기 때문(안 채우면 `_resolve`가 전부 None을 반환해 조용히 아무것도 yield 안 함, 2026-08-02 수정)
+- `get_status(node_name)` / `get_node_error(node_name)`: `_store_for(name)`으로 두 store 중 하나를 골라 조회 — Predictor 에러도 기록됨
+- `process(data, v=None)`: generator, split마다 Predictor output을 `v`(DSL 문자열)로 필터 후 concat하여 yield. Predictor 모델은 `flow.load()`가 안 집어오므로(이력이 다른 store에 있음 — 그게 메모리에 안 딸려오게 하는 장치) `predictor_store`에서 on-demand로 꺼내고, **edges는 정의에서 채운다** — 아티팩트에도 이 flow의 이력에도 없기 때문(안 채우면 `_resolve`가 전부 None을 반환해 조용히 아무것도 yield 안 함)
 - `to_inferencer(v=None)`: 학습된 Processor를 추출하여 Inferencer 생성
 - `reset_nodes(nodes)`: 하위 종속 노드 포함 초기화. Predictor는 leaf라 그래프 캐스케이드 대상이 아니지만, 리셋된 노드를 읽는 Predictor는 `node_names()` 교집합으로 같이 리셋됨
-- 저장/로드: `save()`(meta + splits를 `_store`에 기록), **`Trainer.load_trainer(path, data, aug_data=None, cache=None)`** staticmethod가 복원 진입점 — `project.load_trainer(name, ...)`는 여기 위임. Pipeline은 `{path}/pipeline.pkl`, splitter/split_indices는 `__trainer.db`의 splits BLOB, **Predictor는 `predictor_defs`에서** 복원
+- 저장/로드: `save()`(meta + splits를 `_store`에 기록), 복원은 `Trainer.load_trainer()`. Pipeline은 `{path}/pipeline.pkl`, splitter/split_indices는 `__trainer.db`의 splits BLOB, **Predictor는 `predictor_defs`에서** 복원
 
 ### Predictor (`_predictor.py`)
 Trainer가 학습하는 끝지점 출력 노드. `name`, `processor`, `method`, `adapter`, `params`, `edges`, `desc`, `tag`, `src_trial`, `src_experimenter` (`__slots__`)
 
-- **Trial과 왜 별도 클래스인가**: 둘 다 `get_spec()`이 구분 불가능한 `ProcessorSpec`을 내놓으므로 구조만으로는 나눌 이유가 없음. 나누는 건 **의미**임 — Trial은 *비교되는 후보*라서 `TrialStore`가 프로젝트 전역이고 모든 Experimenter의 fold별 결과를 모으는 반면, Predictor는 *이미 내려진 결정*이라 중요한 게 비교 가능성이 아니라 **출처**(어떤 후보가 이걸 정당화했는가). 그래서 `src_trial`/`src_experimenter`를 들고 레지스트리는 Trainer별
+- **Trial과 왜 별도 클래스인가**: 둘 다 `get_spec()`이 구분 불가능한 `ProcessorSpec`을 내놓으므로 구조만으로는 나눌 이유가 없다. 나누는 건 **의미**다 — Trial은 *비교되는 후보*라서 `TrialStore`가 프로젝트 전역이고 모든 Experimenter의 fold별 결과를 모으는 반면, Predictor는 *이미 내려진 결정*이라 중요한 게 비교 가능성이 아니라 **출처**(어떤 후보가 이걸 정당화했는가). 그래서 `src_trial`/`src_experimenter`를 들고 레지스트리는 Trainer별
 - `Predictor.from_trial(trial, name=None, experimenter=None)`: 실행 정의를 그대로 복사하고 Trial 이름을 `src_trial`로 기록(`name`으로 이름을 바꿔도 출처는 원래 이름으로 남음)
 - `get_spec()` → `ProcessorSpec`(Trial/노드와 동일), `node_names()`: edges가 참조하는 노드 이름 집합
 
@@ -336,79 +314,78 @@ Trainer가 학습하는 끝지점 출력 노드. `name`, `processor`, `method`, 
 predictors(name PK, desc, processor, method, adapter, params, edges, tag,
            src_trial, src_experimenter)
 ```
-- **정의만 있고 이력 테이블이 없음** — Predictor의 fold별 status/info는 그 Trainer의 `predictor_store`(`NodeStore`)의 `node_hist`에 아티팩트와 같이 있음. `TrialStore`가 두 절반을 다 갖는 것과 대비되는데, 이유는 TrialStore가 프로젝트 전역이라 "어느 Experimenter가 돌렸나"를 답해야 하는 반면 여기는 store 자체가 이미 그 Trainer로 스코프돼 있어서
-- **Trainer별인 이유(TrialStore와 대비)**: Trial은 **결과가 중심**이라 여러 Experimenter의 fold별 성적을 한곳에 모아 비교해야 하고, 그래서 `TrialStore`가 프로젝트 전역이다. Predictor는 **아티팩트가 중심**이고 서로 비교할 일이 없다 — 답하는 질문이 "*이* Trainer가 뭘 학습하나"라서 프로젝트 레벨로 공유할 이유가 없다. `Trainer`가 `self.predictors`를 상태로 안 들고 이 store를 **직접 읽는 property**로 둔 근거이기도 함
+- **정의만 있고 이력 테이블이 없다** — Predictor의 fold별 status/info는 그 Trainer의 `predictor_store`(`NodeStore`)의 `node_hist`에 아티팩트와 같이 있음. `TrialStore`가 두 절반을 다 갖는 것과 대비되는데, TrialStore는 프로젝트 전역이라 "어느 Experimenter가 돌렸나"를 답해야 하는 반면 여기는 store 자체가 이미 그 Trainer로 스코프돼 있어서
+- **Trainer별인 이유**: Trial은 **결과가 중심**이라 여러 Experimenter의 성적을 한곳에 모아 비교해야 한다. Predictor는 **아티팩트가 중심**이고 서로 비교할 일이 없다 — 답하는 질문이 "*이* Trainer가 뭘 학습하나"라서 프로젝트 레벨로 공유할 이유가 없음. `Trainer`가 `self.predictors`를 상태로 안 들고 이 store를 직접 읽는 property로 둔 근거이기도 함
 - `register`/`register_all`(upsert — `Trainer.train`이 쓰는 것)/`replace_all(predictors)`(통째 교체, 빠진 이름 삭제)/`remove(name)`/`has(predictor)`/`get_by_name(name)`/`list_predictors()`
 - `get_by_name`/`list_predictors`는 dict가 아니라 **`Predictor` 객체**를 반환(`TrialStore`와 다름) — `Trainer.predictors` property가 그대로 내놓기 때문
-- `ArtifactStore`를 상속하지 않음 — 아티팩트도 이력도 안 갖는 순수 정의 레지스트리라 그 인터페이스가 의미 없음
+- `ArtifactStore`를 상속하지 않음 — 아티팩트도 이력도 안 갖는 순수 정의 레지스트리
 
 ### Inferencer (`_inferencer.py`)
-- 생성자: `(node_specs, selected_nodes, selected_predictors, n_splits, node_objs, v=None)` — 2026-08-02에 `selected_stages`/`selected_heads`에서 개명(저장 키도 같이 바뀜)
-- **Pipeline 의존성 없음** — `node_specs`(`{name: ProcessorSpec}`)만 보유. 실제로 필요한 건 `spec.edges`뿐이라 배포 아티팩트가 가벼움
+- 생성자: `(node_specs, selected_nodes, selected_predictors, n_splits, node_objs, v=None)`
+- **Pipeline 의존성 없음** — `node_specs`(`{name: ProcessorSpec}`)만 보유. 실제로 필요한 건 `spec.edges`뿐이라 배포 아티팩트가 가볍다
 - `node_objs`: `{name: [processor_split0, processor_split1, ...]}` — Processor 리스트 (Trainer 독립)
 - `process(data, agg='mean', nodes=None)`: split 결과 자동 집계 (`nodes`는 Predictor 이름 필터)
   - `agg`: `'mean'`/`'mode'`/callable/`None`(list 반환). 단일 split이면 집계 없이 반환
-  - `nodes`: str/list — 출력할 head 노드 선택 (None=전체). 미등록 노드 지정 시 ValueError
+  - `nodes`: str/list — 출력할 노드 선택 (None=전체). 미등록 노드 지정 시 ValueError
 - 저장/로드: `save(path)`, `load(cls, path)` — 단일 `__inferencer.pkl`에 node_objs 포함
 
 ### Connector (`_connector.py`)
-- `__init__(node_query=None, edges=None, processor=None)` — 3요소 선택적 매칭
-- **`role` 파라미터 없음(2026-08-01 제거)**: Trial과 노드를 구분할 목적으로 있었는데, Collector는 애초에 Trial job에만 붙고 노드 job엔 안 붙어서(`Experimenter.build()`가 노드 쪽엔 Collector를 아예 안 넘김) 걸러야 할 대상 자체가 없었음 — 죽은 파라미터. `Trial.get_spec()`도 같은 이유로 `role`을 안 실음(위 "Trial" 섹션 참조)
+- `__init__(node_query=None, edges=None, processor=None)` — 3요소 선택적 매칭. `role` 같은 노드/Trial 구분 파라미터는 없다(Collector가 Trial job에만 붙으므로 걸러야 할 대상 자체가 없음)
 - `processor`: **`"module.ClassName"` 문자열만** (클래스 인스턴스 아님) — resolve 안 하고 그대로 저장
-- `match(spec)`: `ProcessorSpec`을 받아 설정된 요소만 검사, 모두 충족 시 True (2026-08-02, dict → ProcessorSpec)
-  - node_query: str(regex) 또는 list(in), processor: `spec.processor`(문자열, Pipeline도 항상 문자열로 저장)와 **문자열 그대로 비교**(정규화 없음 — `set_grp`/`set_node`에 준 것과 같은 문자열 형태를 넘겨야 매칭)
+- `match(spec)`: `ProcessorSpec`을 받아 설정된 요소만 검사, 모두 충족 시 True
+  - node_query: str(regex) 또는 list(in)
+  - processor: `spec.processor`(문자열)와 **문자열 그대로 비교**(정규화 없음 — `set_grp`/`set_node`에 준 것과 같은 문자열 형태를 넘겨야 매칭)
   - edges: `{key: dsl_string}` — 각 key에 대해 노드의 resolved `edges[key]` 문자열과 **정확히 일치**해야 함 (contain 기반 아님)
 
 ### Collector (`collector/` 패키지)
 - **Collectors** (`_registry.py`): Collector 인스턴스를 소유하는 레지스트리. `Project.collectors()`로 얻음
-  - `Collectors(path=None)` — path 있으면 등록 시 `{path}/{name}`이 기본 저장 위치. **생성자가 곧 복원** — 그 path의 `CollectorStore`에서 등록돼 있던 걸 전부 되살림(`load()` 클래스메소드 없음)
+  - `Collectors(path=None)` — path 있으면 등록 시 `{path}/{name}`이 기본 저장 위치. **생성자가 곧 복원** — 그 path의 `CollectorStore`에서 등록돼 있던 걸 전부 되살림(별도 `load()` 없음)
   - `set_collector(name, collector, connector, path=None, params=None, exist='skip')` — 부품에서 조립. `collector`는 클래스 또는 `"module.ClassName"`, `connector`는 인스턴스 또는 `{__ref__}`, `params`엔 `resolve_ref_values` 적용
-  - **등록 즉시 영속화(2026-08-04)** — `set_collector`가 store에 write-through. `Collectors.save()`는 **없음**. path 없는 레지스트리는 메모리 전용(아무것도 안 남김)
+  - **등록 즉시 영속화** — `set_collector`가 store에 write-through. `Collectors.save()`는 없다. path 없는 레지스트리는 메모리 전용
   - `get_collector`/`remove_collector`(store 행+params 파일까지 삭제)/`names()`/`in`/`len`/`iter`
   - **`resolve(names)`**: 미등록 이름이면 `KeyError` — 조용히 넘어가면 "아무것도 수집 안 됨"과 구분이 안 되기 때문
   - `match(spec, names=None)`
-  - **`hist`(2026-08-04)**: 같은 path의 `CollectHist`. path 없으면 `None`. 레지스트리가 프로젝트 전역이라 이력도 여기 붙음 — 메트릭이 한곳에 모여야 비교 가능한 것과 같은 이유
-  - 여러 실행이 한 레지스트리를 공유하면 메트릭이 한곳에 모여 비교 가능
+  - **`hist`**: 같은 path의 `CollectHist`. path 없으면 `None`. 레지스트리가 프로젝트 전역이라 이력도 여기 붙는다 — 메트릭이 한곳에 모여야 비교 가능한 것과 같은 이유
 
-- **CollectHist** (`collector/_collect_hist.py`, 2026-08-04): 수집 이력
+- **CollectHist** (`collector/_collect_hist.py`): 수집 이력
   ```sql
   collect_hist(collector_name, experimenter, node_name, outer_idx, inner_idx,  -- PK
                pipeline_version, status, collect_date, elapsed, info)
   ```
   - **키가 fold 단위인 이유**: Collector가 자기 상태를 다루는 단위는 노드(`has_node`/`abort_node`/`reset_nodes`/`_save_node`)지만, 실패는 fold 하나에서 나고 그게 어느 fold였는지가 분석의 시작점. 노드로 접으면 그 정보가 사라짐
-  - `status`: `'collected'`(결과 반환) / `'empty'`(예외 없이 `None`) / `'error'`. **`empty`를 가른 게 핵심** — 예전엔 실패도 "수집할 게 없음"도 똑같이 `None`이라 구분 불가였음(보통 `output_var` 설정 실수)
+  - `status`: `'collected'`(결과 반환) / `'empty'`(예외 없이 `None`) / `'error'`. **`empty`를 따로 가르는 게 핵심** — 실패와 "수집할 게 없음"이 둘 다 `None`이면 구분이 안 된다(보통 `output_var` 설정 실수)
   - `info`(에러 시 JSON): `{phase, type, message, traceback}`. `phase`는 `'output'`(공용 `obj.process` 준비) / `'ext'`(ProcessCollector의 `output_ext`) / `'collect'` / `'push'`
   - `elapsed`는 **`collect()` 호출 시간만** — 단일/멀티 워커에서 같은 의미가 되도록(멀티에선 push가 부모에서 돎)
   - `record`/`record_all`/`get_hist(collector_name=, experimenter=, node_name=, status=, pipeline_version=)`/`get_status`/`get_info`/`get_errors`/`remove_hist`
   - `get_status`/`get_info`의 키는 `(node_name, outer_idx, inner_idx)`
-  - **게이트가 아니라 로그** — `experiment_hist`와 달리 이걸 보고 뭘 스킵하지 않음. 다만 "`'built'`로 스킵된 fold엔 수집 기록이 없다"가 조회로 드러남(이미 다 돌린 실험에 collector를 새로 붙여 `exp()`를 다시 부르면 아무것도 수집 안 되는 것이 예전엔 무증상이었음)
+  - **게이트가 아니라 로그** — `experiment_hist`와 달리 이걸 보고 뭘 스킵하지 않는다. 다만 "`'built'`로 스킵된 fold엔 수집 기록이 없다"가 조회로 드러나서, 이미 다 돌린 실험에 collector를 새로 붙여 `exp()`를 다시 불렀을 때 아무것도 수집 안 되는 상황이 무증상으로 지나가지 않는다
 
-- **CollectorStore / CollectorEntity** (`collector/_store.py`, 2026-08-04): Collector 정의 저장소
+- **CollectorStore / CollectorEntity** (`collector/_store.py`): Collector 정의 저장소
   - `collectors(name PK, collector TEXT, connector TEXT, path TEXT)` + `{path}/__params/{name}.pkl`
-  - **인스턴스를 저장하지 않는다** — 조립 부품 두 쪽(entity 행 + params pkl)만 남기고 로드 때 `build_collector(entity, params)`로 **다시 조립**. `set_collector`와 완전히 같은 경로를 타므로 등록과 복원이 구조적으로 같아짐. 실행 중 인스턴스에 붙는 값(`_n_outer`/`_n_inner`)은 애초에 영속화 대상이 아님
-  - `params`가 **pkl 파일**인 이유: `ProcessCollector(ext_data=df)`처럼 정의로 표현 불가능한 산 객체가 params에 들어옴 — 노드/Trial처럼 JSON 강제를 할 수 없어서 이 한 조각만 pickle. 나머지 4개는 평문 컬럼이라 **unpickle 없이** 목록/내용 조회 가능(`list_entities()`)
-  - `CollectorEntity`(`__slots__`: `name`/`collector`/`connector`/`path`) — 한 행의 표현. `of(name, collector, connector, path)`가 준 대로의 **문자 원형**으로 정규화(클래스를 넘겼으면 `_obj_to_ref`, `Connector` 인스턴스면 `{__ref__, __params__}`)
+  - **인스턴스를 저장하지 않는다** — 조립 부품 두 쪽(entity 행 + params pkl)만 남기고 로드 때 `build_collector(entity, params)`로 **다시 조립**. `set_collector`와 완전히 같은 경로를 타므로 등록과 복원이 구조적으로 같아진다. 실행 중 인스턴스에 붙는 값(`_n_outer`/`_n_inner`)은 영속화 대상이 아님
+  - `params`가 **pkl 파일**인 이유: `ProcessCollector(ext_data=df)`처럼 정의로 표현 불가능한 산 객체가 들어옴 — 노드/Trial처럼 JSON 강제를 할 수 없어서 이 한 조각만 pickle. 나머지 4개는 평문 컬럼이라 **unpickle 없이** 목록/내용 조회 가능(`list_entities()`)
+  - `CollectorEntity`(`__slots__`: `name`/`collector`/`connector`/`path`) — 한 행의 표현. `of(...)`가 준 대로의 **문자 원형**으로 정규화(클래스면 `_obj_to_ref`, `Connector` 인스턴스면 `{__ref__, __params__}`)
   - `register(entity, params)` / `build(name)` / `load_all()` / `get_entity` / `list_entities` / `get_params` / `names` / `remove`
-  - 폐지된 것: `__collectors.json`(name→cls+path 인덱스), `Collector.save()`/`load()`와 그 `__config.pkl`. 후자는 **정의를 pickle한 것**이었고 `path`/`name`이 json 인덱스와 이중으로 존재했음
-  - **Collector 클래스는 모듈 최상위여야 함** — 함수 안에서 정의한 서브클래스는 ref로 resolve할 수 없음(멀티워커 실행이 collector를 pickle해 워커로 보내므로 원래부터 그랬음). `Collector.__getstate__`/`_SAVE_EXCLUDE`는 그 경로 때문에 계속 살아있음
+  - **Collector 클래스는 모듈 최상위여야 한다** — 함수 안에서 정의한 서브클래스는 ref로 resolve할 수 없고, 멀티워커 실행이 collector를 pickle해 워커로 보내므로 어차피 필요한 조건. `Collector.__getstate__`/`_SAVE_EXCLUDE`가 그 경로를 위해 존재
 
 - **Collector** (`_base.py`): 기본 클래스
   - `__init__(name, connector)`, `path`는 `Collectors.set_collector` 시 설정
   - 라이프사이클: `collect(context)` → `push(node, outer_idx, inner_idx, result)` → (inner 버퍼가 차면) `_flush_outer(node, outer_idx, inner_list)` → (서브클래스에 따라) `_save_node(node)`
-  - **에러 처리(2026-08-04 개정)**: `_executor._safe_collect`가 `ext`/`collect`/`push` 세 구간을 전부 try/except로 감싸 `CollectHist`에 기록하고 실행을 계속함. **`Collector.warnings` 필드는 제거됨** — `__getstate__`에서 제외되지 않아 워커로 pickle돼 나갔다가 거기서 append되고 버려져, 실질적으로 단일 프로세스에서만 동작하던 필드였음. 이력은 항상 부모 프로세스가 씀(`TrialHistTracker`)이라 두 모드가 같은 경로
-  - `push`를 감싼 이유는 기록만이 아님 — 멀티워커에선 부모 메시지 루프가 `c.push()`를 부르므로, 여기서 예외가 나면 워커에 종료 sentinel이 안 가서 **좀비 프로세스로 남았음**
+  - **에러 처리**: `_executor._safe_collect`가 `ext`/`collect`/`push` 세 구간을 전부 try/except로 감싸 `CollectHist`에 기록하고 실행을 계속한다. 이력은 항상 부모 프로세스가 쓰므로(`TrialHistTracker`) 단일/멀티 두 모드가 같은 경로. Collector 인스턴스에 경고를 쌓는 필드는 없다(워커로 pickle돼 나가면 거기서 버려지므로 성립하지 않음)
+  - `push`를 감싸는 건 기록 목적만이 아니다 — 멀티워커에선 부모 메시지 루프가 `c.push()`를 부르므로, 여기서 예외가 나면 워커에 종료 sentinel이 못 가서 좀비 프로세스가 남는다
   - `on_attach(experimenter)`: `exp()`가 호출 — experimenter identity 비교로 중복 재계산 방지; `_on_attach(experimenter)` no-op 훅을 subclass에서 override
   - `_experimenter`: pickle 제외 (`__getstate__`/`__setstate__` — 워커로 보낼 때 None으로 초기화)
-  - `has_node(node)`: 수집 결과 보유 여부 (구 `has()`는 중복이라 제거됨)
-  - `reset_nodes(nodes)`(base: `self._buf`에서 해당 노드 제거 — 서브클래스는 `super().reset_nodes(nodes)` 먼저 호출 후 자신의 disk/cache 정리). **`save()`/`load()` 없음(2026-08-04 제거)** — 정의는 `CollectorStore`가, 데이터는 각 서브클래스가 자기 `path`에 이미 즉시 기록함
+  - `has_node(node)`: 수집 결과 보유 여부
+  - `reset_nodes(nodes)`: base는 `self._buf`에서 해당 노드 제거 — 서브클래스는 `super().reset_nodes(nodes)` 먼저 호출 후 자신의 disk/cache 정리
+  - `save()`/`load()`는 없다 — 정의는 `CollectorStore`가, 데이터는 각 서브클래스가 자기 `path`에 이미 즉시 기록한다
   - `_get_nodes(nodes, available)`: None/list/str(regex) 패턴 매칭
-  - context: `{node_spec, processor, info, input, outer_idx, inner_idx, output_train, output_valid, output_test, output_ext}` — 2026-08-02에 `node_attrs`→`node_spec`(ProcessorSpec), `spec`→`info`로 개명(예전 `spec` 키가 담던 건 `_process()`의 info dict라 새 `ProcessorSpec`과 이름이 겹쳤음)
+  - context: `{node_spec, processor, info, input, outer_idx, inner_idx, output_train, output_valid, output_test, output_ext}` — `node_spec`은 `ProcessorSpec`, `info`는 `_process()`의 info dict
 
 - **MetricCollector** (`_metric.py`): 메트릭 수집
   - `output_var`(DSL 문자열 또는 None), `metric_func`, `include_train`
   - target: `context['input']['y']`, 예측값: `eval_expr(parse(output_var), output_valid, processor=context['processor'])`로 컬럼 선택
   - `_on_attach`: `metric_func`에 `on_attach`가 있으면 자동 전파
-  - 저장: `push()` 오버라이드로 inner fold 결과 발생 시 즉시 `metrics.db` INSERT (per-node pkl 없음)
+  - 저장: `push()` 오버라이드로 inner fold 결과 발생 시 즉시 `metrics.db` INSERT
   - 쿼리: `get_metric(node)`, `get_metrics(nodes)`, `get_metrics_agg(nodes, inner_fold, outer_fold, include_std)`
 
 - **ProbToLabel** (`_metric.py`): predict_proba → label 변환 후 metric 적용
@@ -420,9 +397,8 @@ predictors(name PK, desc, processor, method, adapter, params, edges, tag,
   - multiclass per-class threshold: threshold 초과 클래스 중 최대 확률 선택, 없으면 argmax fallback
 
 - **StackingCollector** (`_stacking.py`): 스태킹 데이터 수집
-  - `__init__(name, connector, output_var, method='mean')` — experimenter 불필요
-  - **`_on_attach` 없음(2026-08-04)** — 예전엔 attach 시점에 `_index`/`_target`/`_target_columns`/`_data_cls`를 만들어 인스턴스에 들고 있었는데, 이것들은 **설정이 아니라 데이터**(길이가 데이터셋만한 배열)라 config pickle에 실릴 물건이 아니었음. `CollectorStore`가 인스턴스를 저장하지 않게 되면서 이 잔재가 드러나 정리됨
-  - **집계도 읽기 시점으로 미룸** — `_flush_outer`는 inner 결과를 집계하지 않고 **리스트 그대로** `_outer_buf`에 쌓고, `_save_node`가 `{node}.pkl`에 `{'folds': [[inner...], ...]}`로 저장. `get_dataset(experimenter, ...)`가 experimenter에서 `data_cls`/`n_splits`/index/target을 얻어 그때 집계·결합
+  - `__init__(name, connector, output_var, method='mean')` — experimenter 불필요, `_on_attach` 없음
+  - **집계는 읽기 시점으로 미룬다** — `_flush_outer`는 inner 결과를 집계하지 않고 **리스트 그대로** `_outer_buf`에 쌓고, `_save_node`가 `{node}.pkl`에 `{'folds': [[inner...], ...]}`로 저장. `get_dataset(experimenter, ...)`가 experimenter에서 `data_cls`/`n_splits`/index/target을 얻어 그때 집계·결합(index/target은 설정이 아니라 데이터셋 크기의 배열이라 인스턴스에 들고 있지 않음)
   - `_aggregate(data_cls, iterator)`: `method`(mean/mode/simple)에 따라 `data_cls`의 static 메서드 호출
   - 쿼리: **`get_dataset(experimenter, nodes=None, include_target=True)`** — experimenter가 필수 인자. 저장된 fold 수가 그 experimenter의 `get_n_splits()`와 다르면 `ValueError`
 
@@ -449,11 +425,11 @@ predictors(name PK, desc, processor, method, adapter, params, edges, tag,
   - `collect`: `context['output_ext']`에서 결과 추출 → `output_var`로 컬럼 필터
   - inner fold 결과는 `method`(mean/mode/simple)로 outer fold별 집계, 파일 저장: `{path}/{node}/{idx}.pkl`
   - 쿼리: `get_output(nodes=None, agg='mean')` — nodes 필터(None/list/regex) + outer fold 집계 후 column-wise concat 반환
-  - save/load 시 `ext_data`는 미저장 (런타임 전달)
+  - `ext_data`는 미저장 (런타임 전달)
 
 ## edges 구조 — DSL 문자열 (`_edge_dsl.py`)
 - dict 형태: `{key: dsl_string}` — key는 변수 집합 이름(예: 'X', 'y', 'sample_weight'), 값은 **항상 순수 문자열**
-- `edges[key]`는 정의/상속/직렬화/비교 어디서나 문자열 그대로 유지되며, **Processor 실행 시점에 실제 데이터를 대상으로만** lazily 컬럼 리스트로 확장됨(`eval_expr`, `_flow.py.get_data`에서 호출). `set_grp`/`set_node`는 DSL *구조*(문법 + namespace 참조)만 검증(`validate_edges`)하고 컬럼/schema는 절대 만들어보지 않음
+- `edges[key]`는 정의/상속/직렬화/비교 어디서나 문자열 그대로 유지되며, **Processor 실행 시점에 실제 데이터를 대상으로만** lazily 컬럼 리스트로 확장됨(`eval_expr`, `_flow.py.get_data`). `set_grp`/`set_node`는 DSL *구조*(문법 + namespace 참조)만 검증(`validate_edges`)하고 컬럼/schema는 절대 만들어보지 않음
 - 문법:
   ```
   expr        := term (op term)*            -- op는 '+'/'-'/'&', 공백으로 양쪽이 분리된 독립 토큰이어야 함
@@ -470,10 +446,10 @@ predictors(name PK, desc, processor, method, adapter, params, edges, tag,
 - 그룹/노드 상속: 자기 값이 `+`/`-`로 시작하면 부모의 이미 resolve된 문자열에 이어붙임(`f"{parent} {own}"`); 그 외 일반 문자열은 완전히 override(상속 안 함). 자기 값이 없으면(`{}`) 부모 값을 그대로 상속
 - 같은 key의 여러 segment(`+`로 연결)는 column 방향으로 concat됨
 
-## Edge DSL 관련 함수 (`_edge_dsl.py`)
+### Edge DSL 관련 함수 (`_edge_dsl.py`)
 - `parse(dsl_string)` → AST (`Star`/`SetLiteral`/`Pattern`/`Namespace`/`BinOp`/`slice`)
-- `eval_expr(node, data, processor=None)`: AST를 실제 `data`(`DataWrapper`, `get_columns()`/`select_by_dtype()` 노출)에 대해 평가 → 컬럼명 리스트. `data`에서 `columns = data.get_columns()`를 내부적으로 유도하므로 호출부는 컬럼 리스트를 따로 넘기지 않음
-- `validate_edges(dsl_string, pipeline)`: 구조만 검증(문법 + namespace가 존재하는 노드를 가리키는지) — 컬럼/schema는 절대 건드리지 않음. Pipeline이 노드 전용이 되면서 role 검사는 사라짐
+- `eval_expr(node, data, processor=None)`: AST를 실제 `data`(`DataWrapper`, `get_columns()`/`select_by_dtype()` 노출)에 대해 평가 → 컬럼명 리스트. `data`에서 `columns`를 내부적으로 유도하므로 호출부는 컬럼 리스트를 따로 넘기지 않음
+- `validate_edges(dsl_string, pipeline)`: 구조만 검증(문법 + namespace가 존재하는 노드를 가리키는지) — 컬럼/schema는 절대 건드리지 않음
 - `iter_segments(dsl_string)` → `(node_name, expr)` 이터레이터 (top-level `+` 체인 분해)
 - `referenced_nodes(dsl_string)` → 참조하는 노드명 집합 (`None`=DataSource 포함)
 - `unparse(node)` → AST를 다시 DSL 문자열로 렌더링
@@ -507,7 +483,7 @@ p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
 [[feedback_pipeline_direct_reference]]: `p`가 스코프에 있으면 `p.set_grp`/`p.set_node`를 직접 호출 (`e.pipeline.set_grp`처럼 우회하지 않음)
 
 ## Staleness — 두 Pipeline 버전을 비교한다
-serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 지점은 `set_pipeline()` **한 곳**이고, `build()`/`train()`은 "디스크에 있는 건 유효하다"를 전제할 수 있다.
+정의 변경 플래그(serial 류)가 아니라 **버전 간 구조 비교**로 판정한다. 판정 지점은 `set_pipeline()` **한 곳**이고, `build()`/`train()`은 "디스크에 있는 건 유효하다"를 전제할 수 있다. 이 방식의 부산물로 **자기가 읽지 않는 노드를 고쳐도 Trial이 유지된다**(전역 플래그로는 이 구분이 안 됨).
 
 **`Pipeline.diff_from(old)`** — DataSource에서 위상 순서로 내려가며:
 1. 이름이 old에 없으면 → stale
@@ -516,37 +492,40 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
 4. old에는 있는데 지금 없는 이름 → stale (아티팩트 청소용)
 5. DataSource schema/targets가 바뀌면 → 전부 stale
 
-- **Trial 처리(2026-08-01 개정)**: Trial은 Pipeline 밖이라 diff가 이름을 모르고, stale 노드를 읽은 Trial도 이제 안 건드림 — `Experimenter.set_pipeline`은 stale 노드만 `reset_nodes`로 지우고 끝. Trial 아티팩트가 어떤 pipeline 버전에서 만들어졌는지는 `TrialStore.experiment_hist`가 기록해두므로 그대로 historical record로 남고, 다시 돌리려면 명시적으로 재실행해야 함(자동 캐스케이드 없음)
-- **Predictor는 반대 — 캐스케이드함**: Trainer엔 보존할 "과거 실행" 개념이 없으므로, 바뀐 노드를 읽는 Predictor는 그냥 stale임. `Trainer.reset_nodes`가 `predictor.node_names() & 리셋된_노드` 교집합으로 같이 지움. Trial/Predictor를 별도 클래스로 둔 판단이 실제로 갈라지는 지점 중 하나
-- **Trial 자신의 재정의 감지도 안 함(2026-08-01 제거)**: 예전엔 `_make_jobs`가 `info['definition'] != _definition_of(attrs)` 값 비교로 아티팩트가 지금 정의와 다르면 자동 reset 후 재실행했는데, 이 비교 자체를 없앰 — 지금 `Experimenter._make_jobs`는 오직 `TrialStore.experiment_hist`의 fold별 status만 봄: `'built'`면 스킵, `'error'`거나 기록이 없으면 job 생성. 재정의된 trial이 이미 `'built'`로 기록돼 있으면 조용히 스킵되므로, 다시 돌리려면 `reset_nodes([trial_name])`을 직접 호출해야 함
-- **`serial` 자체가 없음(2026-08-01 전체 제거)**: 예전엔 정의 변경마다 새 UUID를 부여해 "뭔가 바뀌었다"는 신호로 썼지만, "결과가 달라지나"는 말 못 했다 — 지금은 `diff_from`이 정의를 직접 비교하므로 그 신호 자체가 불필요해짐. 이게 가능해진 건: **자기가 읽지 않는 노드를 고쳐도 Trial이 유지된다**(예전 serial은 전역이라 이 구분이 안 됐음)는 성질이 부산물로 따라옴
+- **Trial은 캐스케이드하지 않는다**: Trial은 Pipeline 밖이라 diff가 이름을 모르고, stale 노드를 읽은 Trial도 건드리지 않는다 — `Experimenter.set_pipeline`은 stale 노드만 `reset_nodes`로 지우고 끝. Trial 아티팩트가 어떤 pipeline 버전에서 만들어졌는지는 `TrialStore.experiment_hist`가 기록하므로 historical record로 남고, 다시 돌리려면 명시적으로 재실행해야 함
+- **Trial 자신의 재정의도 감지하지 않는다**: `Experimenter._make_jobs`는 오직 `experiment_hist`의 fold별 status만 본다 — 재정의된 trial이 이미 `'built'`면 조용히 스킵되므로, 다시 돌리려면 `reset_nodes([trial_name])`을 직접 호출
+- **Predictor는 반대로 캐스케이드한다**: Trainer엔 보존할 "과거 실행" 개념이 없으므로, 바뀐 노드를 읽는 Predictor는 그냥 stale이다. `Trainer.reset_nodes`가 `predictor.node_names() & 리셋된_노드` 교집합으로 같이 지운다. Trial/Predictor를 별도 클래스로 둔 판단이 실제로 갈라지는 지점
 
 ## Lazy resolution: processor / adapter / params (edges DSL과 동일한 지연 원칙)
-- `set_grp`/`set_node`는 `processor`/`adapter`/`params`를 **스펙 형태만 검증하고 절대 resolve/instantiate하지 않음** — 실제 값으로의 변환은 전부 사용 시점(`_node_processor.py`)으로 미룸
-- **산 객체는 정의 시점에 `TypeError`로 거부됨** (`_validate_processor`/`_validate_adapter`/`_validate_params`, `_pipeline.py`). 에러 메시지가 써야 할 ref 형태를 그대로 안내함
-- **processor**: `"module.ClassName"` **문자열만** (클래스 객체 거부). 실제 클래스로 resolve되는 유일한 지점은 `_node_processor.py`(`TransformProcessor`/`PredictProcessor.__init__`의 `resolve_processor()` 호출). `Connector`, `_describer.py`, `Experimenter._make_node_jobs`/`Trainer._make_node_jobs`(GPU 판정)는 전부 이 문자열을 그대로 다룸
-  - **클래스를 허용하면 안 되는 이유**: `Connector.match`는 `spec.processor`를 **문자열 그대로 비교**하므로, 클래스로 정의된 노드는 문자열 ref로 설정한 Connector와 **영영 매칭되지 않음** — 에러 없이 collector가 조용히 아무것도 수집하지 않음. `serialize_value`가 클래스를 `{"__type__":"class"}`로 저장하고 리로드 시 클래스로 되돌리므로 재시작해도 해소되지 않음
+- `set_grp`/`set_node`는 `processor`/`adapter`/`params`를 **스펙 형태만 검증하고 절대 resolve/instantiate하지 않는다** — 실제 값으로의 변환은 전부 사용 시점(`_node_processor.py`)으로 미룸
+- **산 객체는 정의 시점에 `TypeError`로 거부된다** (`_validate_processor`/`_validate_adapter`/`_validate_params`, `_pipeline.py`). 에러 메시지가 써야 할 ref 형태를 그대로 안내함
+- **processor**: `"module.ClassName"` **문자열만** (클래스 객체 거부). 실제 클래스로 resolve되는 유일한 지점은 `_node_processor.py`의 `resolve_processor()` 호출. `Connector`, `_describer.py`, `Experimenter._make_node_jobs`/`Trainer._make_node_jobs`(GPU 판정)는 전부 이 문자열을 그대로 다룸
+  - **클래스를 허용하면 안 되는 이유**: `Connector.match`는 `spec.processor`를 **문자열 그대로 비교**하므로, 클래스로 정의된 노드는 문자열 ref로 설정한 Connector와 **영영 매칭되지 않는다** — 에러 없이 collector가 조용히 아무것도 수집하지 않음. `serialize_value`가 클래스를 `{"__type__":"class"}`로 저장하고 리로드 시 클래스로 되돌리므로 재시작해도 해소되지 않음
 - **adapter**: `None` / `"module.ClassName"` 문자열 / `{"__ref__":...,"__params__":{...}}` dict — 인스턴스 거부. `resolve_node_adapter(processor, adapter_spec)`(`adapter/__init__.py`)가 사용 시점에 resolve
 - **params**: 순수 데이터(스칼라/numpy 스칼라/list/tuple/dict)와 ref spec만 허용 — `{'__ref__':...}`(예: ColSelector, `mllab_sampler`)/`{'__callable__':...}`(예: metric 함수). 중첩 값까지 재귀 검증하며 에러가 경로(`params['a']['b'][0]`)를 표시함. `_node_processor.py`의 `_resolve_params()`가 Processor 생성 시점에 `resolve_ref_values()`로 해제
-- **왜**: (1) `mllabs.nn.NNClassifier`처럼 무거운 import(TensorFlow)를 유발하는 processor/adapter가 파이프라인 "정의" 시점에 실수로 로드되는 걸 방지 — 실제 `build`/`exp` 실행 시점까지 미뤄짐. (2) 파이프라인 전체가 직렬화 가능해짐(declarative config 방향). (3) diff 비교가 raw spec 비교라 `_params_equal`이 `==` 한 줄로 축소됨 — 인스턴스 `__eq__` 신뢰성 이슈 자체가 사라짐
-- **테스트**: `tests/mock.py`에 여러 테스트 파일에 흩어져 있던 더미 processor 클래스 중 string-ref로 참조돼야 하는 것들을 모아둠 — `tests/`엔 `__init__.py`가 없어 pytest가 bare module(`import mock`)로 수집하므로 `processor='mock.DummyStage'`식으로 참조 가능
+- **왜**: (1) `mllabs.nn.NNClassifier`처럼 무거운 import(TensorFlow)를 유발하는 processor/adapter가 파이프라인 "정의" 시점에 로드되는 걸 방지 — 실제 `build`/`exp` 실행 시점까지 미뤄짐. (2) 파이프라인 전체가 직렬화 가능해짐(declarative config 방향). (3) diff 비교가 raw spec 비교라 `_params_equal`이 `==` 한 줄로 끝남 — 인스턴스 `__eq__` 신뢰성 이슈가 없음
+- **테스트**: string-ref로 참조돼야 하는 더미 processor 클래스는 `tests/mock.py`에 모아둔다 — `tests/`엔 `__init__.py`가 없어 pytest가 bare module(`import mock`)로 수집하므로 `processor='mock.DummyStage'`식으로 참조 가능
 
 ## Processor (`_node_processor.py`)
 - **TransformProcessor**: `fit`, `fit_process`, `process`
 - **PredictProcessor**: `fit`, `fit_process`, `process`
-- **processor(=transformer/estimator)/adapter/params가 실제 값으로 resolve되는 유일한 지점** — Pipeline은 이 셋을 절대 resolve 안 하고 spec 그대로 넘김(아래 "Lazy resolution" 섹션 참조)
-  - `__init__`: `self.transformer`/`self.estimator = resolve_processor(transformer/estimator)`(`"module.ClassName"` 문자열 → 클래스, `_serialize.py`) — 이 라인이 processor가 클래스가 되는 유일한 곳
-  - `self.adapter = resolve_node_adapter(transformer/estimator, adapter)` — **resolve 전의 raw(문자열) processor**를 넘김(resolve된 클래스가 아님 — `get_adapter`가 문자열/클래스 둘 다 처리하므로 순서 무관하지만, "processor는 인스턴스 생성 시점에만 클래스로" 원칙에 맞춰 문자열째로 전달)
-  - `self.params = _resolve_params(params)` — `params` 내 `{'__ref__':...}`/`{'__callable__':...}` 항목을 `resolve_ref_values()`로 해제(ColSelector 인스턴스화 등). `mllab_sampler` 값도 여기서 같이 resolve됨
+- **processor(=transformer/estimator)/adapter/params가 실제 값으로 resolve되는 유일한 지점** — Pipeline은 이 셋을 절대 resolve 안 하고 spec 그대로 넘김("Lazy resolution" 섹션)
+  - `__init__`: `self.transformer`/`self.estimator = resolve_processor(...)` — processor가 클래스가 되는 유일한 곳
+  - `self.adapter = resolve_node_adapter(transformer/estimator, adapter)` — **resolve 전의 raw(문자열) processor**를 넘김("processor는 인스턴스 생성 시점에만 클래스로" 원칙)
+  - `self.params = _resolve_params(params)` — `{'__ref__':...}`/`{'__callable__':...}` 항목을 `resolve_ref_values()`로 해제(ColSelector 인스턴스화 등). `mllab_sampler` 값도 여기서 같이 resolve
 - `fit`/`fit_process`에서 y 데이터를 `squeeze()` 후 전달 (sklearn DataConversionWarning 억제)
 - `get_feature_names_out` 반환값은 `list()` 로 변환하여 사용 (list/ndarray 호환)
 - `process()`: `adapter.get_process_data(data)` 로 입력 타입 변환 — polars 등 라이브러리별 호환성 처리
-- `data_dict` (Experimenter): `{key: ((train, train_v), valid), ...}` 형태
-- `data_dict` (Trainer): `{key: (train, valid), ...}` 형태 (inner fold 없음)
+- `data_dict` (Experimenter): `{key: ((train, train_v), valid), ...}` / (Trainer): `{key: (train, valid), ...}` (inner fold 없음)
 - **X-less 지원**: `edges`에 `'X'`가 없고 `'y'`만 있는 경우(e.g. `LabelEncoder`) `'y'`를 primary input으로 사용
   - `fit`/`fit_process`: `'X'` 없으면 `'y'` 데이터를 squeeze하여 전달, `output_vars`를 `y_columns`로 설정
   - `process`: `X_`가 비어 있으면 입력 데이터를 squeeze 후 transform
 - `y_columns`가 str인 경우(polars Series 등) `[y_columns]` 로 wrap하여 처리
+
+### TransformProcessor 출력 컬럼 규칙
+- transformer는 transform 결과로 **자신이 만든 컬럼만 반환**한다(입력 컬럼 포함 X) — downstream에서 concat이 책임
+- `get_feature_names_out`이 있으면 `{node}__{col}` 접두사 부여
+- 없어도 `output_vars`가 None이고 result에 `.columns`가 있으면 같은 접두사를 fallback으로 적용(`fit_process`/`process` 공통, `process`에선 `self.output_vars` 대신 local 변수로 처리)
 
 ## Adapter 인터페이스
 - `get_params(params, logger)`: 모델 생성 파라미터
@@ -555,16 +534,15 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
   - `LightGBMAdapter`: polars→pandas 변환 (LightGBM polars 미지원); `early_stopping` dict 수락 → 내부에서 `lgb_early_stopping` 콜백으로 변환 (params에 콜백 인스턴스를 넣을 수 없으므로 이 dict 형태가 유일한 지정 방법)
   - `CatBoostAdapter`: `_catboost_supports_polars()` (>=1.3.0) 기반 분기 — 구버전이면 polars→pandas (`get_fit_params`도 동일 적용)
 - `result_objs`: `{name: (callable, mergeable_bool)}`
-- **`stack_evals_result(evals_result)`(`_base.py`, 2026-08-04)**: `{split: {metric: [iteration별 값]}}` → 하나의 stacked Series. XGBoost/LightGBM/CatBoost/NN 네 어댑터의 `_get_evals_result`가 전부 이걸 씀
-  - **한 split 안에서 metric 곡선 길이가 달라도 됨** — 예전엔 넷 다 `pd.DataFrame({metric: list})`를 만들어서 `ValueError: All arrays must be of the same length`로 터졌음. 각 곡선을 `pd.Series`로 감싸면 iteration 인덱스로 정렬되고 짧은 쪽은 NaN으로 패딩됨
-  - **`.stack()` 뒤의 `.dropna()`가 명시적인 이유(2026-08-04)**: 패딩된 자리를 남길지 떨굴지가 pandas 버전에 따라 다름 — 2.x의 `.stack()`은 NaN을 떨구고 `future_stack` 동작은 유지함. 기본값에 기대면 **같은 코드가 환경에 따라 다른 모양을 냄**(실제로 pandas 2.2 환경에선 통과하고 신 pandas 환경에선 테스트가 깨졌음). 떨구는 쪽으로 고정한 건 그게 기존 동작이기 때문 — CatBoost는 AUC를 validation에만 기록해서 `(iter, 'AUC', 'learn')`이 전 iteration NaN인데, 이게 남으면 `ModelAttrCollector.get_attrs_agg`의 groupby/mean에 섞여 들어감. 결과적으로 길이가 같을 때의 출력과도 동일
-  - 실제로 걸린 사례: CatBoost `eval_metric='AUC'` + early stopping. 정지 iteration에 따라 loss와 AUC의 기록 길이가 어긋나서, **같은 설정의 trial 중 일부만** 수집에 실패했음(s6e6 phase2에서 cb2/cb4만 실패, cb1/cb3/cb5는 성공 — 단일 fold·고정 seed라 피처 집합이 정지 지점을 바꾼 결과). 나머지 셋은 같은 코드를 복사한 잠복 상태였음
-  - 빈 `evals_result`는 빈 Series (예전 `_nn.py`만 `pd.DataFrame()`을 돌려줘 혼자 달랐음)
+- **`stack_evals_result(evals_result)`(`_base.py`)**: `{split: {metric: [iteration별 값]}}` → 하나의 stacked Series. XGBoost/LightGBM/CatBoost/NN 네 어댑터의 `_get_evals_result`가 전부 이걸 쓴다
+  - **한 split 안에서 metric 곡선 길이가 달라도 된다** — 각 곡선을 `pd.Series`로 감싸므로 iteration 인덱스로 정렬되고 짧은 쪽은 NaN으로 패딩됨. (`pd.DataFrame({metric: list})`로 만들면 `ValueError: All arrays must be of the same length`) 실제 사례: CatBoost `eval_metric='AUC'` + early stopping에서 loss와 AUC의 기록 길이가 어긋남
+  - **`.stack()` 뒤의 `.dropna()`는 명시적이어야 한다** — 패딩된 자리를 남길지 떨굴지가 pandas 버전에 따라 달라서, 기본값에 기대면 같은 코드가 환경에 따라 다른 모양을 낸다. 떨구는 쪽으로 고정: CatBoost는 AUC를 validation에만 기록해서 `(iter, 'AUC', 'learn')`이 전 iteration NaN인데, 이게 남으면 `ModelAttrCollector.get_attrs_agg`의 groupby/mean에 섞여 들어간다
+  - 빈 `evals_result`는 빈 Series
 - `__eq__`: `type(self) is type(other) and self.__dict__ == other.__dict__`
 - `__hash__`: `id(self)` — set/dict 키로 사용 가능
-- **adapter 지정 방식** (`set_grp`/`set_node`의 `adapter=`): `"module.ClassName"` 문자열 / `{"__ref__": ..., "__params__": {...}}` / `None`만 허용(**인스턴스는 `TypeError`**) — **저장 시점엔 resolve 안 함**, `_node_processor.py`가 인스턴스 생성 시 `resolve_node_adapter(processor, adapter)`로 resolve(`adapter.resolve_node_adapter`, `adapter/__init__.py`)
-  - `resolve_node_adapter(processor, adapter_spec)`: `adapter_spec` 있으면 `resolve_instance(adapter_spec)`, 없으면 `get_adapter(processor)`(processor 클래스명 기반 디폴트 — `get_adapter`는 문자열이면 `rpartition('.')[-1]`로 bare/`"module.ClassName"` 둘 다 처리, 클래스/인스턴스면 `.__name__`/`.__class__.__name__`)
-  - GPU 판정(`need_gpu`)도 이 함수로 resolve — Trial은 `_make_jobs`가, 노드는 `_make_node_jobs`가 job 생성 시점에 노드/trial 이름당 1회 resolve해 `Job.need_gpu`에 박아 넣음(2026-08-01부터 executor 쪽엔 GPU 판정 캐시가 없음 — job 리스트 자체가 이미 분류돼 있음)
+- **adapter 지정 방식** (`set_grp`/`set_node`의 `adapter=`): `"module.ClassName"` 문자열 / `{"__ref__": ..., "__params__": {...}}` / `None`만 허용(**인스턴스는 `TypeError`**) — **저장 시점엔 resolve 안 함**, `_node_processor.py`가 인스턴스 생성 시 `resolve_node_adapter(processor, adapter)`로 resolve
+  - `resolve_node_adapter(processor, adapter_spec)`: `adapter_spec` 있으면 `resolve_instance(adapter_spec)`, 없으면 `get_adapter(processor)`(processor 클래스명 기반 디폴트 — 문자열이면 `rpartition('.')[-1]`로 bare/`"module.ClassName"` 둘 다 처리, 클래스/인스턴스면 `.__name__`/`.__class__.__name__`)
+  - GPU 판정(`need_gpu`)도 이 함수로 resolve — Trial은 `_make_jobs`가, 노드는 `_make_node_jobs`가 job 생성 시점에 이름당 1회 resolve해 `Job.need_gpu`에 박아 넣는다(executor 쪽엔 GPU 판정 캐시가 없다 — job 리스트가 이미 분류돼 있음)
 - **레지스트리** (`adapter/__init__.py`): `MODEL_ADAPTERS`(모델명→인스턴스), `get_adapter(model_or_name)`. `NNAdapter`는 TF를 top-level import하므로 **지연 로드** — `_LAZY_ADAPTERS`(`NNClassifier`/`NNRegressor`)로 first-use 시 인스턴스화·캐시, 모듈 `__getattr__`로 `NNAdapter` 심볼 노출 → `import mllabs`가 TF를 끌어오지 않음
 
 ## Sampler (`sampler/` 패키지)
@@ -572,59 +550,30 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
 - **ImbLearnSampler** (`_imblearn.py`): imblearn `fit_resample` 래퍼
   - `__init__(sampler)`: imblearn sampler 인스턴스 주입
   - `sample(fit_params)`: `fit_params['X']`/`['y']`로 `fit_resample` 호출 후 X, y 교체하여 반환
-- 사용법: node `params`에 `mllab_sampler` 키로 Sampler 인스턴스 지정 → `_node_processor`가 fit/fit_process 전에 `sample()` 호출; estimator에 전달 전 키 제거
+- 사용법: node `params`에 `mllab_sampler` 키로 Sampler ref 지정 → `_node_processor`가 fit/fit_process 전에 `sample()` 호출; estimator에 전달 전 키 제거
 
 ## 보조 모듈
 - **_data_wrapper.py**: DataWrapper (wrap/unwrap/squeeze/mean/mode/simple) — pandas/polars/cudf/numpy 통합
-  - **`wrap()`은 멱등(2026-08-05)** — 이미 `DataWrapper`면 그대로 반환. `unwrap()`이 native에 대해 원래 멱등이었던 것과 대칭이고, 덕분에 `Experimenter`/`Trainer`가 native든 wrapped든 받을 수 있음(아래 두 섹션 참조)
+  - **`wrap()`은 멱등** — 이미 `DataWrapper`면 그대로 반환. `unwrap()`이 native에 대해 멱등인 것과 대칭이고, 덕분에 `Experimenter`/`Trainer`가 native든 wrapped든 받을 수 있음
   - `PolarsWrapper.get_columns()`: `pl.DataFrame`이면 `.columns`, `pl.Series`이면 `.name` 반환
-  - `select_by_dtype(kind)`: `'category'|'numeric'|'int'|'float'|'str'|'bool'`에 해당하는 컬럼명(numpy는 정수 offset) 리스트 반환 — `col.py`의 `@numeric` 등 dtype selector가 사용하는 primitive. (예전 `get_column_list(ColSelector(col_type=, pattern=))`는 제거됨 — pattern 부분은 이제 DSL의 `Pattern` 노드가 담당)
-- **_edge_dsl.py**: edges DSL 파서/평가기 — 위 "Edge DSL" 섹션 참조
+  - `select_by_dtype(kind)`: `'category'|'numeric'|'int'|'float'|'str'|'bool'`에 해당하는 컬럼명(numpy는 정수 offset) 리스트 반환 — `col.py`의 `@numeric` 등 dtype selector가 쓰는 primitive
+  - 벡터화 원칙: pandas는 `isna()`+`where()`+문자열 벡터 연산(Python 루프 금지), polars는 `map_elements` 금지하고 `when/then/otherwise`+native expression, numpy object 배열은 `np.vectorize`
+- **_edge_dsl.py**: edges DSL 파서/평가기 — 위 "Edge DSL" 섹션
 - **_serialize.py**: ref 기반 직렬화/해석
   - `serialize_value`/`deserialize_value` (JSON 왕복), `_obj_to_ref`/`_ref_to_obj`
   - `resolve_processor(x)`: `"module.ClassName"` str → 클래스, else passthrough
   - `resolve_instance(spec)`: str→인스턴스(기본값) / `{__ref__, __params__}`→`cls(**params)` / else passthrough. `resolve_adapter`가 위임
   - `resolve_ref_values(value)`: params 값 재귀 해석 — `{"__callable__": "mod.fn"}`→**호출 안 하고** 그 객체 참조(metric_func 등), `{"__ref__": ..., "__params__": {...}}`→인스턴스화, 문자열/스칼라는 그대로. `set_grp`/`set_node`/`set_collector`의 params에 적용
-- **_project_store.py**: `ProjectStore` — `{project}/project.db`, `experimenters(name PK)`/`trainers(name PK)` **이름 목록만**. `register_experimenter/trainer`, `list_experimenters/trainers`, `remove_*`. 등록은 `Project` 팩토리가 함 — 직접 생성한 run은 어느 색인에도 안 들어감
-- **_experimenter_store.py**: `ExperimenterStore(path)` — **run 하나 전용** `{path}/__exp.db`. meta 행 + splitter BLOB + `save_pipeline(pipeline)`/`load_pipeline()`(`{path}/pipeline.pkl`, `_run_common`에 위임). `fetch`/`load_splitters`/`remove`는 행이 하나뿐이라 `name` 생략 가능
-- **_trainer_store.py**: `TrainerStore(path)` — Trainer판 동형. `{path}/__trainer.db`, `trainer(name PK, pipeline_name, pipeline_version, splits BLOB)`. Experimenter판과 다른 점 둘: splits 블롭에 **`split_indices`가 같이** 들어감(splitter가 없을 수도 있고, 학습된 fold와 정확히 같아야 해서), `data_key`/`title`이 **없음**(다른 run과 비교할 일이 없어 라벨도 mismatch 가드도 필요 없음)
-  - **`save(meta)`가 `INSERT OR IGNORE` + `UPDATE`인 이유**(양쪽 store 공통): meta 컬럼만 나열한 `INSERT OR REPLACE`는 같은 행의 BLOB(splitters/splits)을 NULL로 날려버림
+- **_project_store.py**: `ProjectStore` — `{project}/project.db`, `experimenters(name PK)`/`trainers(name PK)` **이름 목록만**. 등록은 `Project` 팩토리가 함 — 직접 생성한 run은 어느 색인에도 안 들어감
+- **_experimenter_store.py**: `ExperimenterStore(path)` — **run 하나 전용** `{path}/__exp.db`. meta 행 + splitter BLOB + `save_pipeline(pipeline)`/`load_pipeline()`(`_run_common`에 위임). `fetch`/`load_splitters`/`remove`는 행이 하나뿐이라 `name` 생략 가능
+- **_trainer_store.py**: `TrainerStore(path)` — Trainer판 동형. `{path}/__trainer.db`, `trainer(name PK, pipeline_name, pipeline_version, splits BLOB)`. Experimenter판과 다른 점 둘: splits 블롭에 **`split_indices`가 같이** 들어감(splitter가 없을 수도 있고, 학습된 fold와 정확히 같아야 해서), `data_key`/`title`이 **없음**(다른 run과 비교할 일이 없어 라벨도 mismatch 가드도 불필요)
+  - **`save(meta)`가 `INSERT OR IGNORE` + `UPDATE`인 이유**(양쪽 store 공통): meta 컬럼만 나열한 `INSERT OR REPLACE`는 같은 행의 BLOB(splitters/splits)을 NULL로 날려버린다
 - **_run_common.py**: Experimenter/Trainer 공용 — `require_built_pipeline`, `resolve_common_status`, `save_pipeline(path, pipeline)`/`load_pipeline(path)`(`{path}/pipeline.pkl`, 없으면 `None`)
-- **_project.py / _trial.py / _trial_store.py / _predictor.py / _predictor_store.py**: 위 해당 섹션 참조
-- **_executor.py**: 실제 실행
-  - **`Job(name, spec, outer_idx, inner_idx, flow, need_gpu=False)`(2026-08-01, `StageJob`/`TrialJob` 통합)** — 노드와 Trial 공용 job 단위. `spec`은 `Pipeline.get_node_spec()`/`Trial.get_spec()`/`Predictor.get_spec()`이 준 `ProcessorSpec`을 job 생성 시점에 1회 계산해 박아 넣은 것(따로 `node`/`trial` 객체를 들고 있지 않음). `flow` 하나로 `get_train`/`get_valid`/`get_test(edges)`를 다 만들 수 있어서(`TrainDataFlow`) `outer_folds`/`train_folds` 참조가 필요 없어짐. `node_path()`는 `flow.node_path(name)`에 위임
-  - **`_execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None)`(2026-08-01, `_build_flow_single`/`_experiment_single` 통합)** — 단일 프로세스로 `Job` 리스트를 그대로 실행. 노드/Trial 차이는 `collectors`뿐이었음(노드는 Collector가 없음) — **`collectors=None`이 노드/build 경로**: 입력 준비가 `ext_data` 없이 `_job_data(job)`로 끝나고 매치/실행도 스킵. `collectors=[]`(Trainer의 Predictor 경로 — Trainer도 Collector가 없음)는 실제 리스트와 같은 코드 경로를 타되 매치될 게 없을 뿐이라 결과는 동일 — `None`은 그 스킵만큼만 다름
-    - 의존성 순서 `while True: ready = [...]` 루프(노드끼리 서로 참조 가능해서 필요)는 Trial에도 그대로 적용되지만, 그 안의 `get_missing_nodes` 게이트는 **노드 전용**(`collectors is None`일 때만 검사) — Trial의 edges는 항상 이미 빌드된 노드만 참조하므로 보통은 검사해도 즉시 빈 리스트가 되지만, Trial까지 이 게이트에 걸리게 하면 참조하는 노드가 끝내 안 빌드된 경우 그 Trial job이 (에러 하나 안 남기고) 조용히 영원히 대기만 하다 사라짐 — 원래 `_job_inputs`가 `TrainDataFlow._resolve_typ`에서 `KeyError`를 내고 그게 prep error로 잡혀 기록되던 것과 다른 동작이 되어버림(2026-08-01, `_execute_single` 첫 병합 때 들어간 버그, 이번에 `_execute_multi`와 함께 수정)
-    - `job.flow.set_objs`는 노드/Trial 구분 없이 완료된 job마다 호출됨 — 안 하면 그 job이 `ready`에서 절대 빠지지 않아(다른 무엇도 "완료"로 표시 안 하므로) 루프가 영원히 재실행함
-    - `store`(그 run의 `NodeStore`)를 명시적으로 받아 `store.write_objs(node_name, outer_idx, inner_idx, obj, result)`를 호출 — `NodeStore`를 import해서 정적으로 부르던 방식(2026-08-01 이전)을 대체
-    - **반환값은 job 종류와 무관하게 항상 `{(outer_idx, inner_idx, name): error_info}`(2026-08-03 개정)** — 실패한 job이 ready-루프에서 영원히 재시도되는 걸 막으려면 키가 fold까지 포함한 job 신원이어야 하고, 반환도 그 신원 그대로. 예전엔 Trial 경로만 `(outer_idx, name)`로 축약했는데 (a) 같은 outer fold의 서로 다른 inner fold에서 같은 trial이 실패하면 에러가 하나 사라졌고 (b) 호출부가 `len(jobs) - len(errors)`를 성공 수로 찍는 바람에 모든 fold에서 실패한 노드 하나가 "하나 빼고 전부 성공"으로 보고됐음. 호출부(`Experimenter.build`/`exp`, `Trainer.train`)는 이름만 필요할 때 `{n for _, _, n in errors}`로 뽑음
-  - **`_execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, tracker=None, ...)`(2026-08-01, `_build_flow_multi`/`_experiment_multi` 통합)** — 워커 풀로 `Job` 리스트를 실행. `_execute_single`과 같은 `collectors` 분기(`None`=노드/build, 리스트=Trial/experiment — Trainer의 Predictor 경로는 Collector가 없어도 `[]`를 명시로 넘김). 반환 모양도 `_execute_single`과 동일
-    - **완료 결과는 `job.flow`가 아니라 인자로 받은 `store`에서 되읽음(2026-08-02 수정)** — 워커는 이 호출이 지정한 store에 쓰는데, 부모는 `job.flow.load_objs(...)`로 *flow 자신의* store에서 읽고 있었음. 둘이 항상 같은 인스턴스였을 땐 안 드러났지만, Trainer가 Predictor를 노드 flow로 먹이면서 별도 store에 저장하게 되자 `n_jobs>1`에서 `FileNotFoundError`로 터짐. 지금은 `store.get_objs(...)` → `flow.set_objs(...)`
-    - **ready-job 계산은 매 dispatch 사이클마다 처음부터 다시 스캔**(`_collect_ready()`, 옛 `_build_flow_multi` 방식) — 옛 `_experiment_multi`처럼 `gpu_jobs`/`cpu_jobs` 두 리스트를 한 번만 만들어두고 dispatch/에러 때마다 지워나가는 방식(`_drop` 헬퍼, 이번에 제거됨)은 노드에 안 맞음 — 노드는 형제 노드가 끝나야 readiness가 바뀌기 때문. 재스캔 방식은 Trial에도 그대로 맞음(Trial끼리는 서로 의존 안 하니 한 번 ready면 계속 ready). `get_missing_nodes` 게이트는 여기서도 노드 전용(위 `_execute_single`과 같은 이유)
-    - **워커 배정 fallback 정책은 옛 `_experiment_multi` 쪽을 채택**(노드에도 동일 적용) — "내 타입" job이 아직 남아있으면 그 타입 몫 worker를 다른 타입에 안 뺏기는 정책(`elif free_cpu and not cpu_ready and gpu_fallback_cpu`)이 옛 `_build_flow_multi`의 무조건 fallback보다 나음. 단, ready 목록을 매 사이클 재계산하는 탓에 같은 `_try_dispatch()` 호출 안에서 GPU pass가 막 dispatch한 job이 CPU pass의 "내 타입 남았나" 판정에는 그 사이클 안에서 반영 안 됨(다음 'done'/'error' 이벤트에서 바로잡힘) — 무시할 만한 수준의 부정확
-    - `ProcessWorker(conn, collectors or [], store, ...)`로 `store`를 그대로 넘김(2026-08-01) — 워커 메시지 튜플에서 `node_path`가 빠짐(`spec, outer_idx, inner_idx, train_data, valid_data, test_data, ext_data` — 워커가 `store.write_objs(spec.name, outer_idx, inner_idx, obj, result)`로 직접 이름/fold를 쓰므로 경로를 미리 조립해 보낼 필요가 없어짐)
-  - `ProcessWorker`(spawn): job 경계에서 `del` + `gc.collect()`로 이전 job의 데이터·모델을 놓아줌(안 하면 피크 = 이전 데이터 + 모델 + 새 데이터). 워커 로그 fd는 dup2 직후 close
-  - **`_run_collectors`는 `(warn_msgs, outcomes)`를 반환(2026-08-04)** — `outcomes`는 매칭된 Collector당 하나씩 `{collector, status, elapsed, info}`. 실제 캐칭은 `_safe_collect`가 `ext`/`collect`/`push` 세 구간에 대해 하고, 공용 `obj.process` 준비(`output_test`/`output_train`)가 깨지면 매칭된 전원에게 `phase='output'` outcome을 하나씩 발급 — 이 준비는 Trial이 이미 `'built'`로 기록된 **뒤에** 돌기 때문에 여기서 예외가 나면 실행 전체가 죽었음
-    - 멀티워커: 워커가 결과는 기존 `('collect', ...)` 메시지로, outcome은 새 `('collect_hist', node, o, i, outcomes)` 메시지로 보냄(둘 다 같은 파이프라 순서 보장). 부모는 `('collect', ...)` 처리에서 `c.push()`를 try로 감싸 실패를 `push_errors`에 담아뒀다가 `collect_hist` 도착 시 해당 outcome을 교체해 기록. **결과가 picklable하지 않아 `('collect', ...)` send 자체가 실패해도** `_safe_collect`가 `phase='push'`로 잡고, outcome은 문자열뿐이라 따로 전달됨
-    - 기록은 항상 부모(`tracker.collect(...)` → `TrialHistTracker`) — 워커가 SQLite를 직접 쓰면 N프로세스 경합이 생기고, `TrialStore`가 그렇게 안 하는 이유와 같음
-  - **워커 사망 처리(2026-08-04, 좀비 프로세스 해소)** — `wait()`는 파이프가 닫힌 것도 ready로 돌려주므로, OOM kill이나 네이티브 라이브러리 segfault로 워커가 죽으면 `recv()`가 `EOFError`를 던짐. 예전엔 이게 dispatch 루프 밖으로 전파돼 **함수 끝의 정리 코드(`send(None)`/`join()`/`close()`)에 도달하지 못했고**, 나머지 워커가 종료 sentinel을 못 받아 자기 `recv()`에 영원히 블록됨. `daemon=True`는 부모가 죽어야 의미가 있는데 주피터 커널은 안 죽으므로 메모리(+GPU 워커면 CUDA 컨텍스트)를 잡은 채 남았음
-    - 지금은 사망을 **예외가 아니라 정상 결과**로 취급: in-flight job을 `WorkerLost` 에러로 기록하고, 그 conn을 `all_conns`에서 제거(EOF는 지속 상태라 안 빼면 무한 스핀), 남은 워커로 계속 진행. 워커가 전멸하면 못 돌린 job까지 에러로 남겨 호출부의 `len(jobs) - len(errors)` 집계가 안 틀리게 함
-    - **정리는 `try/finally`** — 루프를 빠져나가는 경로가 정상 종료 말고도 여럿(`store.get_objs`, 이력 SQLite 쓰기, tracker 호출)이라 "끝까지 도달했나"에 정리를 걸어둔 것 자체가 원인이었음. `send(None)` → `join(_JOIN_TIMEOUT=10)` → 살아있으면 `terminate()` → `close()`, 각 단계 예외 안전(죽은 워커엔 `send(None)`이 실패함)
-    - 기동 시 `'ready'` 대기도 같은 처리 — spawn은 모듈을 재import하므로 Collector 클래스가 모듈 최상위가 아니면 자식이 `'ready'` 전에 죽는데, 예전엔 이 시점에 정리 코드가 **아예 없어** 이미 뜬 워커가 전부 누수됐음
-    - **남은 것**: 루프 안 부모쪽 작업(`store.get_objs`/`flow.set_objs`/`tracker.*`/`abort_node`)의 개별 예외는 여전히 실행 전체를 중단시킴. `finally` 덕에 누수는 없지만 job 단위로 흡수하지는 않음
-- **_tracker.py**: `ExecuteTracker` 기반
-  - `LoggerExecuteTracker` — 워커 이벤트→logger. `typ`에 따라 `logger.info`/`warning` 라우팅
-  - **`TrialHistTracker(tracker, store, experimenter, pipeline_version, collect_hist=None)`** — 로깅 tracker를 감싸 `done`/`error` 시점에 `TrialStore`에 이력 기록(`pipeline_version`은 그 Experimenter의 정수 버전, 해시 아님). 이벤트 시점이라 멀티워커도 그대로 커버되고, 사후에 디스크를 다시 읽지 않아도 됨
-    - `collect_hist`를 주면 새 `collect(node_name, outer_idx, inner_idx, outcomes)` 이벤트에서 `CollectHist`에도 기록(2026-08-04). **세 번째 wrapper 클래스를 안 만든 이유**: 수집 이력의 키/스탬프가 이 클래스가 이미 들고 있는 `experimenter`/`pipeline_version` 그대로고, 부모 프로세스 이벤트 스트림을 타야 하는 이유도 같음(`_run_collectors`는 워커에서 돌아서 부모만 전체 fold의 outcome을 봄)
-    - `ExecuteTracker.collect(...)`는 base에 no-op으로 있고 `NodeInfoTracker`도 위임만 함 — 노드/Predictor 경로엔 매칭될 Collector가 없어 실제로 호출되지 않음
-- **_describer.py**: desc_spec, desc_pipeline, desc_node, compare_nodes (`desc_status`는 죽은 코드라 제거됨)
+- **_describer.py**: desc_spec, desc_pipeline, desc_node, compare_nodes
 - **_logger.py**: BaseLogger, DefaultLogger (start/update/end_progress, adhoc_progress, rename_progress)
-- **col.py**: `@name` column-selector 레지스트리 — 위 "col.py" 섹션 참조
-- **_connector.py**: Connector (노드 매칭)
-- **collector/**: Collector, Collectors, CollectorStore/CollectorEntity, CollectHist, MetricCollector, StackingCollector, ModelAttrCollector, SHAPCollector, OutputCollector
+- **col.py / _connector.py / collector/ / filter/ / adapter/ / processor/**: 해당 섹션 참조
 - **filter/**: DataFilter, RandomFilter(n/frac/random_state), IndexFilter(index)
-- **adapter/**: sklearn, xgboost, lightgbm, catboost, keras, `_nn.py` (NNAdapter)
-- **processor/**: CatConverter, CatPairCombiner, CatOOVFilter, FrequencyEncoder, TypeConverter, CrossFitTransformer (`ColSelector`는 `_pipeline.py`에 있음 — processor/ 소속 아님)
+- **processor/**: CatConverter, CatPairCombiner, CatOOVFilter, FrequencyEncoder, TypeConverter, CrossFitTransformer (`ColSelector`는 `_pipeline.py` 소속)
   - `CatPairCombiner`: pair(2) → N-way 그룹 조합으로 확장. `pairs` 요소를 N개 컬럼 인덱스/이름 그룹으로 지정 가능
   - `TypeConverter`: 모든 컬럼을 지정 타입(`str`/`int`/`float`)으로 변환. pandas: `astype`, polars: cast, numpy: `astype`. `get_feature_names_out` 지원
   - `CrossFitTransformer`: sklearn-compatible stacking meta-feature 생성기
@@ -636,27 +585,66 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
   - polars 설치 시: PolarsLoader, ExprProcessor, PandasConverter 추가
   - `_dproc.py`: `get_type_df` (수치형만 f32/i32/i16/i8 판정), `get_type_pl`, `get_type_pd`, `merge_type_df`
 
+## 실행 (`_executor.py`, `_tracker.py`)
+
+### Job
+`Job(name, spec, outer_idx, inner_idx, flow, need_gpu=False)` — 노드와 Trial/Predictor 공용 job 단위.
+`spec`은 `Pipeline.get_node_spec()`/`Trial.get_spec()`/`Predictor.get_spec()`이 준 `ProcessorSpec`을 job 생성 시점에 1회 계산해 박아 넣은 것(따로 `node`/`trial` 객체를 들고 있지 않음). `flow`(`TrainDataFlow`) 하나로 `get_train`/`get_valid`/`get_test(edges)`를 다 만들 수 있어 job이 자족적이다. `node_path()`는 `flow.node_path(name)`에 위임.
+
+### `_execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None)`
+단일 프로세스로 `Job` 리스트를 실행. 노드/Trial 차이는 `collectors` 하나뿐:
+- **`collectors=None`이 노드/build 경로** — 입력 준비가 `ext_data` 없이 `_job_data(job)`로 끝나고 매치/실행도 스킵
+- `collectors=[]`(Trainer의 Predictor 경로)는 리스트와 같은 코드 경로를 타되 매치될 게 없을 뿐 — `None`은 그 스킵만큼만 다름
+- 의존성 순서 `while True: ready = [...]` 루프(노드끼리 서로 참조 가능해서 필요)는 Trial에도 적용되지만, 그 안의 `get_missing_nodes` 게이트는 **노드 전용**(`collectors is None`일 때만 검사). Trial까지 이 게이트에 걸리게 하면 참조 노드가 끝내 안 빌드된 경우 그 Trial job이 에러 하나 없이 조용히 사라진다 — `_job_inputs`가 `KeyError`를 내고 prep error로 기록되는 게 올바른 동작
+- `job.flow.set_objs`는 노드/Trial 구분 없이 완료된 job마다 호출 — 안 하면 그 job이 `ready`에서 빠지지 않아 루프가 영원히 재실행
+- `store`(그 run의 `NodeStore`)를 명시적으로 받아 `store.write_objs(name, outer_idx, inner_idx, obj, result)` 호출
+- **반환값은 job 종류와 무관하게 항상 `{(outer_idx, inner_idx, name): error_info}`** — 실패한 job이 ready-루프에서 영원히 재시도되지 않으려면 키가 fold까지 포함한 job 신원이어야 하고, 반환도 그 신원 그대로여야 한다(축약하면 같은 outer fold의 다른 inner fold 실패가 사라지고, 호출부의 `len(jobs) - len(errors)` 집계도 틀어짐). 호출부는 이름만 필요할 때 `{n for _, _, n in errors}`로 뽑는다
+
+### `_execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, tracker=None, ...)`
+워커 풀 실행. `collectors` 분기와 반환 모양은 `_execute_single`과 동일.
+- **완료 결과는 `job.flow`가 아니라 인자로 받은 `store`에서 되읽는다** — 워커는 이 호출이 지정한 store에 쓰므로. (Trainer가 Predictor를 노드 flow로 먹이면서 별도 store에 저장하기 때문에 둘이 다를 수 있다) `store.get_objs(...)` → `flow.set_objs(...)`
+- **ready-job 계산은 매 dispatch 사이클마다 처음부터 다시 스캔**(`_collect_ready()`) — 노드는 형제 노드가 끝나야 readiness가 바뀌므로 목록을 한 번만 만들어두는 방식이 안 맞는다. Trial에도 그대로 맞음(Trial끼리는 서로 의존 안 하니 한 번 ready면 계속 ready)
+- **워커 배정 fallback**: "내 타입" job이 아직 남아있으면 그 타입 몫 worker를 다른 타입에 안 뺏긴다(`elif free_cpu and not cpu_ready and gpu_fallback_cpu`). ready 목록을 매 사이클 재계산하는 탓에 같은 `_try_dispatch()` 호출 안에서 GPU pass가 막 dispatch한 job이 CPU pass의 판정엔 반영 안 되지만(다음 'done'/'error' 이벤트에서 바로잡힘) 무시할 수준
+- `ProcessWorker(conn, collectors or [], store, ...)`로 store를 그대로 넘김 — 워커 메시지 튜플은 `spec, outer_idx, inner_idx, train_data, valid_data, test_data, ext_data`(워커가 `store.write_objs(spec.name, ...)`로 직접 쓰므로 경로를 미리 조립해 보낼 필요 없음)
+- `ProcessWorker`(spawn): job 경계에서 `del` + `gc.collect()`로 이전 job의 데이터·모델을 놓아줌(안 하면 피크 = 이전 데이터 + 모델 + 새 데이터). 워커 로그 fd는 dup2 직후 close
+
+#### 워커 사망 처리
+`wait()`는 파이프가 닫힌 것도 ready로 돌려주므로, OOM kill이나 네이티브 라이브러리 segfault로 워커가 죽으면 `recv()`가 `EOFError`를 던진다. 이걸 예외로 전파시키면 정리 코드에 도달하지 못해 나머지 워커가 종료 sentinel을 못 받고 영원히 블록된다(주피터 커널은 안 죽으므로 `daemon=True`도 소용없어 메모리와 CUDA 컨텍스트를 잡은 채 남는다).
+- 사망을 **예외가 아니라 정상 결과**로 취급: in-flight job을 `WorkerLost` 에러로 기록하고, 그 conn을 `all_conns`에서 제거(EOF는 지속 상태라 안 빼면 무한 스핀), 남은 워커로 계속 진행. 전멸하면 못 돌린 job까지 에러로 남겨 호출부 집계가 안 틀리게 함
+- **정리는 `try/finally`** — 루프를 빠져나가는 경로가 여럿(`store.get_objs`, 이력 SQLite 쓰기, tracker 호출)이라 "끝까지 도달했나"에 정리를 걸면 안 된다. `send(None)` → `join(_JOIN_TIMEOUT=10)` → 살아있으면 `terminate()` → `close()`, 각 단계 예외 안전
+- 기동 시 `'ready'` 대기도 같은 처리 — spawn은 모듈을 재import하므로 Collector 클래스가 모듈 최상위가 아니면 자식이 `'ready'` 전에 죽는다
+- **미해결**: 루프 안 부모쪽 작업(`store.get_objs`/`flow.set_objs`/`tracker.*`/`abort_node`)의 개별 예외는 여전히 실행 전체를 중단시킨다. `finally` 덕에 누수는 없지만 job 단위로 흡수하지는 않음
+
+#### Collector 실행
+- **`_run_collectors`는 `(warn_msgs, outcomes)`를 반환** — `outcomes`는 매칭된 Collector당 하나씩 `{collector, status, elapsed, info}`. 실제 캐칭은 `_safe_collect`가 `ext`/`collect`/`push` 세 구간에 대해 하고, 공용 `obj.process` 준비(`output_test`/`output_train`)가 깨지면 매칭된 전원에게 `phase='output'` outcome을 발급한다 — 이 준비는 Trial이 이미 `'built'`로 기록된 **뒤에** 돌기 때문에 여기서 예외가 새면 실행 전체가 죽는다
+- 멀티워커: 워커가 결과는 `('collect', ...)` 메시지로, outcome은 `('collect_hist', node, o, i, outcomes)` 메시지로 보낸다(같은 파이프라 순서 보장). 부모는 `('collect', ...)` 처리에서 `c.push()`를 try로 감싸 실패를 `push_errors`에 담아뒀다가 `collect_hist` 도착 시 해당 outcome을 교체해 기록. **결과가 picklable하지 않아 `('collect', ...)` send 자체가 실패해도** `_safe_collect`가 `phase='push'`로 잡고, outcome은 문자열뿐이라 따로 전달된다
+- 기록은 항상 부모(`tracker.collect(...)` → `TrialHistTracker`) — 워커가 SQLite를 직접 쓰면 N프로세스 경합이 생긴다
+
+### _tracker.py
+- `ExecuteTracker` 기반. `LoggerExecuteTracker` — 워커 이벤트→logger, `typ`에 따라 `logger.info`/`warning` 라우팅
+- `NodeInfoTracker` — 노드/Predictor 실행 이력을 그 run의 `NodeStore.node_hist`에 기록
+- **`TrialHistTracker(tracker, store, experimenter, pipeline_version, collect_hist=None)`** — 로깅 tracker를 감싸 `done`/`error` 시점에 `TrialStore`에 이력 기록. 이벤트 시점이라 멀티워커도 그대로 커버되고, 사후에 디스크를 다시 읽지 않아도 된다
+  - `collect_hist`를 주면 `collect(node_name, outer_idx, inner_idx, outcomes)` 이벤트에서 `CollectHist`에도 기록. 별도 wrapper 클래스를 두지 않은 이유: 수집 이력의 키/스탬프가 이 클래스가 이미 들고 있는 `experimenter`/`pipeline_version` 그대로고, 부모 프로세스 이벤트 스트림을 타야 하는 이유도 같다
+  - `ExecuteTracker.collect(...)`는 base에 no-op — 노드/Predictor 경로엔 매칭될 Collector가 없어 실제로 호출되지 않음
+
 ## 저장 구조
 **Project가 경로를 소유한다.**
 ```
 {project.path}/
   project.db                        # ProjectStore — experimenters(name PK) / trainers(name PK).
                                     # 이름 목록만. run에 대한 정보는 전부 run 디렉토리에
-  trials.db                         # trials + experiment_hist (status + info JSON)
+  trials.db                         # trials + experiment_hist
 
   pipelines/{name}/
-    {name}.db                       # PipelineBuilder 노드/그룹 정의 + versions(version PK, path) — 이 pipeline만의 버전 카운터
-    v{n}.pkl                        # 버전별 빌드 결과 Pipeline (형식은 PipelineStore.save_version 뒤에 숨어 있음)
+    {name}.db                       # PipelineBuilder 노드/그룹 정의 + versions(version PK, path)
+    v{n}.pkl                        # 버전별 빌드 결과 Pipeline
 
   collectors/
     collectors.db                   # CollectorStore — collectors(name PK, collector,
                                     #   connector, path). 정의의 평문 절반
     __params/{name}.pkl             #   정의의 나머지 절반 — 생성자 params (산 객체가
                                     #   들어올 수 있어 pickle). 이 둘로 재조립
-    collect_hist.db                 # CollectHist — collect_hist(collector_name,
-                                    #   experimenter, node_name, outer_idx, inner_idx PK,
-                                    #   pipeline_version, status, collect_date,
-                                    #   elapsed, info). 정의(위)와 별도 파일 —
+    collect_hist.db                 # CollectHist — 정의(위)와 별도 파일로,
                                     #   CollectorStore는 정의만 갖는다는 경계 유지
     {name}/                         # Collector가 소유하는 저장 위치 — 데이터만
       metrics.db                    # MetricCollector (node, idx, inner_idx, split, value)
@@ -667,40 +655,37 @@ serial 비교가 아니라 **버전 간 구조 비교**로 판정한다. 판정 
     __exp.db                        # ExperimenterStore — 이 run 전용.
                                     #   experimenter(name PK, data_key, title,
                                     #                pipeline_name, pipeline_version, splitters BLOB)
-    pipeline.pkl                    # 이 run이 채택한 Pipeline 사본 (2026-08-03)
+    pipeline.pkl                    # 이 run이 채택한 Pipeline 사본
     __worker_logs/worker_{i}.log    # 멀티워커가 캡처한 네이티브 출력 (+ master.log)
-    __folds/__node_hist.db          # 이 run의 NodeStore가 소유 (2026-08-01, NodeInfoStore 통합)
+    __folds/__node_hist.db          # 이 run의 NodeStore가 소유
     __folds/{outer_idx}/{inner_idx}/{name}/
       obj.pkl                       # processor 객체
       result.pkl                    # fit_transform/fit_predict 출력
-      # info.pkl 없음(2026-08-01 제거) — status/definition/edges 등은
-      # 전부 __node_hist.db(노드)/../trials.db의 experiment_hist(Trial)에
-      # 있음. Experimenter 쪽은 노드와 Trial이 이 디렉토리를 그대로 같이
-      # 씀(Trainer만 2026-08-02에 갈랐음) — 종류를 나타내는 필드(role)가
-      # 없으므로 굳이 구분해야 하면 그 두 history 중 어디에 기록됐는지로
-      # 알 수 있음(NodeStore 자신은 obj.pkl 존재만 앎 —
-      # status(name, outer_idx, inner_idx))
+      # info 파일은 없다 — status/definition/edges 등은 전부
+      # __node_hist.db(노드) / trials.db의 experiment_hist(Trial)에.
+      # Experimenter 쪽은 노드와 Trial이 이 디렉토리를 같이 쓰고,
+      # 종류를 나타내는 필드가 없으므로 구분이 필요하면 그 두 history
+      # 중 어디에 기록됐는지로 안다 (NodeStore 자신은 obj.pkl 존재만 앎)
 
   trainers/{name}/
     __trainer.db                    # TrainerStore — 이 Trainer 전용.
                                     #   trainer(name PK, pipeline_name, pipeline_version,
                                     #           splits BLOB = splitter/splitter_params/split_indices)
-    pipeline.pkl                    # 이 Trainer가 채택한 Pipeline 사본 (2026-08-03)
-    __node_hist.db                  # 노드용 NodeStore — exp/{name}과 별개 base path라 겹칠 일 없음
-    {split_idx}/0/{name}/           # 노드 obj.pkl / result.pkl (info 없음, 위와 동일)
-    __predictors/                   # Predictor는 별도 디렉토리(2026-08-02)
+    pipeline.pkl                    # 이 Trainer가 채택한 Pipeline 사본
+    __node_hist.db                  # 노드용 NodeStore — exp/{name}과 별개 base path
+    {split_idx}/0/{name}/           # 노드 obj.pkl / result.pkl
+    __predictors/                   # Predictor는 별도 디렉토리
       __node_hist.db                #   Predictor용 NodeStore — 노드 것과 파일명이 같아 분리가 강제됨
       __predictors.db               #   PredictorStore (정의만)
       {split_idx}/0/{name}/         #   Predictor obj.pkl / result.pkl
 
   inferencers/{name}/
-    __inferencer.pkl                # node_specs, selected_nodes/heads, n_splits, node_objs, v
+    __inferencer.pkl                # node_specs, selected_nodes/predictors, n_splits, node_objs, v
 ```
-- **Experimenter/Trainer는 각자 `pipeline.pkl` 사본을 소유한다(2026-08-03 변경)** — 자기 디렉토리만으로 재개 가능한 것이 목적. `(pipeline_name, pipeline_version)`은 **provenance**로만 남음(이 사본이 프로젝트의 어느 버전에서 왔는지)
-  - 쓰기/읽기 지점: Experimenter는 자기 `ExperimenterStore.save_pipeline(pipeline)`/`load_pipeline()`, Trainer는 `_run_common`의 같은 함수를 직접 호출. 실제 I/O는 `_run_common.save_pipeline`/`load_pipeline` 한 곳
-  - `Project.load_experimenter`/`load_trainer`는 **더 이상 버전을 resolve하지 않음** — run이 자기 사본을 읽는다. 버전으로 지정하는 건 생성 팩토리(`experimenter()`/`trainer()`의 `pipeline_version=`)뿐
-  - Trainer도 동일 구조: `TrainerStore`(`__trainer.db`)가 meta/splits/`pipeline.pkl`을 소유, 복원은 `Trainer.load_trainer()`. `__trainer.pkl`과 `Trainer.load()`는 폐지
-- **NodeStore는 project 전역이 아니라 run(Experimenter/Trainer) 하나당 하나(2026-08-01)** — `project.node_info` 같은 프로젝트 전역 레지스트리 없음. `Experimenter.node_store`/`Trainer.node_store`가 생성자에서 자기 base path로 만들어 모든 fold가 공유
+- **Experimenter/Trainer는 각자 `pipeline.pkl` 사본을 소유한다** — 자기 디렉토리만으로 재개 가능한 것이 목적. `(pipeline_name, pipeline_version)`은 **provenance**로만 남는다(이 사본이 프로젝트의 어느 버전에서 왔는지)
+  - 실제 I/O는 `_run_common.save_pipeline`/`load_pipeline` 한 곳. Experimenter는 `ExperimenterStore`를 통해, Trainer는 직접 호출
+  - `Project.load_experimenter`/`load_trainer`는 **버전을 resolve하지 않는다** — run이 자기 사본을 읽는다. 버전으로 지정하는 건 생성 팩토리(`experimenter()`/`trainer()`의 `pipeline_version=`)뿐
+- **NodeStore는 project 전역이 아니라 run 하나당 하나** — 프로젝트 전역 노드 이력 레지스트리는 없다. `Experimenter.node_store`/`Trainer.node_store`가 생성자에서 자기 base path로 만들어 모든 fold가 공유
 
 ## 패키지 정보
 - PyPI 패키지명: `ml-labs`, Python 패키지: `mllabs/`
