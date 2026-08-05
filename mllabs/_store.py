@@ -27,11 +27,10 @@ class ArtifactStore:
       ``get_objs``/``get_obj``/``get_result``/``list_nodes``/``status``/
       ``reset_node``) — ``NodeStore`` is the only one that overrides these,
       because it's the only one that actually persists obj/result files.
-      ``TrialStore`` inherits them unoverridden: Trial artifacts live in the
-      run's own ``NodeStore`` (Stage and Trial share that on-disk layout),
-      not in ``TrialStore``, which has no obj/result to serve. Calling one
-      of these on a ``TrialStore`` raises ``NotImplementedError`` rather
-      than the ``AttributeError`` it would raise without this base class.
+      ``TrialStore`` inherits them unoverridden: a Trial leaves no artifact
+      anywhere, so there is no obj/result for it to serve. Calling one of
+      these on a ``TrialStore`` raises ``NotImplementedError`` rather than
+      the ``AttributeError`` it would raise without this base class.
     - **History** methods (``record``/``get_hist``/``get_status``/
       ``get_info``/``remove_hist``) — both override these for real, each
       against its own table. Declared here only so the shape is documented
@@ -39,7 +38,14 @@ class ArtifactStore:
       an extra experimenter name that ``NodeStore`` (already scoped to one
       run) doesn't need, so the signatures aren't identical across
       overrides.
+
+    ``stores_artifacts`` states which half a given store actually implements,
+    so a caller can hand the executor whichever store owns that kind of job's
+    record and let it work out whether there is anything to persist. It is
+    the same split the two groups above describe, in a form code can read.
     """
+
+    stores_artifacts = False
 
     # -- artifact --------------------------------------------------------
 
@@ -119,6 +125,8 @@ class NodeStore(ArtifactStore):
     Args:
         path: This run's base path.
     """
+
+    stores_artifacts = True
 
     def __init__(self, path):
         self.path = Path(path)

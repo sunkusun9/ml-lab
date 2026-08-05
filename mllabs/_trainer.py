@@ -508,18 +508,20 @@ class Trainer:
                 if n_jobs > 1:
                     node_errors = _execute_multi(
                         node_jobs, n_jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=node_tracker,
-                        log_dir=self.path / '__worker_logs')
+                        log_dir=self.path / '__worker_logs', chained=True)
                 else:
                     node_errors = _execute_single(
-                        node_jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=node_tracker)
+                        node_jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=node_tracker,
+                        chained=True)
                 error_nodes.update(n for _, _, n in node_errors)
 
             if predictor_jobs:
-                # No Collectors here (a Trainer isn't an Experimenter) — pass
-                # [] rather than the default None, which the executor reads as
-                # the node/build path and would gate these on
-                # flow.get_missing_nodes, silently dropping a Predictor whose
-                # node never built instead of recording a prep error.
+                # A Predictor is a leaf: it reads the node flow but nothing
+                # reads it, so these run unchained — no dependency gate (a
+                # Predictor whose node never built must surface as a prep
+                # error, not vanish) and no set_objs (its model belongs in
+                # predictor_store, not pinned in the node flow's memory).
+                # No Collectors either, a Trainer isn't an Experimenter.
                 if n_jobs > 1:
                     predictor_errors = _execute_multi(
                         predictor_jobs, n_jobs, self.predictor_store, gpu_id_list=gpu_id_list,

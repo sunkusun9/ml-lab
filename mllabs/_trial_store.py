@@ -11,11 +11,9 @@ Two tables:
     One row per (trial name, experimenter name, outer fold, inner fold) — what
     ran, against which Pipeline, and whether it succeeded.
 
-Both tables key on names, matching what is on disk: a trial's artifacts live
-at ``{exp}/__folds/{outer}/{inner}/{trial_name}/`` and an Experimenter's at
-``{project}/exp/{name}``. Keeping the keys aligned with the layout means a
-hist row is readable on its own, and that redefining a name overwrites its
-row exactly as it overwrites the artifact — true in both tables.
+Both tables key on names, matching what an Experimenter is keyed by on disk
+(``{project}/exp/{name}``). A hist row is therefore readable on its own, and
+redefining a name overwrites its row in both tables.
 
 Neither table stores a content hash. Whether a stored definition still
 matches a given Trial is a plain value comparison (``has``) — a hash would
@@ -23,24 +21,25 @@ only restate what that already compares directly. ``experiment_hist`` is a
 run log, not the source of truth for a definition: it does not attempt to
 recover what a name's definition used to be before it was redefined.
 
-Whether a fold needs rebuilding is decided purely from ``experiment_hist``
-now (see ``Experimenter._make_jobs``): a fold recorded ``'built'`` is
-skipped, anything else (``'error'`` or no row) gets a job — the Trial's own
-definition is not compared against its on-disk artifact for this anymore, so
-redefining a Trial does not by itself force a rerun of folds already marked
-``'built'``. ``Trainer._make_trial_jobs`` still compares against the
-artifact's own ``info['definition']`` instead, since a Trainer has no
-``experiment_hist`` to consult.
+**A Trial leaves no artifact.** It is a candidate being measured, so what is
+worth keeping is its outcome, not the model that produced it: the executor
+persists nothing for a Trial job, and its collected results live in whatever
+Collectors were attached. These two tables are therefore the whole record,
+which makes ``experiment_hist`` the only possible answer to whether a fold
+still needs running (see ``Experimenter._make_jobs``): a fold recorded
+``'built'`` is skipped, anything else (``'error'`` or no row) gets a job.
+Nothing on disk can disagree with that, and rerunning a fold is
+``remove_hist(...)`` and nothing else. Redefining a Trial does not by itself
+force a rerun.
 
-``experiment_hist`` also carries an ``info`` column (2026-08-01) — everything
-``_process()``/``_write_prep_error`` produced besides ``status`` (``build_id``,
-``definition``, ``fit_time``, ``edges``, ``train_shape``,
-``warnings``, and, on failure, ``error``), JSON-encoded. This is what used to
-live only in the per-fold ``info.pkl`` NodeStore wrote on disk; recording it
-here instead, via ``TrialHistTracker``, means it survives a ``reset_nodes()``
-that wipes the artifact, and is queryable across folds/experimenters without
-walking directories. See ``NodeInfoStore`` (``_node_info_store.py``) for the
-Stage-side equivalent.
+``experiment_hist`` also carries an ``info`` column — everything
+``_process()``/``_prep_error_info`` produced besides ``status``
+(``build_id``, ``definition``, ``fit_time``, ``edges``, ``train_shape``,
+``warnings``, and, on failure, ``error``), JSON-encoded, recorded by
+``TrialHistTracker``. It is a Trial's only post-mortem, and is queryable
+across folds and Experimenters without walking directories. See
+``NodeStore.node_hist`` (``_store.py``) for the node-side equivalent, which
+sits beside artifacts rather than standing in for them.
 """
 import json
 import sqlite3
@@ -81,6 +80,11 @@ class TrialStore(ArtifactStore):
     not override any of it — it never persists obj/result artifacts, only
     definitions (``trials``) and run history (``experiment_hist``). See
     ``ArtifactStore`` for why the interface is shared anyway.
+
+    ``stores_artifacts`` is left at the base class's ``False``, which is what
+    lets ``Experimenter.exp()`` hand this store to the executor the same way
+    ``build()`` hands it a ``NodeStore``: the executor asks the store whether
+    there is anything to persist, and this one says no.
     """
 
     def __init__(self, path, name='trials'):
@@ -116,6 +120,18 @@ class TrialStore(ArtifactStore):
         """Register every Trial in *trials*."""
         for t in trials:
             self.register(t)
+
+    def remove(self, name):
+        """Delete the definition stored under *name*.
+
+        The definition only — ``experiment_hist`` is left alone, so what ran
+        stays readable after the definition it ran is gone. Dropping a Trial
+        from the project entirely spans this store, ``CollectHist`` and the
+        Collectors' own data, which no single store can see: that is
+        ``Project.remove_trial(name)``.
+        """
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute("DELETE FROM trials WHERE name = ?", (name,))
 
     def has(self, trial):
         """Whether *trial*'s exact definition is the one stored under its name."""

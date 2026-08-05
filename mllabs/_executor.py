@@ -292,7 +292,8 @@ class ProcessWorker(_mp_ctx.Process):
                     self.conn.send(('error', {**info, 'fold': (outer_idx, inner_idx)}))
                     continue
 
-                self.store.write_objs(node_name, outer_idx, inner_idx, obj, result)
+                if self.store.stores_artifacts:
+                    self.store.write_objs(node_name, outer_idx, inner_idx, obj, result)
 
                 def _send_collect(collector, node_name, outer_idx, inner_idx, res):
                     self.conn.send(('collect', collector.name, node_name, outer_idx, inner_idx, res))
@@ -337,22 +338,25 @@ class _TrackerRouter(ProgressMonitor):
 class Job:
     """One unit of build/experiment work, fully resolved before dispatch.
 
-    A node build and a Trial fit dispatch the same way once name/spec/fold/
-    flow/need_gpu are known, so both are this one class. The caller builds
-    the list and settles what's already done (``_make_node_jobs`` for nodes,
-    ``_make_jobs``/``_make_trial_jobs`` for Trials); the executor never walks
-    ``outer_folds``/``pipeline`` or decides what to skip. Nodes still need the
-    executor to order dispatch (via ``flow.get_missing_nodes``, since nodes
-    can feed each other) — Trials are leaves and don't.
+    A node build, a Trial fit and a Predictor fit dispatch the same way once
+    name/spec/fold/flow/need_gpu are known, so all three are this one class.
+    The caller builds the list and settles what's already done
+    (``_make_node_jobs`` for nodes, ``Experimenter._make_jobs`` for Trials,
+    ``Trainer._make_predictor_jobs`` for Predictors); the executor never
+    walks ``outer_folds``/``pipeline`` or decides what to skip. Nodes still
+    need the executor to order dispatch (via ``flow.get_missing_nodes``,
+    since nodes can feed each other) — Trials and Predictors are leaves and
+    don't, which is what the executor's ``chained`` argument says.
 
     Attributes:
-        name (str): Node/Trial name — also its artifact directory.
+        name (str): Node/Trial/Predictor name.
         spec (ProcessorSpec): What to build and what to feed it — the same
-            shape whether a node or a Trial produced it.
-        outer_idx, inner_idx (int): Fold coordinates — also the
-            NodeStore/DataCache key.
-        flow (TrainDataFlow): Supplies train/valid/test inputs and owns the
-            artifact directory for this fold.
+            shape whichever of the three produced it.
+        outer_idx, inner_idx (int): Fold coordinates — also the key under
+            which a persisted artifact is stored.
+        flow (TrainDataFlow): Supplies train/valid/test inputs. Where the
+            outcome goes, if anywhere, is the executor's *store* — not
+            necessarily this flow's own.
         need_gpu (bool): Whether this job's adapter wants a GPU.
     """
 
@@ -365,9 +369,6 @@ class Job:
         self.inner_idx = inner_idx
         self.flow = flow
         self.need_gpu = need_gpu
-
-    def node_path(self):
-        return self.flow.node_path(self.name)
 
     def __repr__(self):
         return f"<Job {self.name!r} fold=({self.outer_idx}, {self.inner_idx}) gpu={self.need_gpu}>"
@@ -386,30 +387,34 @@ def _job_data(job):
     return train_data, valid_data, test_data
 
 
-def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None):
+def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None,
+                    chained=False):
     """Run *jobs* to completion, single-process.
 
-    Nodes and Trials dispatch identically — both go through ``_process`` and
-    persist the same way — so *collectors* is what tells the two apart:
+    Every kind of job dispatches identically through ``_process``; what the
+    caller varies is where the outcome goes.
 
-    - ``None`` is the node/build case. Input prep skips ``ext_data``, nothing
-      is matched or run, and the dependency gate below applies.
-    - A list (empty is fine — a Trainer has no Collectors) is the Trial case.
-      ``[]`` and ``None`` differ only in those three things, so a Trial path
-      with no Collectors must still pass ``[]``.
+    *store* is whichever store owns this kind of job's record — a
+    ``NodeStore`` for nodes and Predictors, the ``TrialStore`` for Trials.
+    Fitted obj/result are written only if that store keeps artifacts at all
+    (``ArtifactStore.stores_artifacts``); a Trial leaves none, so its store
+    says so and nothing is persisted.
 
-    Jobs are dispatched in dependency order by a ``while True: ready = [...]``
-    loop, needed because nodes can feed each other. The ``get_missing_nodes``
-    gate inside it is node-only: a Trial's edges only ever reference
-    already-built nodes, and gating Trials on it would make one whose node
-    never built vanish silently — never dispatched, never an error — instead
-    of raising a ``KeyError`` from ``TrainDataFlow._resolve_typ`` that gets
-    caught and recorded as a prep error. ``job.flow.set_objs`` runs for every
-    completed job regardless of kind; nothing else marks a job done, so
-    without it the job would stay in ``ready`` and be redispatched forever.
+    *chained* says these jobs feed each other through ``job.flow`` — true
+    only for Pipeline nodes. It turns on both halves of that: completed
+    obj/result are published into the flow (``set_objs``) for later jobs to
+    read, and a job waits until everything its edges reference is built
+    (``get_missing_nodes``). Leaf jobs (Trials, Predictors) get neither.
+    Gating the wait matters: a leaf whose node never built must raise a
+    ``KeyError`` from ``TrainDataFlow._resolve_typ``, caught and recorded as
+    a prep error — under the gate it would instead vanish silently, never
+    dispatched and never an error. Skipping ``set_objs`` matters too: a leaf
+    is read by no one, so publishing it would only pin its fitted model in
+    flow memory for the rest of the run.
 
-    *store* is the run's ``NodeStore``, shared by every job's ``flow`` in a
-    single call, and is where fitted obj/result are written.
+    *collectors* is separate, and only about Collectors: ``None`` skips
+    ``ext_data`` prep and matching entirely (nodes never have Collectors), a
+    list runs them (``[]`` is a list with nothing to match).
 
     Returns ``{(outer_idx, inner_idx, name): error_info}`` for every kind of
     job — the key is a job identity, which the ready-loop needs to keep a
@@ -417,14 +422,15 @@ def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None
     """
     gpu_id_list = gpu_id_list or []
     errors = {}  # {(outer_idx, inner_idx, name): error_info}
+    done = set()  # {(outer_idx, inner_idx, name)} — completed, don't redispatch
     router = _TrackerRouter(0, tracker)
 
     while True:
         ready = [
             job for job in jobs
-            if job.name not in job.flow.node_objs
+            if (job.outer_idx, job.inner_idx, job.name) not in done
             and (job.outer_idx, job.inner_idx, job.name) not in errors
-            and (collectors is not None or not job.flow.get_missing_nodes(job.spec.edges))
+            and (not chained or not job.flow.get_missing_nodes(job.spec.edges))
         ]
         if not ready:
             break
@@ -463,8 +469,11 @@ def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None
                     c.abort_node(node_name)
                 continue
 
-            store.write_objs(node_name, outer_idx, inner_idx, obj, result)
-            job.flow.set_objs(node_name, obj, result, info)
+            if store.stores_artifacts:
+                store.write_objs(node_name, outer_idx, inner_idx, obj, result)
+            if chained:
+                job.flow.set_objs(node_name, obj, result, info)
+            done.add((outer_idx, inner_idx, node_name))
             if tracker:
                 tracker.done(0, node_name, outer_idx, inner_idx, info)
 
@@ -483,22 +492,22 @@ def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None
 
 
 def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, tracker=None,
-                   gpu_fallback_cpu=True, cpu_fallback_gpu=True, log_dir=None):
+                   gpu_fallback_cpu=True, cpu_fallback_gpu=True, log_dir=None,
+                   chained=False):
     """Run *jobs* to completion with a worker pool.
 
-    *collectors* splits node from Trial exactly as in ``_execute_single``:
-    ``None`` is the node/build case (workers get an empty collectors list,
-    input prep skips ``ext_data``, nothing is matched, and the dependency
-    gate applies); a list — empty is fine, a Trainer has no Collectors — is
-    the Trial case.
+    *store*, *chained* and *collectors* mean exactly what they do in
+    ``_execute_single``: the store that owns this kind of job's record
+    (written to only if it keeps artifacts), whether these jobs feed each
+    other through ``job.flow``, and whether Collectors run.
 
     Readiness is recomputed from scratch every dispatch cycle
     (``_collect_ready``) rather than tracked in mutable lists, because a
     node's readiness changes as the nodes it reads complete. The dependency
-    check itself (``flow.get_missing_nodes``) is node-only for the same
-    reason as in ``_execute_single``: gating Trials on it would make one
-    whose node never built vanish silently instead of being recorded as a
-    prep error.
+    check itself (``flow.get_missing_nodes``) applies only when *chained*,
+    for the same reason as in ``_execute_single``: gating a leaf job on it
+    would make one whose node never built vanish silently instead of being
+    recorded as a prep error.
 
     Worker assignment prefers matching type: a free worker of the "wrong"
     type is handed to a ready job only when nothing of its own type is
@@ -550,6 +559,7 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
     free_cpu = list(range(n_gpu, n_jobs))
     busy = {}         # conn -> Job
     errors = {}       # {(outer_idx, inner_idx, name): error_info}
+    done = set()      # {(outer_idx, inner_idx, name)} — completed, don't redispatch
     push_errors = {}  # {(collector, node, outer_idx, inner_idx): outcome}
     router = _TrackerRouter(0, tracker)
     all_conns = [conn for _, conn in workers]
@@ -594,9 +604,9 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
         gpu_ready, cpu_ready = [], []
         for job in jobs:
             key = (job.outer_idx, job.inner_idx, job.name)
-            if job.name in job.flow.node_objs or key in errors or key in in_flight:
+            if key in done or key in errors or key in in_flight:
                 continue
-            if collectors is None and job.flow.get_missing_nodes(job.spec.edges):
+            if chained and job.flow.get_missing_nodes(job.spec.edges):
                 continue
             (gpu_ready if job.need_gpu else cpu_ready).append(job)
         return gpu_ready, cpu_ready
@@ -674,12 +684,16 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
 
                 if msg_type == 'done':
                     info = data[0]
-                    # Read back through *store*, not job.flow's own: the worker
-                    # wrote where this call was told to write, and a caller can
-                    # aim the two elsewhere (a Trainer feeds Predictors from the
-                    # node flow while storing them separately).
-                    obj, result = store.get_objs(node_name, outer_idx, inner_idx)
-                    job.flow.set_objs(node_name, obj, result, {'edges': job.spec.edges})
+                    if chained:
+                        # Read back through *store*, not job.flow's own: the
+                        # worker wrote where this call was told to write. The
+                        # two coincide here (a chained job is a node, whose
+                        # flow reads the very store it was written to), but
+                        # naming the store keeps that an assumption this line
+                        # states rather than one it relies on.
+                        obj, result = store.get_objs(node_name, outer_idx, inner_idx)
+                        job.flow.set_objs(node_name, obj, result, {'edges': job.spec.edges})
+                    done.add((outer_idx, inner_idx, node_name))
                     del busy[conn]
                     (free_gpu if worker_idx < n_gpu else free_cpu).append(worker_idx)
                     if tracker:
