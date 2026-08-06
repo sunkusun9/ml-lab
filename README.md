@@ -71,7 +71,7 @@ e = project.experimenter('cv', df, pipeline_name='main',
                          pipeline_version=project.build_pipeline(p).version)
 e.build()
 
-collectors = project.collectors()
+collectors = e.collectors
 collectors.set_collector(
     'acc', 'mllabs.collector.MetricCollector',
     {'__ref__': 'mllabs.Connector', '__params__': {'edges': {'y': '{target}'}}},
@@ -83,7 +83,7 @@ trials = [Trial(f'lr_{c}', 'sklearn.linear_model.LogisticRegression',
                 params={'C': c})
           for c in (0.1, 1.0)]
 
-e.exp([(t, 0, 0) for t in trials], project.trials, collectors=collectors)
+e.exp([(t, 0, 0) for t in trials], project.trials)
 
 print(collectors.get_collector('acc').get_metrics_agg(None)[0])
 ```

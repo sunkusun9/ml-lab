@@ -275,29 +275,39 @@ class TestExp:
 
     def test_exp_with_collector(self, exp, pipeline, project):
         trial = _dt()
-        mc = project.collectors().set_collector(
+        mc = exp.collectors.set_collector(
             'acc', MetricCollector, Connector(),
             params={'output_var': None, 'metric_func': accuracy_metric},
         )
-        exp.exp(_folds(trial, exp), project.trials, collectors=[mc])
+        exp.exp(_folds(trial, exp), project.trials, collectors=['acc'])
         assert mc.has_node('dt')
 
     def test_set_collector_resolves_callable_metric(self, exp, pipeline, project):
         from sklearn.metrics import balanced_accuracy_score
         trial = _dt()
-        mc = project.collectors().set_collector(
+        mc = exp.collectors.set_collector(
             'bacc', MetricCollector, Connector(),
             params={'output_var': None,
                     'metric_func': {'__callable__': 'sklearn.metrics.balanced_accuracy_score'}},
         )
         assert mc.metric_func is balanced_accuracy_score
-        exp.exp(_folds(trial, exp), project.trials, collectors=[mc])
+        exp.exp(_folds(trial, exp), project.trials, collectors=['bacc'])
         assert mc.has_node('dt')
+
+    def test_the_run_restores_its_own_collectors(self, exp, pipeline, project, sample_data):
+        """The registry is the run's, so reopening it brings the Collectors
+        back — a standalone Experimenter is complete on its own directory."""
+        exp.collectors.set_collector(
+            'acc', MetricCollector, Connector(),
+            params={'output_var': None, 'metric_func': accuracy_metric},
+        )
+        reopened = Experimenter.load_experimenter(exp.path, sample_data)
+        assert reopened.collectors.names() == ['acc']
 
 
 class TestCollectorsRegistry:
-    """Collectors are a project-wide registry now (`mllabs.collector._registry`),
-    not owned by Experimenter (no more exp.set_collector/get_collector) — the
+    """A registry belongs to one run (`mllabs.collector._registry`); an
+    Experimenter builds its own and hands it out as `.collectors`. The
     set_collector 'skip'/'error' exist modes are tested directly against it."""
 
     def test_set_collector(self, tmp_path):

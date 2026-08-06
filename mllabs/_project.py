@@ -27,17 +27,16 @@ class Project:
           trials.db           TrialStore (definitions + run history)
           pipelines/{name}/   PipelineBuilder db (incl. its own version counter),
                                and v{n}.pkl per built version
-          collectors/         Collectors registry
-          exp/{name}/         Experimenter — its own store, Pipeline copy and
-                               NodeStore, all self-contained
+          exp/{name}/         Experimenter — its own store, Pipeline copy,
+                               NodeStore and Collectors, all self-contained
           trainers/{name}/    Trainer (same, own NodeStore)
           inferencers/{name}/ saved Inferencers
 
     Project holds only what is genuinely project-wide: the pipelines, the
-    Collectors, the TrialStore, the shared cache, and the index of run names.
-    Everything about an individual run — its splitters, its data key, the
-    Pipeline it adopted, its node artifacts and history — belongs to that
-    run's own directory, so it can be reopened without a Project at all.
+    TrialStore, the shared cache, and the index of run names. Everything about
+    an individual run — its splitters, its data key, the Pipeline it adopted,
+    its node artifacts and history, its Collectors — belongs to that run's own
+    directory, so it can be reopened without a Project at all.
 
     Args:
         path (str | Path): Project root. Created if missing.
@@ -69,11 +68,6 @@ class Project:
     def inferencer_path(self, name):
         return self._sub('inferencers', name)
 
-    def collectors_path(self):
-        p = self.path / 'collectors'
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
     def _sub(self, kind, name):
         p = self.path / kind / name
         p.mkdir(parents=True, exist_ok=True)
@@ -87,10 +81,6 @@ class Project:
         """A :class:`~mllabs.PipelineBuilder` stored under this project."""
         from ._pipeline import PipelineBuilder
         return PipelineBuilder(path=self.pipeline_path(name), name=name)
-
-    def collectors(self):
-        """The project's :class:`~mllabs.Collectors` registry, restored if saved."""
-        return Collectors(self.collectors_path())
 
     def experimenter(self, name, data, pipeline_name='pipeline', pipeline_version=None, **kwargs):
         """Create an Experimenter named *name* under ``{project}/exp/{name}``.
@@ -167,40 +157,43 @@ class Project:
         """Names of every Trainer created through this project."""
         return self.store.list_trainers()
 
-    def remove_trial(self, name, collectors=None):
+    def remove_trial(self, name, experimenters=None):
         """Drop *name* from the project — definition, history and collected data.
 
         A Trial leaves no artifact, so everything it produced is spread across
         stores that deliberately don't know about each other: its definition
-        and per-fold history in ``TrialStore``, the per-fold collect outcomes
-        in ``CollectHist``, and the collected data itself inside each
-        Collector. Project is the only thing that sees all three, so removing
-        a Trial belongs here rather than in any one of them.
+        and per-fold history in the project's ``TrialStore``, and — inside
+        every Experimenter that ran it — the collected data and the
+        ``CollectHist`` rows describing it. Project is the only thing that
+        sees all of them, so removing a Trial belongs here.
 
-        Every Experimenter is covered — history and collect outcomes are
-        deleted for all of them, and a Collector's data is keyed by node name
-        with no experimenter in it at all. There is no per-Experimenter
-        removal; to make one Experimenter run a Trial again, delete just its
-        history with ``project.trials.remove_hist(trial_name=, experimenter=)``.
+        The definition and the whole of its history go in one statement each;
+        the per-run half is a pass over :meth:`list_experimenters`, delegating
+        to :meth:`Experimenter.remove_trial_result`. Opening a run's registry
+        costs only its two db files — no Experimenter is constructed and no
+        dataset is needed — but a registry opened here is not the one you may
+        already be holding, and some Collectors answer from an in-memory cache
+        (``ModelAttrCollector``/``SHAPCollector``). Pass those runs as
+        *experimenters* so their own registries are the ones cleaned.
 
         Args:
             name (str): Trial name. Removing one that was never registered is
                 a no-op, not an error.
-            collectors (Collectors, optional): The registry to clean. Pass the
-                one you are holding: :meth:`collectors` builds a fresh
-                registry on every call, and a Collector may answer from an
-                in-memory cache (``ModelAttrCollector``/``SHAPCollector``
-                keep one), so cleaning a fresh instance leaves yours still
-                serving what was just deleted. Defaults to a fresh registry,
-                which is enough when nothing is holding one.
+            experimenters (list[Experimenter], optional): Open Experimenters to
+                clean through, matched by name. Any run not listed is handled
+                by opening its registry from disk.
         """
         self.trials.remove(name)
         self.trials.remove_hist(trial_name=name)
-        collectors = self.collectors() if collectors is None else collectors
-        if collectors.hist is not None:
-            collectors.hist.remove_hist(node_name=name)
-        for collector in collectors:
-            collector.reset_nodes([name])
+        held = {e.name: e for e in (experimenters or ())}
+        for exp_name in self.list_experimenters():
+            exp = held.get(exp_name)
+            if exp is not None:
+                exp.remove_trial_result(name)
+                continue
+            path = self.exp_path(exp_name) / 'collectors'
+            if path.exists():
+                Collectors(path).remove_results(name)
 
     # ------------------------------------------------------------------
     # pipeline versions

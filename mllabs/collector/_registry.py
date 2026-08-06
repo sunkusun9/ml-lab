@@ -7,9 +7,14 @@ from ._store import CollectorEntity, CollectorStore, build_collector
 class Collectors:
     """Registry that owns Collector instances and their storage.
 
-    Collector instances live here rather than being rebuilt per run, so several
-    runs can share one registry and their metrics land in the same place, where
-    they stay comparable.
+    One registry belongs to one run — an Experimenter builds its own over
+    ``{exp path}/collectors`` and hands it out as ``Experimenter.collectors``.
+    Everything a Collector writes is keyed by node name and nothing more
+    (``MetricCollector``'s PK is ``(node, idx, inner_idx, split)``; the
+    file-based ones use ``{path}/{node}...``), so the path is what keeps two
+    runs apart. Sharing one registry between runs would have them overwrite
+    each other's results for every Trial whose name they have in common —
+    silently, and precisely when the results were worth comparing.
 
     Registration persists immediately when the registry has a path: a
     :class:`CollectorEntity` row goes into ``{path}/collectors.db`` and the
@@ -18,10 +23,9 @@ class Collectors:
     those two halves — the instance itself is never stored.
 
     ``hist`` is the :class:`~mllabs.CollectHist` over the same path — one row
-    per (collector, experimenter, node, fold) describing what that collect
-    call did. It sits with the registry, not with a run, because a registry is
-    project-global and its history has to stay comparable across runs for the
-    same reason its metrics do.
+    per (collector, node, fold) describing what that collect call did. It has
+    no ``experimenter`` column because the registry holding it already is one
+    run's.
 
     Args:
         path (str | Path, optional): Base directory. A Collector registered
@@ -92,6 +96,22 @@ class Collectors:
 
     def names(self):
         return list(self.collectors)
+
+    def remove_results(self, node_name):
+        """Drop everything collected for *node_name* — data and history both.
+
+        The registry is the only thing that sees both halves: ``hist`` records
+        what each collect call did, while the result itself is inside whichever
+        Collector produced it. Removing one without the other leaves a history
+        row pointing at data that is gone, or data no history accounts for.
+
+        Definitions are untouched — this removes what a node produced, not the
+        Collectors that were watching for it.
+        """
+        if self.hist is not None:
+            self.hist.remove_hist(node_name=node_name)
+        for collector in self.collectors.values():
+            collector.reset_nodes([node_name])
 
     def __contains__(self, name):
         return name in self.collectors

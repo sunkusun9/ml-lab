@@ -4,10 +4,10 @@ A Collector captures what happens while Trials run — metrics, model attributes
 
 ## The registry
 
-Collectors are registered in a `Collectors` registry, which the `Project` owns. Registration builds the instance from its parts and **persists it immediately** — there is no `save()`.
+Collectors are registered in a `Collectors` registry, which belongs to an Experimenter — `e.collectors`, stored under `{exp path}/collectors`. Registration builds the instance from its parts and **persists it immediately** — there is no `save()`.
 
 ```python
-collectors = project.collectors()
+collectors = e.collectors
 
 collectors.set_collector(
     'acc',
@@ -20,7 +20,7 @@ collectors.set_collector(
 
 The three positional arguments are the name, the Collector class (as a string or a class), and the Connector (as an instance or a ref spec). Everything else goes in `params`.
 
-Constructing the registry *is* restoring it — `project.collectors()` in a fresh session hands back everything registered before.
+Constructing the registry *is* restoring it, and the Experimenter constructs one — reopening a run with `load_experimenter` hands back everything registered on it before.
 
 ```python
 collectors.names()
@@ -29,10 +29,10 @@ collectors.remove_collector('acc')      # deletes the row and its params file
 'acc' in collectors
 ```
 
-A registry is project-wide on purpose: when several runs share one, their metrics land in the same place and stay comparable.
+A registry belongs to one run on purpose. Everything a Collector writes is keyed by node name and nothing more — `MetricCollector`'s primary key is `(node, idx, inner_idx, split)`, and the file-based ones use `{path}/{node}...` — so the path is the only thing keeping two runs apart. Sharing one registry would have them overwrite each other on every Trial name they had in common, silently, and precisely when the results were worth comparing. Comparing across runs is a read over each run's own store.
 
 !!! note "Registration writes through"
-    `project.collectors()` returns a registry bound to the project directory, so `project.collectors().set_collector(...)` on a throwaway registry still persists. A registry created without a path is memory-only and keeps nothing.
+    `e.collectors` is bound to the run's directory, so `set_collector(...)` persists as it is called. A registry created without a path (`Collectors()`) is memory-only and keeps nothing.
 
 ### How they persist
 
@@ -62,22 +62,21 @@ Connector(edges={'y': '{target}'})                 # exact per-key edge match
 ## Running with Collectors
 
 ```python
-e.exp(folds, project.trials, collectors=collectors)          # the whole registry
-e.exp(folds, project.trials,
-      collectors=collectors.resolve(['acc', 'shap']),        # a subset
-      collect_hist=collectors.hist)
+e.exp(folds, project.trials)                                 # every Collector on this run
+e.exp(folds, project.trials, collectors=['acc', 'shap'])     # a subset, by name
+e.exp(folds, project.trials, collectors=[])                  # collect nothing
 ```
 
-Passing the registry brings its history along automatically. A bare list has no project-wide place to record to, so name one with `collect_hist=` if you want the history.
+`collectors=` takes **names** out of the run's own registry, the same way `processor` and `adapter` are string refs. An instance is rejected: a Collector this registry does not know has no place in this run to write to, and would quietly deposit its results outside it. An unregistered name raises `KeyError` — silently skipping would be indistinguishable from "collected nothing".
 
-`resolve()` raises `KeyError` on an unregistered name — silently skipping would be indistinguishable from "collected nothing".
+Outcomes always go to that run's `collectors.hist`, whichever selection a call makes. The history belongs to the run, not to one call's choice.
 
 !!! note "Collectors only see Trials that actually run"
     Collection is a side effect of running a Trial. A fold already recorded `'built'` is skipped, so attaching a Collector *after* an experiment and re-running `exp()` collects nothing. Clear the fold history first — see [State Model](../concepts/state-model.md).
 
 ## CollectHist — what each Collector did
 
-`collectors.hist` holds one row per `(collector, experimenter, node, outer_idx, inner_idx)`.
+`collectors.hist` holds one row per `(collector, node, outer_idx, inner_idx)`. There is no experimenter key — the hist sits in one run's registry, so which run a row came from is answered by where the db is, the same way `node_hist` needs no `run_name`.
 
 ```python
 hist = collectors.hist

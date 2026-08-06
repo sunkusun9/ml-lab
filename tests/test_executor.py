@@ -314,14 +314,13 @@ class TestWorkerWarningVerbosity:
         # predict/collect-time warnings (like XGBoost device mismatch) now flow
         # through the logger with the node prefix, not raw to stderr.
         from mllabs._logger import ProgressSessionLogger
-        from mllabs import Collectors, Connector, MetricCollector
+        from mllabs import Connector, MetricCollector
         exp.set_pipeline(pipeline.build())
         exp.build()
-        registry = Collectors(tmp_path / 'coll')
-        registry.set_collector('m', MetricCollector, Connector(),
-                               params={'output_var': None, 'metric_func': _const_metric})
+        exp.collectors.set_collector('m', MetricCollector, Connector(),
+                                     params={'output_var': None, 'metric_func': _const_metric})
         logger = ProgressSessionLogger(level=['info', 'progress'])  # no 'warning'
-        exp.exp(_folds(_wp(), exp), trial_store, registry, logger=logger)
+        exp.exp(_folds(_wp(), exp), trial_store, ['m'], logger=logger)
 
         assert any('PREDICT_WARN_XYZ' in w for w in logger.warning_list)
         assert any('[wp_node]' in w for w in logger.warning_list)   # node prefix present
