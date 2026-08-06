@@ -46,6 +46,7 @@ import sqlite3
 from pathlib import Path
 
 from ._store import ArtifactStore
+from ._trial import Trial
 
 _SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS trials (
@@ -134,17 +135,23 @@ class TrialStore(ArtifactStore):
             conn.execute("DELETE FROM trials WHERE name = ?", (name,))
 
     def has(self, trial):
-        """Whether *trial*'s exact definition is the one stored under its name."""
-        row = self.get_by_name(trial.name)
-        return (row is not None
-                and row['processor'] == trial.processor
-                and row['method'] == trial.method
-                and row['adapter'] == trial.adapter
-                and row['params'] == trial.params
-                and row['edges'] == trial.edges)
+        """Whether *trial*'s exact definition is the one stored under its name.
+
+        ``False`` when nothing is stored under the name at all, so a caller
+        guarding a redefinition does not have to check for absence separately.
+        Compares what execution depends on; ``desc``/``tag`` are display and
+        selection metadata and do not make a definition a different one.
+        """
+        stored = self.get_by_name(trial.name)
+        return (stored is not None
+                and stored.processor == trial.processor
+                and stored.method == trial.method
+                and stored.adapter == trial.adapter
+                and stored.params == trial.params
+                and stored.edges == trial.edges)
 
     def get_by_name(self, name):
-        """Stored definition for *name*, or ``None``."""
+        """Stored definition for *name* as a :class:`~mllabs.Trial`, or ``None``."""
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
@@ -160,16 +167,23 @@ class TrialStore(ArtifactStore):
 
     @staticmethod
     def _row_to_trial(row):
-        return {
-            'name': row['name'],
-            'desc': row['desc'],
-            'processor': row['processor'],
-            'method': row['method'],
-            'adapter': json.loads(row['adapter']) if row['adapter'] else None,
-            'params': json.loads(row['params']) if row['params'] else {},
-            'edges': json.loads(row['edges']) if row['edges'] else {},
-            'tag': json.loads(row['tag']) if row['tag'] else [],
-        }
+        """A row back as the :class:`~mllabs.Trial` it was stored from.
+
+        Definitions come back as objects rather than dicts because this store
+        is now where a run reads the Trial it is about to execute:
+        ``Experimenter.exp`` is given names and resolves them here, so what
+        comes out has to be the same thing that went in.
+        """
+        return Trial(
+            name=row['name'],
+            processor=row['processor'],
+            edges=json.loads(row['edges']) if row['edges'] else {},
+            method=row['method'],
+            adapter=json.loads(row['adapter']) if row['adapter'] else None,
+            params=json.loads(row['params']) if row['params'] else {},
+            desc=row['desc'],
+            tag=json.loads(row['tag']) if row['tag'] else [],
+        )
 
     # ------------------------------------------------------------------
     # history
@@ -200,7 +214,8 @@ class TrialStore(ArtifactStore):
                  pipeline_version, status, json.dumps(info) if info is not None else None),
             )
 
-    def get_hist(self, trial_name=None, experimenter=None, pipeline_version=None):
+    def get_hist(self, trial_name=None, experimenter=None, pipeline_version=None,
+                 status=None):
         """History rows matching whichever filters are given.
 
         Each row's ``info`` is decoded back into a dict (``None`` if it was
@@ -209,7 +224,8 @@ class TrialStore(ArtifactStore):
         where, params = [], []
         for column, value in (('trial_name', trial_name),
                               ('experimenter', experimenter),
-                              ('pipeline_version', pipeline_version)):
+                              ('pipeline_version', pipeline_version),
+                              ('status', status)):
             if value is not None:
                 where.append(f"{column} = ?")
                 params.append(value)

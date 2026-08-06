@@ -43,9 +43,9 @@ This is why `Project` indexes run *names* and nothing more: there is no second c
 `Experimenter` splits the data with an outer splitter (`sp`) and an optional inner splitter (`sp_v`), then:
 
 - `build()` runs the Pipeline's nodes fold by fold
-- `exp(trials, trial_store)` runs **Trials** — the candidate models — against those node outputs
+- `exp(trial_names)` runs **Trials** — the candidate models — against those node outputs
 
-Trials live outside the Pipeline. A Trial is a candidate *being compared*, which is why its definitions and per-fold outcomes go to the project-wide `TrialStore`: results only mean something next to other results.
+Trials live outside the Pipeline. A Trial is a candidate *being compared*, which is why its definitions and per-fold outcomes go to the project-wide `TrialStore`: results only mean something next to other results. That ownership is why a run is handed names rather than definitions — it is given the store once, at construction, and adding a Trial to the project is `Project.set_trial`, not a side effect of running one.
 
 **Collectors** attach to Trial runs and capture what happens — metrics, model attributes, SHAP values, out-of-fold predictions for stacking.
 

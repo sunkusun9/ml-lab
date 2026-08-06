@@ -57,3 +57,24 @@ def resolve_common_status(statuses):
     if not statuses:
         return None
     return statuses.pop() if len(statuses) == 1 else 'inconsistent'
+
+
+def format_errors(rows, traceback=False):
+    """``(name, outer_idx, inner_idx, info)`` rows as printable error lines.
+
+    Shared by the node-side and Trial-side reporters, which read different
+    stores but describe a failure the same way.
+
+    Returns:
+        list[str] | None: One line per row, or ``None`` if there were none —
+        so an empty result reads as "nothing failed" at a glance.
+    """
+    errors = []
+    for name, outer_idx, inner_idx, info in rows:
+        err = (info or {}).get('error', {})
+        label = f"[{name}] fold {outer_idx}_{inner_idx}"
+        line = f"{label} {err.get('type')}: {err.get('message')}"
+        if traceback:
+            line += f"\n{err.get('traceback')}"
+        errors.append(line)
+    return errors or None

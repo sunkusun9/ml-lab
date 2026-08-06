@@ -55,12 +55,13 @@ def pipeline():
 
 
 @pytest.fixture
-def exp(tmp_path, sample_data, pipeline):
+def exp(tmp_path, sample_data, pipeline, trial_store):
     e = Experimenter(
         name='e1',
         data=sample_data,
         path=tmp_path / 'exp',
         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
+        trial_store=trial_store,
     )
     e.set_pipeline(pipeline.build())
     return e
@@ -104,16 +105,12 @@ def _wp():
     ]
 
 
-def _folds(trials, exp):
-    """Expand a bare Trial list into the ``(trial, outer_idx, inner_idx)``
-    tuples Experimenter.exp expects, across every fold of *exp* — Trainer's
-    set_trials() takes the bare list, but Experimenter.exp() doesn't."""
-    return [
-        (t, o, i)
-        for t in trials
-        for o in range(exp.get_n_splits())
-        for i in range(exp.get_n_splits_inner())
-    ]
+def _names(trials, exp):
+    """Register a bare Trial list and return the names Experimenter.exp takes.
+
+    Each name covers every fold of *exp* — exp() expands the grid itself."""
+    exp.trial_store.register_all(trials)
+    return [t.name for t in trials]
 
 
 def _stage_errored(exp, node_name):
@@ -197,7 +194,7 @@ class TestNJobsCap:
         exp.build(n_jobs=2)
 
         logger = RecordingLogger()
-        exp.exp(_folds(_model(), exp), trial_store, n_jobs=8, logger=logger)  # 2 folds x 1 head = 2 tasks
+        exp.exp(_names(_model(), exp), n_jobs=8, logger=logger)  # 2 folds x 1 head = 2 tasks
 
         worker_sessions = [s for s in logger.created if s != 0]
         assert worker_sessions == [1, 2]
@@ -320,7 +317,7 @@ class TestWorkerWarningVerbosity:
         exp.collectors.set_collector('m', MetricCollector, Connector(),
                                      params={'output_var': None, 'metric_func': _const_metric})
         logger = ProgressSessionLogger(level=['info', 'progress'])  # no 'warning'
-        exp.exp(_folds(_wp(), exp), trial_store, ['m'], logger=logger)
+        exp.exp(_names(_wp(), exp), ['m'], logger=logger)
 
         assert any('PREDICT_WARN_XYZ' in w for w in logger.warning_list)
         assert any('[wp_node]' in w for w in logger.warning_list)   # node prefix present
@@ -378,7 +375,7 @@ class TestDataPrepErrors:
         _setup_full(pipeline, exp)
 
         exp.build(n_jobs=1)
-        exp.exp(_folds(_bad_edges(), exp), trial_store, n_jobs=1)
+        exp.exp(_names(_bad_edges(), exp), n_jobs=1)
 
         assert _trial_built(trial_store, 'dt', exp)
         assert _trial_errored(trial_store, 'bad_dt', exp)
@@ -387,7 +384,7 @@ class TestDataPrepErrors:
         _setup_full(pipeline, exp)
 
         exp.build(n_jobs=2)
-        exp.exp(_folds(_bad_edges(), exp), trial_store, n_jobs=2)
+        exp.exp(_names(_bad_edges(), exp), n_jobs=2)
 
         assert _trial_built(trial_store, 'dt', exp)
         assert _trial_errored(trial_store, 'bad_dt', exp)
@@ -400,7 +397,7 @@ class TestErrorKeyShape:
     the same trial failed on more than one inner fold of the same outer fold."""
 
     @pytest.fixture
-    def exp_inner(self, tmp_path, sample_data, pipeline):
+    def exp_inner(self, tmp_path, sample_data, pipeline, trial_store):
         """Two outer folds x two inner folds — the layout the collapse lost."""
         e = Experimenter(
             name='e_inner',
@@ -408,28 +405,29 @@ class TestErrorKeyShape:
             path=tmp_path / 'exp_inner',
             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
             sp_v=KFold(n_splits=2),
+            trial_store=trial_store,
         )
         e.set_pipeline(pipeline.build())
         return e
 
-    def _bad_jobs(self, exp_inner, pipeline, trial_store):
+    def _bad_jobs(self, exp_inner, pipeline):
         _setup_full(pipeline, exp_inner)
         exp_inner.build(n_jobs=1)
         bad = _dt('bad_dt', {'X': 'scaler:([)', 'y': '{target}'})
-        return exp_inner._make_jobs(_folds([bad], exp_inner), trial_store)
+        return exp_inner._make_jobs(_names([bad], exp_inner))
 
     _EXPECTED = {(o, i, 'bad_dt') for o in range(2) for i in range(2)}
 
-    def test_single_keys_every_failed_job(self, exp_inner, pipeline, trial_store):
+    def test_single_keys_every_failed_job(self, exp_inner, pipeline):
         from mllabs._executor import _execute_single
-        jobs = self._bad_jobs(exp_inner, pipeline, trial_store)
+        jobs = self._bad_jobs(exp_inner, pipeline)
         assert len(jobs) == 4
         errors = _execute_single(jobs, exp_inner.node_store, collectors=[])
         assert set(errors) == self._EXPECTED
 
-    def test_multi_keys_every_failed_job(self, exp_inner, pipeline, trial_store):
+    def test_multi_keys_every_failed_job(self, exp_inner, pipeline):
         from mllabs._executor import _execute_multi
-        jobs = self._bad_jobs(exp_inner, pipeline, trial_store)
+        jobs = self._bad_jobs(exp_inner, pipeline)
         errors = _execute_multi(jobs, 2, exp_inner.node_store, collectors=[])
         assert set(errors) == self._EXPECTED
 
@@ -441,7 +439,7 @@ class TestExperimentMulti:
         _setup_full(pipeline, exp)
 
         exp.build(n_jobs=2)
-        exp.exp(_folds(_bad_edges(), exp), trial_store, n_jobs=2)
+        exp.exp(_names(_bad_edges(), exp), n_jobs=2)
 
         assert _trial_built(trial_store, 'dt', exp)
         assert _trial_errored(trial_store, 'bad_dt', exp)
@@ -511,7 +509,7 @@ class TestWorkerDeath:
         before = {p.pid for p in multiprocessing.active_children()}
 
         exp.build(n_jobs=2)
-        exp.exp(_folds(_model(), exp), trial_store, n_jobs=2)
+        exp.exp(_names(_model(), exp), n_jobs=2)
 
         leaked = {p.pid for p in multiprocessing.active_children()} - before
         assert not leaked

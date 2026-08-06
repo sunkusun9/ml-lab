@@ -77,36 +77,49 @@ trials = make_trials('lgb', 'lightgbm.LGBMClassifier',
 ```
 
 !!! warning "A Trial's name is its identity"
-    `TrialStore` is project-wide and keyed by name, so reusing a name overwrites that definition and its artifacts. Give a new configuration a new name.
+    `TrialStore` is project-wide and keyed by name, so a name is what history, results and every run's reference to it all hang on. Give a new configuration a new name.
+
+## Registering
+
+A Trial belongs to the project, so it is added there — separately from running it:
+
+```python
+names = project.set_trials(trials)     # ['lgb_0', 'lgb_1', 'lgb_2', 'lgb_3']
+project.set_trial(trial)               # 'lgb1', or None if unchanged
+```
+
+Both return only what was **added or changed**, so the return value is the work list for the next run. A definition identical to the stored one is not a change and comes back as `None` / omitted.
+
+A name that already ran successfully somewhere is frozen — `set_trial` raises rather than redefine it. The history is keyed by name and a Trial leaves no artifact, so a redefinition would silently leave the old results describing a definition that never produced them. Change one by giving it a new name, or `project.remove_trial(name)` to give up the results with it.
 
 ## Running
 
-`exp()` takes explicit `(trial, outer_idx, inner_idx)` triples — fold expansion happens in your code, so the executor runs exactly the list it is given.
+`exp()` takes Trial names. Each one runs on every fold of the run — folds are not something the caller spells out.
 
 ```python
-folds = [(t, o, i)
-         for t in trials
-         for o in range(e.get_n_splits())
-         for i in range(e.get_n_splits_inner())]
-
-e.exp(folds, project.trials, n_jobs=2, gpu_id_list=[0], logger=logger)
+e.exp(names, n_jobs=2, gpu_id_list=[0], logger=logger)
 ```
 
-`trial_store` is required — it is where definitions are registered, where per-fold outcomes are recorded, and what decides which folds are skipped as already `'built'`. Every Collector registered on the run takes part unless `collectors=` narrows it by name — see [Collectors](collectors.md).
+Folds already recorded `'built'` are dropped, so passing the same names again continues a partial run rather than repeating it.
 
-!!! note "Redefining a Trial does not re-run it"
-    A fold recorded as `'built'` is skipped silently. To force it:
+!!! note "`set_trials()` returns what changed, not what to run"
+    Its return value is an authoring diff — a Trial that was already registered and never ran comes back empty. To run a round, pass the names of that round and let `exp()` skip the folds that are done.
+
+The store itself is not an argument: an Experimenter made by `project.experimenter()` / `load_experimenter()` already holds it, and a standalone one takes it as `Experimenter(..., trial_store=...)`. An unregistered name raises `KeyError`. Every Collector registered on the run takes part unless `collectors=` narrows it by name — see [Collectors](collectors.md).
+
+!!! note "A built fold is not re-run"
+    A fold recorded as `'built'` is skipped silently, whatever the definition says now. To run it again:
 
     ```python
-    project.trials.remove_hist(trial_name='lgb1', experimenter=e.name)
-    e.reset_nodes(['lgb1'])
+    e.remove_trial_result('lgb1')   # this run's results and its history
     ```
 
 ## Reading results
 
 ```python
 e.get_status('scale')
-e.show_error_nodes(trial_store=project.trials)
+e.show_error_nodes()                              # this run's Pipeline nodes
+project.show_error_trials(experimenter=e.name)    # its Trials
 
 from IPython.display import Markdown, display
 display(Markdown(e.get_node_info()))
@@ -114,7 +127,15 @@ display(Markdown(e.get_node_info()))
 project.trials.get_hist(experimenter=e.name)
 ```
 
-Node errors live in the run's own history; Trial errors live in the `TrialStore`, which is why `show_error_nodes` takes the store to report both.
+The split follows the history: node errors are recorded in the run's own store, Trial errors in the project's `TrialStore`, so each is reported by whoever owns them. Both return one line per failed fold, or `None` when nothing failed.
+
+To ask what is still owed a run:
+
+```python
+project.pending_trials(experimenter=e.name)       # errored, or never run
+```
+
+Both cases need the same thing, so they come back as one list — a filter written by hand usually catches only the second and quietly drops the ones that failed. It is deliberately coarse: a Trial interrupted partway through its folds is not reported, since judging that means comparing history against a fold grid the store does not know. Running the names anyway is safe — `exp()` skips the folds that are done.
 
 To pull data out at a fold:
 
@@ -132,7 +153,7 @@ Progress bars and Python logging appear as usual; what escapes is output written
 ```python
 with e.os_log():
     e.build(n_jobs=1)
-    e.exp(folds, project.trials, n_jobs=4)
+    e.exp(names, n_jobs=4)
 
 e.get_worker_logs()          # {'master': ..., 0: ..., 1: ...}
 ```

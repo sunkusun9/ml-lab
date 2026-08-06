@@ -62,9 +62,9 @@ Connector(edges={'y': '{target}'})                 # exact per-key edge match
 ## Running with Collectors
 
 ```python
-e.exp(folds, project.trials)                                 # every Collector on this run
-e.exp(folds, project.trials, collectors=['acc', 'shap'])     # a subset, by name
-e.exp(folds, project.trials, collectors=[])                  # collect nothing
+e.exp(names)                                 # every Collector on this run
+e.exp(names, collectors=['acc', 'shap'])     # a subset, by name
+e.exp(names, collectors=[])                  # collect nothing
 ```
 
 `collectors=` takes **names** out of the run's own registry, the same way `processor` and `adapter` are string refs. An instance is rejected: a Collector this registry does not know has no place in this run to write to, and would quietly deposit its results outside it. An unregistered name raises `KeyError` — silently skipping would be indistinguishable from "collected nothing".

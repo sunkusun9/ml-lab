@@ -30,9 +30,9 @@ e = project.experimenter('cv', df, pipeline_name='main',
                          pipeline_version=project.build_pipeline(p).version)
 e.build()
 
-trial = Trial('lgb', 'lightgbm.LGBMClassifier',
-              {'X': 'scale:(*)', 'y': '{target}'}, method='predict')
-e.exp([(trial, 0, 0)], project.trials)
+project.set_trial(Trial('lgb', 'lightgbm.LGBMClassifier',
+                        {'X': 'scale:(*)', 'y': '{target}'}, method='predict'))
+e.exp(['lgb'])
 ```
 
 Three ideas run through all of it:

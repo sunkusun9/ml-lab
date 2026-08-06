@@ -50,9 +50,11 @@ def _pipeline_version(project, name):
     return project.build_pipeline(p).version
 
 
-def _all_folds(trial, e):
-    """(trial, outer_idx, inner_idx) for every fold of *e* — what Experimenter.exp expects."""
-    return [(trial, o, i) for o in range(e.get_n_splits()) for i in range(e.get_n_splits_inner())]
+def _register(trial, e):
+    """Register *trial* and return the name — exp() takes names, reads the
+    definition out of the store, and covers every fold of *e* itself."""
+    e.trial_store.register(trial)
+    return trial.name
 
 
 def _run(built, *trials, collectors=None, n_jobs=1):
@@ -69,8 +71,8 @@ def _run(built, *trials, collectors=None, n_jobs=1):
     Trial(s) through exp() together with whatever Collector it's testing.
     """
     trials = trials or (built.trial,)
-    folds = [f for t in trials for f in _all_folds(t, built.e)]
-    built.e.exp(folds, built.project.trials, collectors=collectors, n_jobs=n_jobs)
+    names = [_register(t, built.e) for t in trials]
+    built.e.exp(names, collectors=collectors, n_jobs=n_jobs)
 
 
 @pytest.fixture
@@ -940,7 +942,7 @@ class TestRegistryIsPerRun:
         mc = e.collectors.set_collector(
             'acc', MetricCollector, Connector(),
             params={'output_var': None, 'metric_func': accuracy_metric})
-        e.exp(_all_folds(trial, e), project.trials)
+        e.exp([_register(trial, e)])
         return e, mc
 
     @pytest.fixture
@@ -987,10 +989,10 @@ class TestRegistryIsPerRun:
         next exp() dispatch the Trial again."""
         project, (e_a, mc_a), _ = two_runs
         trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 42})
-        e_a.remove_trial_result('dt', project.trials)
+        e_a.remove_trial_result('dt')
 
         assert project.trials.get_status('dt', e_a.name) == {}
-        e_a.exp(_all_folds(trial, e_a), project.trials)
+        e_a.exp([_register(trial, e_a)])
         assert mc_a.get_metric('dt') is not None
 
 
