@@ -27,19 +27,20 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 ```
 Project(path, cache_maxsize)          경로·캐시 소유. 프로젝트 전역인 것만
   ├─ PipelineBuilder ──build()──► Pipeline    가변 정의 → 불변 노드 그래프
-  ├─ Collectors ──CollectorStore──► Collector 정의(entity 행 + params pkl) → 재조립
   ├─ TrialStore                     Trial 정의 + 실행 이력 (프로젝트 전역 — 결과 비교가 목적)
   ├─ ProjectStore                   run 이름 목록만 (experimenters / trainers)
   ├─ Experimenter(name)             CV 실험 (exp/{name}/) — Trial을 평가
-  │    └─ ExperimenterStore         meta + splitter + pipeline.pkl (이 run만)
+  │    ├─ ExperimenterStore         meta + splitter + pipeline.pkl (이 run만)
+  │    └─ Collectors ──CollectorStore──► Collector 정의(entity 행 + params pkl) → 재조립
+  │         └─ CollectHist          수집 이력 (이 run만)
   └─ Trainer(name)                  전체 데이터 학습 (trainers/{name}/) — Predictor를 학습
        ├─ TrainerStore              meta + splits + pipeline.pkl (이 Trainer만)
        ├─ PredictorStore            Predictor 정의 (이 Trainer만 — 비교할 일이 없어서)
        └─ to_inferencer() ──► Inferencer
 ```
-**경계**: run 하나에 대한 것(splitter, 채택한 Pipeline, 아티팩트/이력, 학습할 Predictor)은 전부 그 run
-디렉토리 안. Project는 "이 프로젝트에 뭐가 있나"만 답한다 → **어떤 run이든 Project 없이 열 수 있다**
-(`Experimenter.load_experimenter(path, data)` / `Trainer.load_trainer(path, data)`).
+**경계**: run 하나에 대한 것(splitter, 채택한 Pipeline, 아티팩트/이력, Collector, 학습할 Predictor)은
+전부 그 run 디렉토리 안. Project는 "이 프로젝트에 뭐가 있나"만 답한다 → **어떤 run이든 Project 없이
+열 수 있다** (`Experimenter.load_experimenter(path, data)` / `Trainer.load_trainer(path, data)`).
 
 - **Project** (`_project.py`): 디렉토리 레이아웃 + `TrialStore`/`ProjectStore`/`cache`. 프로젝트 전역인 것만 소유하고, Pipeline 버전조차 색인하지 않는다(각 pipeline이 자기 db에서 관리)
 - **PipelineBuilder / Pipeline** (`_pipeline.py`): 가변 빌더 + `build()`가 만드는 불변 **노드 전용** 그래프
@@ -182,16 +183,18 @@ Project는 순수 "조각을 짜맞춰주는 팩토리"일 뿐 필수 의존성�
 ProjectStore는 이름 목록이라 동기화가 어긋날 두 번째 진실 원본이 되지 않는다.
 
 - `Project(path, cache_maxsize=4GB)` — `DataCache`를 소유하고 모든 Experimenter/Trainer가 공유
-- 경로: `pipeline_path(name)`, `exp_path(name)`, `trainer_path(name)`, `inferencer_path(name)`, `collectors_path()`
-- 팩토리: `pipeline_builder(name)`, `collectors()`, `experimenter(name, data, pipeline_name=, pipeline_version=, **kw)`, `load_experimenter(name, data, data_key=, aug_data=)`, `trainer(name, data, pipeline_name=, pipeline_version=, **kw)`, `load_trainer(name, data, aug_data=)`
+- 경로: `pipeline_path(name)`, `exp_path(name)`, `trainer_path(name)`, `inferencer_path(name)` — **collector 경로 없음**(레지스트리는 run 소유)
+- 팩토리: `pipeline_builder(name)`, `experimenter(name, data, pipeline_name=, pipeline_version=, **kw)`, `load_experimenter(name, data, data_key=, aug_data=)`, `trainer(name, data, pipeline_name=, pipeline_version=, **kw)`, `load_trainer(name, data, aug_data=)`
 - **Pipeline 버전**: `build_pipeline(builder)` → `builder.build()` 후 결과를 다음 버전(1부터, `max+1`)으로 저장하고 `pipeline.version`에 세팅해 반환. **content dedup 없음** — 내용이 같아도 호출할 때마다 새 버전(`builder`에 path가 없으면 `ValueError`)
   - 카운터/버전 파일은 **각 pipeline 자신의 db**(`pipelines/{name}/{name}.db`)가 소유 — `build_pipeline`은 `builder._store.save_version()`에 위임할 뿐, 프로젝트 전역 색인이 없음
   - `load_pipeline(name, version=None)`, `list_pipeline_versions(name)` — 둘 다 `PipelineStore(pipeline_path(name), name)`를 통해 조회
   - 저장은 pkl (`v{n}.pkl`) — 형식은 `PipelineStore.save_version`/`load_version` 뒤에 숨어 있어 교체 가능
 - `trials`: `TrialStore`, `store`: `ProjectStore`, `list_experimenters()`, `list_trainers()`
-- **`remove_trial(name, collectors=None)`**: Trial 하나를 프로젝트에서 완전히 지운다 — 정의(`TrialStore.trials`) + 이력(`experiment_hist`, **모든 experimenter**) + 수집 이력(`CollectHist`) + 각 Collector가 들고 있는 데이터. Trial은 아티팩트를 안 남기는 대신 흔적이 서로 모르는 store 넷에 흩어져 있고, **그 넷을 다 보는 건 Project뿐**이라 여기 있다(단일 store 위의 편의 래퍼가 아니라, 주인 없는 교차 연산에 주인을 준 것)
-  - `collectors=`: **들고 있는 레지스트리가 있으면 그걸 넘길 것** — `collectors()`는 호출마다 새 인스턴스를 만들고 일부 Collector는 메모리 캐시에서 답하므로(`ModelAttrCollector`/`SHAPCollector`의 `_cache`), 새 인스턴스만 청소하면 내가 든 쪽은 방금 지운 걸 계속 내놓는다
-  - 특정 Experimenter만 다시 돌리고 싶은 거라면 이게 아니라 `trials.remove_hist(trial_name=, experimenter=)`
+- **`remove_trial(name, experimenters=None)`**: Trial 하나를 프로젝트에서 완전히 지운다 — 정의(`TrialStore.trials`) + 이력(`experiment_hist`, **모든 experimenter**) + 각 run이 수집한 데이터와 그 `CollectHist`. Trial은 아티팩트를 안 남기는 대신 흔적이 서로 모르는 store들에 흩어져 있고, **그걸 다 보는 건 Project뿐**이라 여기 있다(단일 store 위의 편의 래퍼가 아니라, 주인 없는 교차 연산에 주인을 준 것)
+  - 프로젝트 전역 절반(정의 + 전 experimenter 이력)은 각각 SQL 한 문장이고, run별 절반은 `list_experimenters()` 순회 → `Experimenter.remove_trial_result(name)` 위임
+  - **run을 열지 않는다** — `Collectors({exp_path}/collectors)`로 레지스트리만 경로에서 연다(db 두 개뿐, 데이터셋 불필요). Experimenter를 만들면 `DataFlow.__init__`이 그 fold의 아티팩트를 전부 적재하므로 trial 하나 지우자고 치를 비용이 아님
+  - `experimenters=`: **이미 열어둔 run이 있으면 그걸 넘길 것** — 경로로 새로 연 레지스트리는 내가 든 인스턴스가 아니고, 일부 Collector는 메모리 캐시에서 답한다(`ModelAttrCollector`/`SHAPCollector`의 `_cache`)
+  - 특정 Experimenter만 다시 돌리고 싶은 거라면 이게 아니라 `e.remove_trial_result(name, trial_store)`
 
 ### ArtifactStore (`_store.py`, 공통 인터페이스)
 `NodeStore`/`TrialStore`가 공유하는 메소드 모양의 base class. 두 그룹:
@@ -224,13 +227,15 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
   - 채택한 Pipeline은 **실험 디렉토리의 `pipeline.pkl`로 저장되고 `load_experimenter()`가 그걸 다시 읽는다**(`_experimenter.py:284`) — Project 없이도 마지막에 채택한 Pipeline이 복원됨. **생성자는 안 읽는다** — `self.pipeline = None`으로 두고 `_save()`가 meta의 `pipeline_name`/`pipeline_version`까지 기본값으로 덮어쓰므로, 기존 디렉토리에 대고 생성자를 부르면 provenance가 사라진다(GitHub #128)
   - 버전 전환 시 `pipeline.diff_from(self.pipeline)`으로 stale 판정 → `reset_nodes()`로 해당 노드 아티팩트만 제거. Trial은 건드리지 않음("Staleness" 섹션)
 - `cache`(`DataCache`, optional) — `None`이면 캐시 없이 동작. store는 optional이 아니라(자기가 만듦) standalone Experimenter도 meta/splitter/Pipeline이 전부 저장됨
+- **`collectors`**: `Collectors({path}/collectors)` — 생성자에서 만들고(생성자가 곧 복원) `node_store`와 같은 자리. Collector가 쓰는 건 전부 노드 이름만으로 키잉되므로 **경로가 두 run을 가르는 유일한 수단**이다 — 프로젝트 전역 레지스트리였다면 이름이 겹치는 Trial마다 서로의 결과를 덮어썼다(무증상, 그리고 하필 비교가 필요한 바로 그 경우에). 대가는 교차 run 비교가 store N개에 대한 읽기가 되는 것(#130)
+- **`remove_trial_result(name, trial_store=None)`**: 이 run이 가진 Trial *결과*를 지운다 — `self.collectors.remove_results(name)`(수집 데이터 + `CollectHist` 행). `trial_store`를 주면 이 run의 `experiment_hist` 행도 삭제 → **다음 `exp()`가 그 Trial을 다시 돌린다**(fold 스킵의 유일한 근거가 이력이므로). 다른 run의 기록은 안 건드림
 - **pipeline 필요** (`_require_pipeline()`로 미설정 시 에러):
   - `build(nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None)` — 노드 빌드
-  - **`exp(trials, trial_store, collectors=None, collect_hist=None, n_jobs=1, gpu_id_list=None, logger=None)`**
+  - **`exp(trials, trial_store, collectors=None, n_jobs=1, gpu_id_list=None, logger=None)`**
     - `trials`: **`[(Trial, outer_idx, inner_idx), ...]`** 튜플 리스트. fold 전개를 여기서 하므로 executor는 목록을 그대로 실행
     - `trial_store`(`TrialStore`): 필수 — Trial 정의 등록/fold 스킵 판정/이력 기록 전부 여기로 함(보통 `project.trials`)
-    - `collectors`: `Collectors` 레지스트리 / Collector 인스턴스 리스트 / `None`
-    - `collect_hist`(`CollectHist`, optional): 수집 이력. 안 주면 **레지스트리를 넘겼을 때만** 그 `collectors.hist`가 쓰임 — 맨 리스트는 쓸 프로젝트 전역 자리가 없어서 기록 안 됨(`_resolve_collectors`가 `(instances, hist)` 반환)
+    - `collectors`: **이 run의 `self.collectors`에 등록된 이름 리스트**. `None`=전부, `[]`=수집 안 함. 인스턴스를 넘기면 `TypeError`(`_resolve_collectors`) — 레지스트리가 모르는 Collector는 이 run에 쓸 자리가 없어서 조용히 run 밖에 결과를 떨군다. 미등록 이름은 `Collectors.resolve`가 `KeyError`
+    - 수집 이력은 항상 `self.collectors.hist` — 한 호출의 선택이 아니라 run에 속하므로 인자가 없다
     - `_make_jobs(trials, trial_store)`가 `Job(name, spec, outer_idx, inner_idx, flow, need_gpu)` 리스트를 만듦. skip 판정은 `trial_store.get_status(name, self.name)`의 fold별 status로만 함. GPU 판정도 여기서 하고, adapter resolve는 **trial 이름당 1회**
     - Trial 정의를 *trial_store*에 등록하고, `TrialHistTracker`가 fold별 done/error를 이력에 기록
   - `n_jobs`는 실제 작업 수로 상한 처리 (`min(n_jobs, len(jobs))`) — 유휴 워커/progress bar 방지
@@ -347,25 +352,28 @@ predictors(name PK, desc, processor, method, adapter, params, edges, tag,
   - edges: `{key: dsl_string}` — 각 key에 대해 노드의 resolved `edges[key]` 문자열과 **정확히 일치**해야 함 (contain 기반 아님)
 
 ### Collector (`collector/` 패키지)
-- **Collectors** (`_registry.py`): Collector 인스턴스를 소유하는 레지스트리. `Project.collectors()`로 얻음
+- **Collectors** (`_registry.py`): Collector 인스턴스를 소유하는 레지스트리. **Experimenter 하나당 하나** — `e.collectors`(`{exp path}/collectors`)
   - `Collectors(path=None)` — path 있으면 등록 시 `{path}/{name}`이 기본 저장 위치. **생성자가 곧 복원** — 그 path의 `CollectorStore`에서 등록돼 있던 걸 전부 되살림(별도 `load()` 없음)
+  - **왜 run 소유인가**: Collector가 쓰는 건 전부 노드 이름만으로 키잉된다(`MetricCollector` PK `(node, idx, inner_idx, split)`, 파일 기반은 `{path}/{node}...`). 그래서 두 run을 가르는 건 **경로뿐**이고, 레지스트리를 공유하면 이름이 겹치는 Trial마다 서로의 결과를 덮어쓴다 — 무증상으로, 그리고 하필 비교가 필요한 바로 그 경우에. `NodeStore`와 같은 배치이고, 덕분에 standalone run이 collector까지 자족한다
   - `set_collector(name, collector, connector, path=None, params=None, exist='skip')` — 부품에서 조립. `collector`는 클래스 또는 `"module.ClassName"`, `connector`는 인스턴스 또는 `{__ref__}`, `params`엔 `resolve_ref_values` 적용
   - **등록 즉시 영속화** — `set_collector`가 store에 write-through. `Collectors.save()`는 없다. path 없는 레지스트리는 메모리 전용
   - `get_collector`/`remove_collector`(store 행+params 파일까지 삭제)/`names()`/`in`/`len`/`iter`
-  - **`resolve(names)`**: 미등록 이름이면 `KeyError` — 조용히 넘어가면 "아무것도 수집 안 됨"과 구분이 안 되기 때문
+  - **`resolve(names)`**: 미등록 이름이면 `KeyError` — 조용히 넘어가면 "아무것도 수집 안 됨"과 구분이 안 되기 때문. `None`이면 전부
+  - **`remove_results(node_name)`**: 그 노드로 수집된 것 전부 삭제 — `hist` 행 + 각 Collector의 `reset_nodes([name])`. 두 절반을 다 보는 게 레지스트리뿐이라 여기 있다(정의는 안 건드림). `Experimenter.remove_trial_result`/`Project.remove_trial`이 이걸로 수렴
   - `match(spec, names=None)`
-  - **`hist`**: 같은 path의 `CollectHist`. path 없으면 `None`. 레지스트리가 프로젝트 전역이라 이력도 여기 붙는다 — 메트릭이 한곳에 모여야 비교 가능한 것과 같은 이유
+  - **`hist`**: 같은 path의 `CollectHist`. path 없으면 `None`
 
 - **CollectHist** (`collector/_collect_hist.py`): 수집 이력
   ```sql
-  collect_hist(collector_name, experimenter, node_name, outer_idx, inner_idx,  -- PK
+  collect_hist(collector_name, node_name, outer_idx, inner_idx,  -- PK
                pipeline_version, status, collect_date, elapsed, info)
   ```
+  - **`experimenter` 컬럼이 없는 이유**: 레지스트리가 이미 run 하나에 스코프돼 있어 어느 run인지는 **db가 어디 있느냐**로 답한다 — `node_hist`에 `run_name`이 없는 것과 같다
   - **키가 fold 단위인 이유**: Collector가 자기 상태를 다루는 단위는 노드(`has_node`/`abort_node`/`reset_nodes`/`_save_node`)지만, 실패는 fold 하나에서 나고 그게 어느 fold였는지가 분석의 시작점. 노드로 접으면 그 정보가 사라짐
   - `status`: `'collected'`(결과 반환) / `'empty'`(예외 없이 `None`) / `'error'`. **`empty`를 따로 가르는 게 핵심** — 실패와 "수집할 게 없음"이 둘 다 `None`이면 구분이 안 된다(보통 `output_var` 설정 실수)
   - `info`(에러 시 JSON): `{phase, type, message, traceback}`. `phase`는 `'output'`(공용 `obj.process` 준비) / `'ext'`(ProcessCollector의 `output_ext`) / `'collect'` / `'push'`
   - `elapsed`는 **`collect()` 호출 시간만** — 단일/멀티 워커에서 같은 의미가 되도록(멀티에선 push가 부모에서 돎)
-  - `record`/`record_all`/`get_hist(collector_name=, experimenter=, node_name=, status=, pipeline_version=)`/`get_status`/`get_info`/`get_errors`/`remove_hist`
+  - `record`/`record_all`/`get_hist(collector_name=, node_name=, status=, pipeline_version=)`/`get_status(collector_name, node_name=)`/`get_info`/`get_errors(collector_name=)`/`remove_hist(collector_name=, node_name=)`
   - `get_status`/`get_info`의 키는 `(node_name, outer_idx, inner_idx)`
   - **게이트가 아니라 로그** — `experiment_hist`와 달리 이걸 보고 뭘 스킵하지 않는다. 다만 "`'built'`로 스킵된 fold엔 수집 기록이 없다"가 조회로 드러나서, 이미 다 돌린 실험에 collector를 새로 붙여 `exp()`를 다시 불렀을 때 아무것도 수집 안 되는 상황이 무증상으로 지나가지 않는다
 
@@ -637,7 +645,7 @@ p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
 - `ExecuteTracker` 기반. `LoggerExecuteTracker` — 워커 이벤트→logger, `typ`에 따라 `logger.info`/`warning` 라우팅
 - `NodeInfoTracker` — 노드/Predictor 실행 이력을 그 run의 `NodeStore.node_hist`에 기록
 - **`TrialHistTracker(tracker, store, experimenter, pipeline_version, collect_hist=None)`** — 로깅 tracker를 감싸 `done`/`error` 시점에 `TrialStore`에 이력 기록. 이벤트 시점이라 멀티워커도 그대로 커버되고, 사후에 디스크를 다시 읽지 않아도 된다
-  - `collect_hist`를 주면 `collect(node_name, outer_idx, inner_idx, outcomes)` 이벤트에서 `CollectHist`에도 기록. 별도 wrapper 클래스를 두지 않은 이유: 수집 이력의 키/스탬프가 이 클래스가 이미 들고 있는 `experimenter`/`pipeline_version` 그대로고, 부모 프로세스 이벤트 스트림을 타야 하는 이유도 같다
+  - `collect_hist`(실행 중인 Experimenter의 `collectors.hist`)를 주면 `collect(node_name, outer_idx, inner_idx, outcomes)` 이벤트에서 `CollectHist`에도 기록. 별도 wrapper 클래스를 두지 않은 이유: 스탬프가 이 클래스가 이미 들고 있는 `pipeline_version` 그대로고, 부모 프로세스 이벤트 스트림을 타야 하는 이유도 같다. `experimenter`는 안 넘어간다 — 그 hist가 이미 그 run의 것
   - `ExecuteTracker.collect(...)`는 base에 no-op — 노드/Predictor 경로엔 매칭될 Collector가 없어 실제로 호출되지 않음
 
 ## 저장 구조
@@ -652,23 +660,24 @@ p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
     {name}.db                       # PipelineBuilder 노드/그룹 정의 + versions(version PK, path)
     v{n}.pkl                        # 버전별 빌드 결과 Pipeline
 
-  collectors/
-    collectors.db                   # CollectorStore — collectors(name PK, collector,
-                                    #   connector, path). 정의의 평문 절반
-    __params/{name}.pkl             #   정의의 나머지 절반 — 생성자 params (산 객체가
-                                    #   들어올 수 있어 pickle). 이 둘로 재조립
-    collect_hist.db                 # CollectHist — 정의(위)와 별도 파일로,
-                                    #   CollectorStore는 정의만 갖는다는 경계 유지
-    {name}/                         # Collector가 소유하는 저장 위치 — 데이터만
-      metrics.db                    # MetricCollector (node, idx, inner_idx, split, value)
-      {node}.pkl                    # StackingCollector — {'folds': [[inner 결과...], ...]}
-      {node}/{idx}_{inner_idx}.pkl  # OutputCollector
-
   exp/{name}/                       # Experimenter — 이름이 곧 식별자, 디렉토리 하나로 자족
     __exp.db                        # ExperimenterStore — 이 run 전용.
                                     #   experimenter(name PK, data_key, title,
                                     #                pipeline_name, pipeline_version, splitters BLOB)
     pipeline.pkl                    # 이 run이 채택한 Pipeline 사본
+    collectors/                     # 이 run의 Collectors — 프로젝트 전역 레지스트리는 없다.
+                                    #   Collector 데이터가 노드 이름만으로 키잉되므로
+                                    #   경로가 run을 가르는 유일한 수단
+      collectors.db                 #   CollectorStore — collectors(name PK, collector,
+                                    #     connector, path). 정의의 평문 절반
+      __params/{name}.pkl           #   정의의 나머지 절반 — 생성자 params (산 객체가
+                                    #     들어올 수 있어 pickle). 이 둘로 재조립
+      collect_hist.db               #   CollectHist — 정의(위)와 별도 파일로,
+                                    #     CollectorStore는 정의만 갖는다는 경계 유지
+      {name}/                       #   Collector가 소유하는 저장 위치 — 데이터만
+        metrics.db                  #     MetricCollector (node, idx, inner_idx, split, value)
+        {node}.pkl                  #     StackingCollector — {'folds': [[inner 결과...], ...]}
+        {node}/{idx}_{inner_idx}.pkl  #   OutputCollector
     __worker_logs/worker_{i}.log    # 멀티워커가 캡처한 네이티브 출력 (+ master.log)
     __folds/__node_hist.db          # 이 run의 NodeStore가 소유
     __folds/{outer_idx}/{inner_idx}/{name}/

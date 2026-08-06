@@ -89,11 +89,10 @@ folds = [(t, o, i)
          for o in range(e.get_n_splits())
          for i in range(e.get_n_splits_inner())]
 
-e.exp(folds, project.trials, collectors=project.collectors(),
-      n_jobs=2, gpu_id_list=[0], logger=logger)
+e.exp(folds, project.trials, n_jobs=2, gpu_id_list=[0], logger=logger)
 ```
 
-`trial_store` is required — it is where definitions are registered, where per-fold outcomes are recorded, and what decides which folds are skipped as already `'built'`.
+`trial_store` is required — it is where definitions are registered, where per-fold outcomes are recorded, and what decides which folds are skipped as already `'built'`. Every Collector registered on the run takes part unless `collectors=` narrows it by name — see [Collectors](collectors.md).
 
 !!! note "Redefining a Trial does not re-run it"
     A fold recorded as `'built'` is skipped silently. To force it:

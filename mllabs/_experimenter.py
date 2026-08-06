@@ -13,6 +13,7 @@ from ._store import NodeStore
 from ._experimenter_store import ExperimenterStore, DB_NAME as _EXP_DB
 from ._describer import desc_spec
 from ._logger import resolve_logger
+from .collector import Collectors
 
 
 def _start_native_redirect(log_path):
@@ -67,19 +68,6 @@ def _stop_native_redirect(state):
 from ._run_common import resolve_common_status, require_built_pipeline
 
 
-def _resolve_collectors(collectors):
-    """``(instances, CollectHist | None)`` from a registry, a list, or None.
-
-    A registry brings its own history — it owns the project-global path both
-    the Collectors and their history live under. A bare list has no such
-    place, so its outcomes go unrecorded unless ``exp(collect_hist=...)``
-    names one.
-    """
-    if collectors is None:
-        return [], None
-    if hasattr(collectors, 'resolve'):
-        return collectors.resolve(None), getattr(collectors, 'hist', None)
-    return list(collectors), None
 
 
 class OuterFold:
@@ -160,6 +148,14 @@ class Experimenter():
 
     Attributes:
         cache (DataCache): Shared LRU cache, or ``None``.
+        collectors (Collectors): This run's own Collector registry, over
+            ``{path}/collectors`` — definitions, collected data and
+            :class:`~mllabs.CollectHist` alike. It belongs to the run rather
+            than the project because what a Collector writes is keyed by node
+            name and nothing else, so two runs sharing a registry would
+            overwrite each other on any Trial name they have in common.
+            Constructing the Experimenter restores it, so reopening a run
+            brings back its Collectors with it.
         pipeline (Pipeline): The adopted Pipeline, kept as this run's own
             ``pipeline.pkl``. The ``(pipeline_name, pipeline_version)``
             pointer is recorded too, but only as provenance — it names the
@@ -213,6 +209,7 @@ class Experimenter():
 
         self.cache = cache
         self.node_store = NodeStore(self.path / '__folds')
+        self.collectors = Collectors(self.path / 'collectors')
 
         self.outer_folds = [
             OuterFold(
@@ -432,8 +429,7 @@ class Experimenter():
         Removes node objects and clears cache entries for the affected nodes.
 
         Pipeline nodes only — the artifacts a build produced. A Trial has
-        none to remove, and rerunning one is
-        ``TrialStore.remove_hist(trial_name=, experimenter=)`` instead.
+        none to remove; :meth:`remove_trial_result` is its counterpart.
 
         Args:
             nodes (list[str]): Node names to reset.
@@ -444,6 +440,31 @@ class Experimenter():
 
         if self.cache is not None:
             self.cache.clear_nodes(nodes)
+
+    def remove_trial_result(self, name, trial_store=None):
+        """Drop what this run has of Trial *name*.
+
+        A Trial leaves no artifact, so its result is whatever its Collectors
+        kept — held in this run's own registry, which
+        :meth:`Collectors.remove_results` clears along with the matching
+        ``CollectHist`` rows.
+
+        Pass *trial_store* to drop this run's ``experiment_hist`` rows as well.
+        That is what makes the next ``exp()`` run the Trial again: folds are
+        skipped on the strength of a recorded ``'built'`` status and nothing
+        else, so the history is the only thing holding one back. Only this
+        Experimenter's rows go — another run's record of the same Trial is its
+        own. To remove the Trial from the project entirely, definition
+        included, use ``Project.remove_trial``.
+
+        Args:
+            name (str): Trial name.
+            trial_store (TrialStore, optional): Where this run's Trial history
+                lives. Omitted, the history stays and the folds stay skipped.
+        """
+        self.collectors.remove_results(name)
+        if trial_store is not None:
+            trial_store.remove_hist(trial_name=name, experimenter=self.name)
 
     def show_error_nodes(self, nodes=None, traceback=False, trial_store=None):
         """Print nodes in ``error`` state.
@@ -569,7 +590,7 @@ class Experimenter():
                     jobs.append(Job(name, spec, outer_idx, inner_idx, flow, need_gpu=need_gpu))
         return jobs
 
-    def exp(self, trials, trial_store, collectors=None, collect_hist=None,
+    def exp(self, trials, trial_store, collectors=None,
             n_jobs=1, gpu_id_list=None, logger=None):
         """Run *trials* against the Stage graph and invoke matching Collectors.
 
@@ -581,12 +602,11 @@ class Experimenter():
             trial_store (TrialStore): Where Trial definitions are registered
                 and fold outcomes are recorded — also what decides which
                 folds are skipped as already built (see :meth:`_make_jobs`).
-            collectors: :class:`~mllabs.Collectors` registry, a list of
-                Collector instances, or ``None`` to collect nothing.
-            collect_hist (CollectHist, optional): Where each Collector's
-                per-fold outcome is recorded. Defaults to the registry's own
-                ``hist`` when *collectors* is a registry; a bare list has none
-                unless one is named here.
+            collectors (list[str], optional): Names to collect with, out of
+                this run's own :attr:`collectors` registry. ``None`` (default)
+                uses every Collector registered there; ``[]`` collects nothing.
+                Outcomes go to that registry's ``hist`` — the history belongs
+                to the run, not to the selection made for one call.
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
             gpu_id_list (list, optional): GPU IDs to use for GPU-enabled trials.
             logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
@@ -602,8 +622,7 @@ class Experimenter():
         pipeline = self._require_pipeline()
         pipeline.check_data_compatibility(self.data)
 
-        collectors, registry_hist = _resolve_collectors(collectors)
-        collect_hist = collect_hist if collect_hist is not None else registry_hist
+        collectors = self._resolve_collectors(collectors)
         jobs = self._make_jobs(trials, trial_store)
         if not jobs:
             logger.info("No trials to run")
@@ -618,7 +637,7 @@ class Experimenter():
         tracker = TrialHistTracker(
             LoggerExecuteTracker(len(jobs), n_jobs, logger),
             trial_store, self.name, self.pipeline_version,
-            collect_hist=collect_hist,
+            collect_hist=self.collectors.hist,
         )
 
         try:
@@ -640,6 +659,27 @@ class Experimenter():
                         f"{len(errors)} error(s): {error_names}")
         else:
             logger.info(f"Exp complete: {len(jobs)} job(s)")
+
+    def _resolve_collectors(self, names):
+        """Collector instances for *names*, out of this run's own registry.
+
+        Names rather than instances, for the same reason ``processor`` and
+        ``adapter`` are string refs: a Collector this registry does not know
+        has no place in this run to write to, and would quietly deposit its
+        results outside the run — which is exactly what a per-run registry
+        exists to prevent. ``Collectors.resolve`` raises on an unknown name,
+        so a typo is not a silent "collected nothing" either.
+        """
+        if names is not None:
+            bad = [n for n in names if not isinstance(n, str)]
+            if bad:
+                raise TypeError(
+                    f"exp(collectors=): expected Collector names registered on "
+                    f"this Experimenter, got {[type(b).__name__ for b in bad]}. "
+                    f"Register with e.collectors.set_collector(name, ...) and "
+                    f"pass the name."
+                )
+        return self.collectors.resolve(names)
 
     def _make_jobs(self, trials, trial_store):
         """Expand ``(Trial, outer, inner)`` entries into runnable Jobs.

@@ -14,10 +14,11 @@ Everything else is reached from it:
 
 ```python
 project.pipeline_builder('main')       # a PipelineBuilder under pipelines/main/
-project.collectors()                   # the Collector registry
 project.trials                         # the project-wide TrialStore
 project.list_experimenters()           # names only
 ```
+
+Collectors are not among them — a registry belongs to the run that writes into it, as `e.collectors`. See [Collectors](collectors.md).
 
 A project can hold several pipelines, each keyed by name with its own version counter. `'pipeline'` is the default name.
 

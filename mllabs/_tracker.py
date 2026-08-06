@@ -145,10 +145,10 @@ class TrialHistTracker(ExecuteTracker):
     already built, and duplicates work the tracker has done anyway.
 
     Collect outcomes ride along here rather than in a third wrapper: they are
-    keyed by the same ``experimenter`` and stamped with the same
-    ``pipeline_version`` this class already holds, and they arrive on the same
-    parent-process event stream for the same reason (``_run_collectors`` runs
-    in the worker, so only the parent sees every fold's outcome).
+    stamped with the same ``pipeline_version`` this class already holds, and
+    they arrive on the same parent-process event stream for the same reason
+    (``_run_collectors`` runs in the worker, so only the parent sees every
+    fold's outcome).
 
     Args:
         tracker (ExecuteTracker): The display/logging tracker to delegate to.
@@ -156,8 +156,8 @@ class TrialHistTracker(ExecuteTracker):
         experimenter (str): Experimenter name — half of the history key.
         pipeline_version (int): The Experimenter's ``pipeline_version`` for the run.
         collect_hist (CollectHist, optional): Where Collector outcomes are
-            written. ``None`` records nothing — a Collector list passed without
-            a registry has nowhere project-global to write.
+            written — the running Experimenter's own. ``None`` records nothing,
+            which is what a registry with no path (memory-only) leaves.
     """
 
     def __init__(self, tracker, store, experimenter, pipeline_version, collect_hist=None):
@@ -202,8 +202,7 @@ class TrialHistTracker(ExecuteTracker):
         if self._collect_hist is not None:
             for outcome in outcomes:
                 self._collect_hist.record(
-                    outcome['collector'], self._experimenter, node_name,
-                    outer_idx, inner_idx,
+                    outcome['collector'], node_name, outer_idx, inner_idx,
                     pipeline_version=self._pipeline_version,
                     status=outcome['status'], elapsed=outcome.get('elapsed'),
                     info=outcome.get('info'),
