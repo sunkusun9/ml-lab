@@ -22,6 +22,16 @@ class DataFlow:
     so both are needed on every call into it. Transforms source data through
     the stage graph given edges. No build functionality.
 
+    Nothing is read from the store until something asks for it. Constructing
+    a flow is free, which matters because a run constructs one per fold up
+    front: opening a built run used to materialise every fold's processors
+    before the caller had asked for anything.
+
+    ``node_objs`` is a cache of ``obj.pkl``, not a place anything lives. The
+    store is the only source, so dropping an entry is always safe and there is
+    nothing to publish into: a build writes its artifact and whoever reads it
+    next takes it off disk.
+
     Args:
         store (NodeStore): This run's artifact+history store (shared across
             every fold of the run — see :class:`TrainDataFlow`).
@@ -32,38 +42,66 @@ class DataFlow:
         self.store = store
         self.outer_idx = outer_idx
         self.inner_idx = inner_idx
-        self.node_objs = {}    # {name: (obj, result)}
+        self.node_objs = {}    # {name: obj} — cache of this fold's obj.pkl
         self._node_edges = {}  # {name: edges dict}
-        self.load()
+        self._fold_info = None
 
-    def load_objs(self, node_name, edges=None):
-        obj, result = self.store.get_objs(node_name, self.outer_idx, self.inner_idx)
-        self.node_objs[node_name] = (obj, result)
+    def _fold_edges(self, node_name):
+        """The ``edges`` recorded for *node_name* in this fold, or ``None``.
+
+        Neither ``obj.pkl`` nor ``result.pkl`` carries edges, so they come from
+        the store's history. One query covers the whole fold and touches no
+        artifact, so unlike the pickles it is cheap enough to keep.
+
+        A miss re-queries rather than answering ``None`` from a stale read: a
+        flow constructed before a node was built holds a fold snapshot without
+        it, and that flow is the one the build then hands work to.
+        """
+        if self._fold_info is None or node_name not in self._fold_info:
+            self._fold_info = self.store.get_fold_info(self.outer_idx, self.inner_idx)
+        info = self._fold_info.get(node_name)
+        return info.get('edges') if info else None
+
+    def load_obj(self, node_name, edges=None):
+        """Read *node_name*'s processor out of the store and cache it here."""
+        obj = self.store.get_obj(node_name, self.outer_idx, self.inner_idx)
+        self.node_objs[node_name] = obj
+        if edges is None:
+            edges = self._fold_edges(node_name)
         if edges is not None:
             self._node_edges[node_name] = edges
-        return obj, result
+        return obj
 
-    def load(self):
-        """Load this fold's processors, recovering each one's ``edges`` via
-        the store's history (``node_hist``) — the artifact itself
-        (obj.pkl/result.pkl) carries neither anymore.
+    def _processor(self, node_name):
+        """This fold's fitted processor for *node_name*, read on first use.
 
-        A node with no matching history row is left unloaded rather than
-        guessed at either way.
+        Only Pipeline nodes are ever here to read. A Trial persists nothing at
+        all, and a Trainer's Predictors go to a store of their own — so neither
+        leaves an artifact in the store this flow reads, and no fitted model
+        comes into memory from either. A caller holding one from elsewhere
+        (:meth:`Trainer.process`) puts it in ``node_objs`` itself, which is
+        consulted before the store.
 
-        Only Pipeline nodes are ever here to load. A Trial persists nothing
-        at all, and a Trainer's Predictors go to a store of their own — so
-        neither leaves an artifact in the store this flow reads, and no
-        fitted model comes into memory from either.
+        Raises:
+            KeyError: If the node has no artifact in this fold, or one with no
+                history row to recover its edges from. Loudly, because the
+                alternative is a segment that contributes no columns and says
+                nothing about it.
         """
-        fold_info = self.store.get_fold_info(self.outer_idx, self.inner_idx)
-        for name in self.store.list_nodes(self.outer_idx, self.inner_idx):
-            if self.store.status(name, self.outer_idx, self.inner_idx) != 'built':
-                continue
-            info = fold_info.get(name)
-            if info is None:
-                continue
-            self.load_objs(name, edges=info.get('edges'))
+        if node_name in self.node_objs:
+            return self.node_objs[node_name]
+        if self.store.status(node_name, self.outer_idx, self.inner_idx) != 'built':
+            raise KeyError(
+                f"node '{node_name}' is not built in fold "
+                f"({self.outer_idx}, {self.inner_idx})"
+            )
+        obj = self.load_obj(node_name)
+        if node_name not in self._node_edges:
+            raise KeyError(
+                f"node '{node_name}' has an artifact in fold "
+                f"({self.outer_idx}, {self.inner_idx}) but no recorded edges"
+            )
+        return obj
 
     def get_data(self, source_data, edges):
         """Transform source_data through stage nodes per edges.
@@ -82,8 +120,7 @@ class DataFlow:
                 data = self._resolve(source_data, node_name)
                 if data is None:
                     continue
-                obj = self.node_objs[node_name][0] if node_name in self.node_objs else None
-                cols = eval_expr(expr, data, processor=obj)
+                cols = eval_expr(expr, data, processor=self.node_objs.get(node_name))
                 data = data.select_columns(cols)
                 parts.append(data)
             if parts:
@@ -110,11 +147,8 @@ class DataFlow:
             return None
         if node_name is None:
             return source_data
-        if node_name not in self.node_objs or node_name not in self._node_edges:
-            return None
-        obj, result = self.node_objs[node_name]
-        edges = self._node_edges[node_name]
-        return obj.process(self.get_data(source_data, edges))
+        obj = self._processor(node_name)
+        return obj.process(self.get_data(source_data, self._node_edges[node_name]))
 
     # -------------------------------------------------------------------------
     # NodeStore delegation — thin, so callers keep treating a flow like a
@@ -144,6 +178,8 @@ class DataFlow:
         self.store.reset_node(name, self.outer_idx, self.inner_idx)
         self.node_objs.pop(name, None)
         self._node_edges.pop(name, None)
+        if self._fold_info is not None:
+            self._fold_info.pop(name, None)
 
 
 class TrainDataFlow(DataFlow):
@@ -175,11 +211,6 @@ class TrainDataFlow(DataFlow):
         self.scope = uuid.uuid4().hex
         super().__init__(store, outer_idx=outer_idx, inner_idx=inner_idx)
 
-    def set_objs(self, node_name, obj, result, info):
-        self.node_objs[node_name] = (obj, result)
-        if info.get('edges') is not None:
-            self._node_edges[node_name] = info['edges']
-
     def get_train(self, edges):
         """{key: data} train output resolved via edges."""
         return self._get_data_typ(edges, 'train')
@@ -205,10 +236,13 @@ class TrainDataFlow(DataFlow):
         for key, dsl_string in edges.items():
             parts = []
             for node_name, expr in iter_segments(dsl_string):
+                # Ahead of the resolve: a cache hit returns the output without
+                # touching the store, but the column selectors still need the
+                # processor, and an unbuilt node still has to fail here.
+                obj = None if node_name is None else self._processor(node_name)
                 data = self._resolve_typ(node_name, typ)
                 if data is None:
                     continue
-                obj = self.node_objs[node_name][0] if node_name in self.node_objs else None
                 cols = eval_expr(expr, data, processor=obj)
                 data = data.select_columns(cols)
                 parts.append(data)
@@ -217,23 +251,40 @@ class TrainDataFlow(DataFlow):
         return result
     
     def _resolve_typ(self, node_name, typ):
-        """Returns data for node_name via cache check → process. Used for valid and test."""
+        """This fold's *typ* output for *node_name*, via the cache.
+
+        All three outputs go through the one cache now, so all three are under
+        its budget. They are recovered differently, though, and the difference
+        is not incidental:
+
+        - valid/test are *recomputed* — ``obj.process`` on that split.
+        - train is *re-read* from ``result.pkl`` whenever one was stored. It
+          has to be. That output is what ``fit_process`` returned, and for a
+          cross-fitting node it is not what ``process`` returns for the same
+          rows: ``CrossFitTransformer`` yields out-of-fold predictions while
+          fitting and full-model predictions afterwards. Recomputing would
+          hand downstream nodes different numbers without saying so.
+
+        A node whose method is plain ``fit`` produced no fit-time output, so
+        ``result.pkl`` holds ``None`` and ``process`` *is* the definition of
+        its train output — the one case where recomputing is the right answer
+        rather than a substitute for a lost one.
+        """
         if node_name is None:
             if typ == 'train':
                 return self.data_source.get_train()
             else:
                 return self.data_source.get_valid()
-        if typ == 'train':
-            obj, result = self.node_objs[node_name]
-            if result is not None:
-                return result
         if self.cache is not None:
             cached = self.cache.get_data(self.scope, node_name, typ)
             if cached is not None:
                 return cached
-        data_out = super()._resolve(
-            self.data_source.get_train() if typ == 'train' else self.data_source.get_valid(), node_name
-        )
+        if typ == 'train':
+            data_out = self.store.get_result(node_name, self.outer_idx, self.inner_idx)
+            if data_out is None:
+                data_out = super()._resolve(self.data_source.get_train(), node_name)
+        else:
+            data_out = super()._resolve(self.data_source.get_valid(), node_name)
         if self.cache is not None:
             self.cache.put_data(self.scope, node_name, typ, data_out)
         return data_out

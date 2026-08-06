@@ -387,17 +387,20 @@ class TestPredictorStorage:
             assert trainer.node_store.status('scaler', fold.split_idx, 0) == 'built'
 
     def test_predictor_is_not_loaded_into_the_flow(self, pipeline, sample_data, sp_v):
-        """Its history is in the other store, so flow.load() never sees a row
-        for it — which is what keeps the fitted model out of memory."""
+        """Its artifact is in the other store, so the node flow's lazy load
+        can't reach it — which is what keeps the fitted model out of memory.
+        Resolving the nodes it was trained on doesn't drag it in either."""
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
         trainer.train(_predictors())
 
         flow = trainer.train_folds[0].train_data_flows[0]
         flow.node_objs.clear()
-        flow.load()
+        flow.get_train({'X': 'scaler:(*)'})
         assert 'scaler' in flow.node_objs
         assert 'dt' not in flow.node_objs
+        with pytest.raises(KeyError):
+            flow._processor('dt')
 
     def test_definitions_are_persisted(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)

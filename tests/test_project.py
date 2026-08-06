@@ -838,8 +838,7 @@ class TestTrainerUnderProject:
 
         loaded = project.load_trainer('trainer_reload', wrap(sample_data))
         flow = loaded.train_folds[0].train_data_flows[0]
-        assert 's1' in flow.node_objs
-        assert 's2' in flow.node_objs
+        assert flow.node_objs == {}
 
         # The selection comes back from PredictorStore, so nothing needs
         # re-supplying and nothing is reset by reopening.
@@ -851,6 +850,8 @@ class TestTrainerUnderProject:
         # routes data through s1 -> s2, not just that obj.pkl happened to load.
         train_data = flow.get_train({'X': 's2:(*)', 'y': '{target}'})
         assert train_data['X'].get_shape()[0] > 0
+        assert 's1' in flow.node_objs
+        assert 's2' in flow.node_objs
 
     def test_trainer_reopens_without_a_project(self, project, sample_data):
         """Trainer.load_trainer() reads the Pipeline the Trainer itself saved

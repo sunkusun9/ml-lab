@@ -401,16 +401,17 @@ def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None
     says so and nothing is persisted.
 
     *chained* says these jobs feed each other through ``job.flow`` — true
-    only for Pipeline nodes. It turns on both halves of that: completed
-    obj/result are published into the flow (``set_objs``) for later jobs to
-    read, and a job waits until everything its edges reference is built
-    (``get_missing_nodes``). Leaf jobs (Trials, Predictors) get neither.
-    Gating the wait matters: a leaf whose node never built must raise a
-    ``KeyError`` from ``TrainDataFlow._resolve_typ``, caught and recorded as
-    a prep error — under the gate it would instead vanish silently, never
-    dispatched and never an error. Skipping ``set_objs`` matters too: a leaf
-    is read by no one, so publishing it would only pin its fitted model in
-    flow memory for the rest of the run.
+    only for Pipeline nodes. A job then waits until everything its edges
+    reference is built (``get_missing_nodes``). Leaf jobs (Trials,
+    Predictors) don't: a leaf whose node never built must raise a
+    ``KeyError`` out of the flow, caught and recorded as a prep error — under
+    the gate it would instead vanish silently, never dispatched and never an
+    error.
+
+    Nothing is handed to the flow after a job finishes. The artifact on disk
+    is what the next job reads, and the flow loads it when asked. That makes
+    ``store.stores_artifacts`` load-bearing wherever *chained* is set — which
+    holds, since chained means Pipeline nodes and those go to a ``NodeStore``.
 
     *collectors* is separate, and only about Collectors: ``None`` skips
     ``ext_data`` prep and matching entirely (nodes never have Collectors), a
@@ -471,8 +472,6 @@ def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None
 
             if store.stores_artifacts:
                 store.write_objs(node_name, outer_idx, inner_idx, obj, result)
-            if chained:
-                job.flow.set_objs(node_name, obj, result, info)
             done.add((outer_idx, inner_idx, node_name))
             if tracker:
                 tracker.done(0, node_name, outer_idx, inner_idx, info)
@@ -509,6 +508,11 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
     would make one whose node never built vanish silently instead of being
     recorded as a prep error.
 
+    A finished job's artifact is never read back here. The parent only
+    orchestrates; reading each worker's obj/result to hand to the flow made it
+    accumulate every fitted model and every intermediate output in the run,
+    for the sake of a load the next job can do itself.
+
     Worker assignment prefers matching type: a free worker of the "wrong"
     type is handed to a ready job only when nothing of its own type is
     waiting. Because readiness is a fresh snapshot per cycle, a job
@@ -531,8 +535,8 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
     recorded too, so the caller's ``len(jobs) - len(errors)`` still counts.
 
     Shutdown is in a ``finally`` for the same reason: the loop has several ways
-    out that are not the normal one (a store read, a history write, a tracker
-    call), and any of them reaching the end of the function was what decided
+    out that are not the normal one (a history write, a Collector push, a
+    tracker call), and any of them reaching the end of the function decided
     whether the pool got cleaned up.
 
     Returns ``{(outer_idx, inner_idx, name): error_info}``, same shape and
@@ -684,15 +688,6 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
 
                 if msg_type == 'done':
                     info = data[0]
-                    if chained:
-                        # Read back through *store*, not job.flow's own: the
-                        # worker wrote where this call was told to write. The
-                        # two coincide here (a chained job is a node, whose
-                        # flow reads the very store it was written to), but
-                        # naming the store keeps that an assumption this line
-                        # states rather than one it relies on.
-                        obj, result = store.get_objs(node_name, outer_idx, inner_idx)
-                        job.flow.set_objs(node_name, obj, result, {'edges': job.spec.edges})
                     done.add((outer_idx, inner_idx, node_name))
                     del busy[conn]
                     (free_gpu if worker_idx < n_gpu else free_cpu).append(worker_idx)
@@ -744,7 +739,7 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
         if not all_conns:
             for job in jobs:
                 key = (job.outer_idx, job.inner_idx, job.name)
-                if key in errors or job.name in job.flow.node_objs:
+                if key in errors or key in done:
                     continue
                 errors[key] = _worker_lost_info(job.spec.edges, 'no worker left to run it')
                 if tracker:

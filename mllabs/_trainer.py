@@ -517,11 +517,12 @@ class Trainer:
 
             if predictor_jobs:
                 # A Predictor is a leaf: it reads the node flow but nothing
-                # reads it, so these run unchained — no dependency gate (a
-                # Predictor whose node never built must surface as a prep
-                # error, not vanish) and no set_objs (its model belongs in
-                # predictor_store, not pinned in the node flow's memory).
-                # No Collectors either, a Trainer isn't an Experimenter.
+                # reads it, so these run unchained — no dependency gate, since
+                # a Predictor whose node never built must surface as a prep
+                # error rather than vanish. Its artifact goes to
+                # predictor_store, which the node flow's lazy load never
+                # reaches. No Collectors either, a Trainer isn't an
+                # Experimenter.
                 if n_jobs > 1:
                     predictor_errors = _execute_multi(
                         predictor_jobs, n_jobs, self.predictor_store, gpu_id_list=gpu_id_list,
@@ -565,16 +566,15 @@ class Trainer:
         predictor_edges = {p.name: p.edges for p in self.predictors}
         for fold in self.train_folds:
             flow = fold.train_data_flows[0]
-            flow.load()
             outputs = []
             for name in self.predictor_names():
                 if name not in flow.node_objs:
-                    # Predictor models live in their own store, so flow.load()
-                    # never pulls them in (which is what keeps them out of
-                    # memory) — fetch on demand.
+                    # A Predictor's model is in a store of its own, so the
+                    # flow's own lazy load would never find it — put it in
+                    # node_objs directly, which is consulted before the store.
                     if self.predictor_store.status(name, fold.split_idx, 0) != 'built':
                         continue
-                    flow.node_objs[name] = self.predictor_store.get_objs(
+                    flow.node_objs[name] = self.predictor_store.get_obj(
                         name, fold.split_idx, 0)
                 # _resolve needs the edges too, and neither the artifact nor
                 # this flow's history carries a Predictor's — the definition
@@ -584,8 +584,7 @@ class Trainer:
                 if output is None:
                     continue
                 if v is not None:
-                    obj = flow.node_objs[name][0]
-                    cols = eval_expr(parse(v), output, processor=obj)
+                    cols = eval_expr(parse(v), output, processor=flow.node_objs[name])
                     output = output.select_columns(cols)
                 outputs.append(output)
             if not outputs:
