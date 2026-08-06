@@ -14,6 +14,7 @@ from pathlib import Path
 from ._cache import DataCache
 from ._trial_store import TrialStore
 from ._project_store import ProjectStore
+from ._run_common import format_errors
 from .collector import Collectors
 
 
@@ -95,7 +96,8 @@ class Project:
         for the new run to adopt.
         """
         from ._experimenter import Experimenter
-        exp = Experimenter(self.exp_path(name), name, data, cache=self.cache, **kwargs)
+        exp = Experimenter(self.exp_path(name), name, data, cache=self.cache,
+                           trial_store=self.trials, **kwargs)
         self.store.register_experimenter(name)
         if pipeline_version is not None:
             exp.set_pipeline(self.load_pipeline(pipeline_name, pipeline_version),
@@ -122,7 +124,7 @@ class Project:
         from ._experimenter import Experimenter
         return Experimenter.load_experimenter(
             self.exp_path(name), data, data_key=data_key,
-            aug_data=aug_data, cache=self.cache,
+            aug_data=aug_data, cache=self.cache, trial_store=self.trials,
         )
 
     def trainer(self, name, data, pipeline_name='pipeline', pipeline_version=None, **kwargs):
@@ -156,6 +158,110 @@ class Project:
     def list_trainers(self):
         """Names of every Trainer created through this project."""
         return self.store.list_trainers()
+
+    def set_trial(self, trial):
+        """Add or update one Trial definition. Returns its name if anything changed.
+
+        Authoring a Trial is a project-level act, separate from running one.
+        Registration used to be a side effect of ``Experimenter.exp()``, which
+        meant a Trial could not enter the project without being executed, and
+        that one run could redefine a name another run had already used.
+
+        A name that already has a **successful** run behind it is frozen. The
+        history is keyed by name, and a Trial leaves no artifact, so a
+        redefinition would silently attach the old results to a definition
+        that never produced them — the rows would look like one Trial's record
+        and be two. Changing such a Trial means either a new name, or
+        :meth:`remove_trial` to give up the results with it.
+
+        Args:
+            trial (Trial): Definition to store.
+
+        Returns:
+            str | None: *trial*'s name if it was added or changed, ``None`` if
+            the stored definition already matched — so the return value is the
+            work list for the next ``exp()``.
+
+        Raises:
+            ValueError: If the name has a ``'built'`` fold in
+                ``experiment_hist`` and the definition differs from the
+                stored one.
+        """
+        changed = self.set_trials([trial])
+        return changed[0] if changed else None
+
+    def set_trials(self, trials):
+        """:meth:`set_trial` for many. Returns the names that were added or changed.
+
+        Nothing is written until every Trial has been checked, so a batch
+        holding one frozen name changes nothing at all rather than leaving
+        half of itself registered.
+        """
+        changed = [t for t in trials if not self.trials.has(t)]
+        for trial in changed:
+            built = self.trials.get_hist(trial_name=trial.name, status='built')
+            if built:
+                runs = sorted({r['experimenter'] for r in built})
+                raise ValueError(
+                    f"Trial '{trial.name}' already ran successfully in {runs} and "
+                    f"cannot be redefined — its history would then describe a "
+                    f"definition that never produced it. Use a new name, or "
+                    f"project.remove_trial({trial.name!r}) to drop the results too."
+                )
+        self.trials.register_all(changed)
+        return [t.name for t in changed]
+
+    def show_error_trials(self, experimenter=None, traceback=False):
+        """Errors from Trial runs, one line per failed fold.
+
+        The Trial counterpart of ``Experimenter.show_error_nodes``, and it
+        lives here for the same reason that one lives on the run: a failure is
+        reported by whoever owns the history it is recorded in. Node history
+        is the run's; Trial history is the project's, keyed by experimenter.
+
+        Args:
+            experimenter (str, optional): Report only this run's failures.
+                ``None`` reports every run's.
+            traceback (bool): Include full traceback in output.
+
+        Returns:
+            list[str] | None: One line per failed fold, or ``None`` if clean.
+        """
+        rows = [
+            (r['trial_name'], r['outer_idx'], r['inner_idx'], r['info'])
+            for r in self.trials.get_hist(experimenter=experimenter, status='error')
+        ]
+        return format_errors(rows, traceback)
+
+    def pending_trials(self, experimenter=None):
+        """Registered Trials that errored or have not run.
+
+        The work list: a Trial with an ``'error'`` fold, and one with no
+        history at all, both still owe a run and are indistinguishable in what
+        they need. Written by hand this filter tends to catch only the second
+        — the notebook's version did, so an errored Trial silently dropped out
+        of the list of things left to do.
+
+        Deliberately coarse: a Trial whose run was interrupted partway through
+        the folds is *not* reported, because deciding that means comparing
+        history against a fold grid this store does not know. Running the
+        returned names is safe either way — ``exp()`` skips the folds that
+        are done.
+
+        Args:
+            experimenter (str, optional): Judge against this run's history.
+                ``None`` asks whether a Trial ran anywhere in the project.
+
+        Returns:
+            list[str]: Trial names, in registration order.
+        """
+        pending = []
+        for trial in self.trials.list_trials():
+            rows = self.trials.get_hist(trial_name=trial.name,
+                                        experimenter=experimenter)
+            if not rows or any(r['status'] == 'error' for r in rows):
+                pending.append(trial.name)
+        return pending
 
     def remove_trial(self, name, experimenters=None):
         """Drop *name* from the project — definition, history and collected data.

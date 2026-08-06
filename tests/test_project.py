@@ -143,6 +143,71 @@ class TestPipelineVersions:
         assert [r['version'] for r in project.list_pipeline_versions('main')] == [1, 2]
 
 
+class TestSetTrial:
+    """Authoring a Trial is a project-level act, separate from running one.
+
+    Registration used to be a side effect of Experimenter.exp(), so a Trial
+    could not enter the project without being executed, and a rerun could
+    redefine a name whose history described the old definition."""
+
+    def test_adding_returns_the_name(self, project):
+        assert project.set_trial(_trial()) == 'dt'
+        assert project.trials.get_by_name('dt') is not None
+
+    def test_an_unchanged_definition_returns_none(self, project):
+        project.set_trial(_trial())
+        assert project.set_trial(_trial()) is None
+
+    def test_changing_an_unrun_trial_is_allowed(self, project):
+        project.set_trial(_trial(params={'max_depth': 3}))
+        assert project.set_trial(_trial(params={'max_depth': 5})) == 'dt'
+        assert project.trials.get_by_name('dt').params == {'max_depth': 5}
+
+    def test_a_trial_with_a_successful_run_is_frozen(self, project):
+        project.set_trial(_trial(params={'max_depth': 3}))
+        project.trials.record('dt', 'run_a', 0, 0, status='built')
+        with pytest.raises(ValueError, match='run_a'):
+            project.set_trial(_trial(params={'max_depth': 5}))
+        assert project.trials.get_by_name('dt').params == {'max_depth': 3}
+
+    def test_resetting_the_same_definition_stays_allowed(self, project):
+        """The guard is about the definition changing, not about touching it."""
+        project.set_trial(_trial())
+        project.trials.record('dt', 'run_a', 0, 0, status='built')
+        assert project.set_trial(_trial()) is None
+
+    def test_a_failed_run_does_not_freeze_it(self, project):
+        """Only a success is a result worth protecting; an error leaves nothing
+        the history would misdescribe."""
+        project.set_trial(_trial(params={'max_depth': 3}))
+        project.trials.record('dt', 'run_a', 0, 0, status='error')
+        assert project.set_trial(_trial(params={'max_depth': 5})) == 'dt'
+
+    def test_removing_it_lifts_the_freeze(self, project):
+        project.set_trial(_trial(params={'max_depth': 3}))
+        project.trials.record('dt', 'run_a', 0, 0, status='built')
+        project.remove_trial('dt')
+        assert project.set_trial(_trial(params={'max_depth': 5})) == 'dt'
+
+    def test_set_trials_returns_only_what_changed(self, project):
+        trials = make_trials('dt', processor=TREE, edges=EDGES,
+                             param_grid={'max_depth': [3, 5]})
+        assert project.set_trials(trials) == ['dt_0', 'dt_1']
+        assert project.set_trials(trials) == []
+
+    def test_a_frozen_name_leaves_the_whole_batch_unwritten(self, project):
+        """Checked before anything is written, so a batch does not land half
+        registered — the returned work list would then be a lie."""
+        project.set_trial(_trial('dt_0', params={'max_depth': 3}))
+        project.trials.record('dt_0', 'run_a', 0, 0, status='built')
+        trials = make_trials('dt', processor=TREE, edges=EDGES,
+                             param_grid={'max_depth': [9, 11]})
+        with pytest.raises(ValueError, match='dt_0'):
+            project.set_trials(trials)
+        assert project.trials.get_by_name('dt_1') is None
+        assert project.trials.get_by_name('dt_0').params == {'max_depth': 3}
+
+
 class TestTrialRegistration:
     def test_same_definition_registers_once(self, store):
         store.register(_trial())
@@ -154,9 +219,9 @@ class TestTrialRegistration:
         exactly like redefining a Trial overwrites its on-disk artifact."""
         store.register(_trial(params={'max_depth': 3}))
         store.register(_trial(params={'max_depth': 5}))
-        rows = [t for t in store.list_trials() if t['name'] == 'dt']
+        rows = [t for t in store.list_trials() if t.name == 'dt']
         assert len(rows) == 1
-        assert rows[0]['params'] == {'max_depth': 5}
+        assert rows[0].params == {'max_depth': 5}
 
     def test_name_does_not_split_identity(self, store):
         """Two Trials with an otherwise-identical definition but different
@@ -171,7 +236,7 @@ class TestTrialRegistration:
         trials = make_trials('dt', processor=TREE, edges=EDGES,
                              param_grid={'max_depth': [3, 5]})
         store.register_all(trials)
-        assert {t['name'] for t in store.list_trials()} == {'dt_0', 'dt_1'}
+        assert {t.name for t in store.list_trials()} == {'dt_0', 'dt_1'}
 
     def test_has_before_and_after(self, store):
         assert not store.has(_trial())
@@ -192,9 +257,9 @@ class TestTrialRegistration:
     def test_get_by_name_roundtrip(self, store):
         store.register(_trial(params={'max_depth': 7}))
         got = store.get_by_name('dt')
-        assert got['processor'] == TREE
-        assert got['params'] == {'max_depth': 7}
-        assert got['edges'] == EDGES
+        assert got.processor == TREE
+        assert got.params == {'max_depth': 7}
+        assert got.edges == EDGES
 
     def test_get_by_name_unknown(self, store):
         assert store.get_by_name('nope') is None
@@ -273,7 +338,7 @@ class TestProjectEndToEnd:
 
         row = project.trials.get_hist(trial_name='dt')[0]
         assert row['pipeline_version'] == built.version
-        assert project.trials.get_by_name('dt')['processor'] == TREE
+        assert project.trials.get_by_name('dt').processor == TREE
 
 
 @pytest.fixture
@@ -456,7 +521,8 @@ class TestExperimenterUnderProject:
         e.build()
         trial = make_trials('dt', processor=TREE, edges=EDGES,
                              params={'max_depth': 3, 'random_state': 0})[0]
-        e.exp([(trial, 0, 0), (trial, 1, 0)], project.trials)
+        assert project.set_trial(trial) == 'dt'
+        e.exp(['dt'])
         assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built', (1, 0): 'built'}
 
         # history is keyed by the two names, matching the layout on disk
@@ -469,25 +535,27 @@ class TestExperimenterUnderProject:
         artifact — a fold recorded 'built' there is skipped without dispatch."""
         e = self._exp(project, builder, sample_data)
         e.build()
-        trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0})
-        e.exp([(trial, 0, 0)], project.trials)
+        project.set_trial(Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0}))
+        e.exp(['dt'])
         build_id_1 = project.trials.get_info('dt', 'run_a')[(0, 0)]['build_id']
 
-        e.exp([(trial, 0, 0)], project.trials)
+        e.exp(['dt'])
         build_id_2 = project.trials.get_info('dt', 'run_a')[(0, 0)]['build_id']
         assert build_id_2 == build_id_1
 
     def test_redefined_trial_with_built_hist_is_not_rerun(self, project, builder, sample_data):
-        """Redefining a Trial no longer forces a rerun of folds the hist
-        already marks 'built' — rerunning is an explicit action now."""
+        """A fold the hist marks 'built' is skipped whatever the definition now
+        says. set_trial refuses such a redefinition, so this goes through the
+        store directly — the skip rule has to hold on its own, since it is what
+        makes the freeze necessary rather than merely tidy."""
         e = self._exp(project, builder, sample_data)
         e.build()
-        trial_v1 = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0})
-        e.exp([(trial_v1, 0, 0)], project.trials)
+        project.set_trial(Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0}))
+        e.exp(['dt'])
         build_id_1 = project.trials.get_info('dt', 'run_a')[(0, 0)]['build_id']
 
-        trial_v2 = Trial('dt', TREE, EDGES, params={'max_depth': 5, 'random_state': 0})
-        e.exp([(trial_v2, 0, 0)], project.trials)
+        project.trials.register(Trial('dt', TREE, EDGES, params={'max_depth': 5, 'random_state': 0}))
+        e.exp(['dt'])
         build_id_2 = project.trials.get_info('dt', 'run_a')[(0, 0)]['build_id']
         assert build_id_2 == build_id_1
 
@@ -497,12 +565,12 @@ class TestExperimenterUnderProject:
         Trial's error status/detail is recorded now."""
         e = self._exp(project, builder, sample_data)
         e.build()
-        bad_trial = Trial('bad', 'mock.BadPredictor', EDGES)
-        e.exp([(bad_trial, 0, 0)], project.trials)
+        project.set_trial(Trial('bad', 'mock.BadPredictor', EDGES))
+        e.exp(['bad'])
         assert project.trials.get_status('bad', 'run_a')[(0, 0)] == 'error'
         build_id_1 = project.trials.get_info('bad', 'run_a')[(0, 0)]['build_id']
 
-        e.exp([(bad_trial, 0, 0)], project.trials)
+        e.exp(['bad'])
         assert project.trials.get_status('bad', 'run_a')[(0, 0)] == 'error'
         build_id_2 = project.trials.get_info('bad', 'run_a')[(0, 0)]['build_id']
         assert build_id_2 != build_id_1
@@ -515,11 +583,96 @@ class TestExperimenterUnderProject:
         the 'done' and 'error' worker messages are covered."""
         e = self._exp(project, builder, sample_data)
         e.build()
-        trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0})
-        bad_trial = Trial('bad', 'mock.BadPredictor', EDGES)
-        e.exp([(trial, 0, 0), (trial, 1, 0), (bad_trial, 0, 0)], project.trials, n_jobs=2)
+        project.set_trials([
+            Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0}),
+            Trial('bad', 'mock.BadPredictor', EDGES),
+        ])
+        e.exp(['dt', 'bad'], n_jobs=2)
         assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built', (1, 0): 'built'}
         assert project.trials.get_status('bad', 'run_a')[(0, 0)] == 'error'
+
+
+class TestTrialErrorReporting:
+    """Who reports a failure follows who owns the history it sits in: node
+    history is the run's (Experimenter.show_error_nodes), Trial history is the
+    project's, keyed by experimenter."""
+
+    def test_show_error_trials_reports_the_failed_fold(self, project):
+        project.trials.record('bad', 'run_a', 0, 1, status='error',
+                              info={'error': {'type': 'ValueError', 'message': 'boom',
+                                              'traceback': 'TB'}})
+        lines = project.show_error_trials()
+        assert len(lines) == 1
+        assert '[bad] fold 0_1' in lines[0] and 'ValueError: boom' in lines[0]
+        assert 'TB' not in lines[0]
+
+    def test_traceback_is_opt_in(self, project):
+        project.trials.record('bad', 'run_a', 0, 0, status='error',
+                              info={'error': {'type': 'ValueError', 'message': 'boom',
+                                              'traceback': 'TB'}})
+        assert 'TB' in project.show_error_trials(traceback=True)[0]
+
+    def test_nothing_failed_reads_as_none(self, project):
+        project.trials.record('dt', 'run_a', 0, 0, status='built')
+        assert project.show_error_trials() is None
+
+    def test_narrowed_to_one_run(self, project):
+        project.trials.record('bad', 'run_a', 0, 0, status='error')
+        project.trials.record('bad', 'run_b', 0, 0, status='built')
+        assert project.show_error_trials(experimenter='run_a')
+        assert project.show_error_trials(experimenter='run_b') is None
+
+    def test_node_errors_stay_out_of_it(self, project, builder, sample_data):
+        """show_error_nodes is Pipeline nodes only — the two halves used to
+        come back from one call, indistinguishable in the output."""
+        version = project.build_pipeline(builder).version
+        e = project.experimenter('run_a', sample_data, pipeline_name='main',
+                                 pipeline_version=version)
+        project.trials.record('bad', 'run_a', 0, 0, status='error')
+        assert e.show_error_nodes() is None
+
+
+class TestPendingTrials:
+    """Registered Trials that errored or never ran — one list, because both
+    still owe a run. Hand-written, this filter tends to catch only the second
+    (see the notebook it came from)."""
+
+    def test_a_never_run_trial_is_pending(self, project):
+        project.set_trial(_trial())
+        assert project.pending_trials() == ['dt']
+
+    def test_an_errored_trial_is_pending(self, project):
+        """The case a hand-written 'has no history' filter drops."""
+        project.set_trial(_trial())
+        project.trials.record('dt', 'run_a', 0, 0, status='error')
+        assert project.pending_trials() == ['dt']
+
+    def test_a_built_trial_is_not(self, project):
+        project.set_trial(_trial())
+        project.trials.record('dt', 'run_a', 0, 0, status='built')
+        assert project.pending_trials() == []
+
+    def test_scoped_to_one_run(self, project):
+        project.set_trial(_trial())
+        project.trials.record('dt', 'run_a', 0, 0, status='built')
+        assert project.pending_trials(experimenter='run_a') == []
+        assert project.pending_trials(experimenter='run_b') == ['dt']
+
+    def test_only_registered_trials_are_considered(self, project):
+        """History alone does not make a Trial — a removed definition is not
+        work still owed."""
+        project.trials.record('gone', 'run_a', 0, 0, status='error')
+        assert project.pending_trials() == []
+
+    def test_feeds_straight_into_exp(self, project, builder, sample_data):
+        version = project.build_pipeline(builder).version
+        e = project.experimenter('run_a', sample_data,
+                                 sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=0),
+                                 pipeline_name='main', pipeline_version=version)
+        e.build()
+        project.set_trial(_trial())
+        e.exp(project.pending_trials(experimenter='run_a'))
+        assert project.pending_trials(experimenter='run_a') == []
 
 
 class TestRemoveTrial:
@@ -538,8 +691,8 @@ class TestRemoveTrial:
         e.build()
         e.collectors.set_collector('acc', MetricCollector, Connector(),
                                    params={'output_var': None, 'metric_func': dummy_metric})
-        trial = _trial()
-        e.exp([(trial, 0, 0), (trial, 1, 0)], project.trials)
+        project.set_trial(_trial())
+        e.exp(['dt'])
         return e, e.collectors
 
     def test_store_remove_drops_the_definition_only(self, store):
@@ -569,8 +722,8 @@ class TestRemoveTrial:
 
     def test_leaves_other_trials_alone(self, project, builder, sample_data):
         e, collectors = self._run(project, builder, sample_data)
-        other = _trial('dt2')
-        e.exp([(other, 0, 0), (other, 1, 0)], project.trials)
+        project.set_trial(_trial('dt2'))
+        e.exp(['dt2'])
 
         project.remove_trial('dt')
 
@@ -605,10 +758,12 @@ class TestRemoveTrial:
         assert not acc.has_node('dt')
 
     def test_a_removed_trial_runs_again_from_scratch(self, project, builder, sample_data):
+        """Removal takes the definition too, so re-running means authoring it
+        again — which is also what lifts the redefinition freeze."""
         e, collectors = self._run(project, builder, sample_data)
         project.remove_trial('dt')
-        trial = _trial()
-        e.exp([(trial, 0, 0), (trial, 1, 0)], project.trials)
+        assert project.set_trial(_trial()) == 'dt'
+        e.exp(['dt'])
         assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built', (1, 0): 'built'}
 
 

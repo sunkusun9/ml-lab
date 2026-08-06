@@ -22,7 +22,7 @@ pip install ml-labs[all]         # All optional dependencies
 
 ## Key Features
 
-- **Project**: Owns the directory layout and what is project-wide — pipelines, Collectors, the Trial store, the shared cache
+- **Project**: Owns the directory layout and what is project-wide — pipelines, the Trial store, the shared cache
 - **PipelineBuilder → Pipeline**: A mutable builder producing an immutable node graph; definitions are declarations, resolved only at execution time
 - **Experimenter**: Evaluates **Trials** — candidate models — with nested cross-validation, caching and error resilience
 - **Trainer**: Trains **Predictors** — the candidates you chose — and exports a standalone `Inferencer`
@@ -33,7 +33,7 @@ pip install ml-labs[all]         # All optional dependencies
 ## Architecture Overview
 
 ```
-Project ─────────── directory layout + pipelines, Collectors, TrialStore, cache
+Project ─────────── directory layout + pipelines, TrialStore, cache
   │
   ├─ PipelineBuilder ──build()──► Pipeline    preprocessing nodes only
   │
@@ -83,7 +83,8 @@ trials = [Trial(f'lr_{c}', 'sklearn.linear_model.LogisticRegression',
                 params={'C': c})
           for c in (0.1, 1.0)]
 
-e.exp([(t, 0, 0) for t in trials], project.trials)
+names = project.set_trials(trials)
+e.exp(names)
 
 print(collectors.get_collector('acc').get_metrics_agg(None)[0])
 ```

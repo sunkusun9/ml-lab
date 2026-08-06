@@ -26,7 +26,7 @@ If an upstream node is in `error`, everything downstream fails without any expli
 | Call | |
 |---|---|
 | `build(nodes)` | `init → built` for Pipeline nodes |
-| `exp(trials, trial_store)` | `init → built` for Trials |
+| `exp(trial_names)` | `init → built` for Trials |
 | `train(predictors)` | `init → built` for nodes, then Predictors |
 | `reset_nodes(nodes)` | any → `init`, deleting the artifacts |
 
@@ -40,12 +40,13 @@ Being already `built` is what makes a run skip work, and that is decided from di
 - **Trials** — skipped when `TrialStore.experiment_hist` records that fold as `'built'`.
 - **Predictors** — skipped when the artifact exists in the Trainer's predictor store.
 
-The consequence is worth stating plainly: **redefining a Trial or Predictor does not re-run it.** A fold already marked `'built'` is silently skipped. To force it, remove the record and the artifact:
+The consequence is worth stating plainly: **a fold already marked `'built'` is silently skipped, whatever the definition says now.** For Trials this is why `Project.set_trial` refuses to redefine a name that has a successful run behind it — the history would otherwise describe results a definition never produced. Running one again is explicit:
 
 ```python
-project.trials.remove_hist(trial_name='lgb', experimenter=e.name)
-e.reset_nodes(['lgb'])
+e.remove_trial_result('lgb')      # this run's results and its history
 ```
+
+For Predictors, which have no such guard, remove the artifact with `reset_nodes`.
 
 ## Staleness — comparing two Pipelines
 

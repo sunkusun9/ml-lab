@@ -90,8 +90,14 @@ def _dt(name='dt', edges=None):
 
 
 def _folds(trial, exp):
-    """(trial, outer_idx, inner_idx) for every fold of *exp* — what Experimenter.exp expects."""
-    return [(trial, o, i) for o in range(exp.get_n_splits()) for i in range(exp.get_n_splits_inner())]
+    """Register *trial* and return the name list Experimenter.exp expects.
+
+    exp() takes names and reads the definition out of the store, so a test
+    Trial has to be in there first. Registering through the store rather than
+    Project.set_trial deliberately skips the redefinition guard — several
+    tests below redefine a name on purpose to check what a rerun does."""
+    exp.trial_store.register(trial)
+    return [trial.name]
 
 
 def _flow(exp, outer=0, inner=0):
@@ -255,22 +261,80 @@ class TestBuild:
         assert 'Unknown column' in info['error']['message']
 
 
+class TestExpTakesNames:
+    """exp() is handed Trial names and reads the definitions out of the store.
+
+    A Trial belongs to the project, so running one is not also how it gets
+    there: registration used to be a side effect of exp(), which meant a Trial
+    could not be added without executing it, and one run could redefine a name
+    another had already used."""
+
+    def test_a_name_resolves_to_the_stored_definition(self, exp, project):
+        project.set_trial(Trial('dt', TREE, DT_EDGES, params={'max_depth': 7}))
+        jobs = exp._make_jobs(['dt'])
+        assert {j.spec.params['max_depth'] for j in jobs} == {7}
+
+    def test_a_name_covers_every_fold(self, exp, project):
+        """A name means the whole grid — the caller does not spell out folds."""
+        project.set_trial(_dt())
+        jobs = exp._make_jobs(['dt'])
+        assert {(j.outer_idx, j.inner_idx) for j in jobs} == {
+            (o, i) for o in range(exp.get_n_splits())
+            for i in range(exp.get_n_splits_inner())}
+
+    def test_built_folds_are_dropped_so_the_same_names_continue(self, exp, project):
+        """Passing the same names after a partial run continues it."""
+        project.set_trial(_dt())
+        exp.trial_store.record('dt', exp.name, 0, 0, status='built')
+        jobs = exp._make_jobs(['dt'])
+        assert (0, 0) not in {(j.outer_idx, j.inner_idx) for j in jobs}
+        assert (1, 0) in {(j.outer_idx, j.inner_idx) for j in jobs}
+
+    def test_an_unregistered_name_raises(self, exp, project):
+        with pytest.raises(KeyError, match='not registered'):
+            exp.exp(['nope'])
+
+    def test_a_trial_instance_is_not_accepted(self, exp, project):
+        """Caught explicitly — passed through, an instance reaches sqlite as a
+        bind parameter and the error says nothing about what the caller did."""
+        with pytest.raises(TypeError, match='set_trial'):
+            exp.exp([_dt()])
+
+    def test_running_does_not_register(self, exp, project):
+        """Authoring is Project.set_trial — exp() only executes what is there."""
+        project.set_trial(_dt())
+        exp.exp(['dt'])
+        assert len(project.trials.list_trials()) == 1
+
+    def test_without_a_trial_store_it_refuses(self, tmp_path, sample_data, pipeline):
+        standalone = Experimenter(path=tmp_path / 'solo', name='solo', data=sample_data)
+        standalone.set_pipeline(pipeline.build())
+        with pytest.raises(RuntimeError, match='trial_store'):
+            standalone.exp(['dt'])
+
+    def test_a_project_run_is_given_the_projects_store(self, exp, project):
+        assert exp.trial_store is project.trials
+
+    def test_a_reopened_run_is_given_it_too(self, project, sample_data, exp):
+        assert project.load_experimenter('e1', sample_data).trial_store is project.trials
+
+
 class TestExp:
     def test_exp_head(self, exp, pipeline, project):
         trial = _dt()
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
         assert _trial_built(project.trials, 'dt', exp)
 
     def test_exp_skips_built(self, exp, pipeline, project):
         trial = _dt()
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
         build_id = project.trials.get_info('dt', exp.name)[(0, 0)]['build_id']
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
         assert project.trials.get_info('dt', exp.name)[(0, 0)]['build_id'] == build_id
 
     def test_exp_error(self, exp, pipeline, project):
         bad_trial = Trial('bad_dt', 'mock.BadPredictor', {'X': '{f1}', 'y': '{target}'})
-        exp.exp(_folds(bad_trial, exp), project.trials)
+        exp.exp(_folds(bad_trial, exp))
         assert _trial_errored(project.trials, 'bad_dt', exp)
 
     def test_exp_with_collector(self, exp, pipeline, project):
@@ -279,7 +343,7 @@ class TestExp:
             'acc', MetricCollector, Connector(),
             params={'output_var': None, 'metric_func': accuracy_metric},
         )
-        exp.exp(_folds(trial, exp), project.trials, collectors=['acc'])
+        exp.exp(_folds(trial, exp), collectors=['acc'])
         assert mc.has_node('dt')
 
     def test_set_collector_resolves_callable_metric(self, exp, pipeline, project):
@@ -291,7 +355,7 @@ class TestExp:
                     'metric_func': {'__callable__': 'sklearn.metrics.balanced_accuracy_score'}},
         )
         assert mc.metric_func is balanced_accuracy_score
-        exp.exp(_folds(trial, exp), project.trials, collectors=['bacc'])
+        exp.exp(_folds(trial, exp), collectors=['bacc'])
         assert mc.has_node('dt')
 
     def test_the_run_restores_its_own_collectors(self, exp, pipeline, project, sample_data):
@@ -369,7 +433,7 @@ class TestTrialLeavesNoArtifact:
 
     def test_nothing_on_disk_and_nothing_in_the_flow(self, exp, project):
         trial = _dt()
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
         flow = _flow(exp)
         assert not flow.node_path('dt').exists()
         assert 'dt' not in flow.list_nodes()
@@ -380,7 +444,7 @@ class TestTrialLeavesNoArtifact:
 
     def test_the_outcome_is_still_recorded(self, exp, project):
         trial = _dt()
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
         status = project.trials.get_status('dt', exp.name)
         assert status
         assert set(status.values()) == {'built'}
@@ -388,7 +452,7 @@ class TestTrialLeavesNoArtifact:
     def test_nodes_are_unaffected(self, exp, pipeline, project):
         _setup_stage(pipeline, exp)
         exp.build()
-        exp.exp(_folds(_dt(), exp), project.trials)
+        exp.exp(_folds(_dt(), exp))
         flow = _flow(exp)
         assert flow.status('scaler') == 'built'
         assert 'scaler' in flow.node_objs
@@ -399,19 +463,19 @@ class TestTrialLeavesNoArtifact:
         _setup_stage(pipeline, exp)
         exp.build()
         trial = _dt(edges={'X': 'scaler:(*)', 'y': '{target}'})
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
         assert set(project.trials.get_status('dt', exp.name).values()) == {'built'}
 
     def test_rerun_needs_only_remove_hist(self, exp, project):
         trial = _dt()
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
         project.trials.remove_hist(trial_name='dt', experimenter=exp.name)
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
         assert set(project.trials.get_status('dt', exp.name).values()) == {'built'}
 
     def test_a_failed_trial_records_the_error_and_leaves_nothing(self, exp, project):
         bad = Trial('dt', 'mock.BadPredictor', DT_EDGES)
-        exp.exp(_folds(bad, exp), project.trials)
+        exp.exp(_folds(bad, exp))
         flow = _flow(exp)
         assert not flow.node_path('dt').exists()
         info = project.trials.get_info('dt', exp.name)[(0, 0)]
@@ -422,16 +486,16 @@ class TestTrialLeavesNoArtifact:
     def test_a_failed_fold_is_retried_on_the_next_exp(self, exp, project):
         """'error' is not 'built', so the fold gets a job again — no reset
         needed, and nothing stale can be left behind to confuse it."""
-        exp.exp(_folds(Trial('dt', 'mock.BadPredictor', DT_EDGES), exp), project.trials)
+        exp.exp(_folds(Trial('dt', 'mock.BadPredictor', DT_EDGES), exp))
         assert set(project.trials.get_status('dt', exp.name).values()) == {'error'}
-        exp.exp(_folds(_dt(), exp), project.trials)
+        exp.exp(_folds(_dt(), exp))
         assert _trial_built(project.trials, 'dt', exp)
 
     def test_reset_nodes_on_a_trial_name_is_inert(self, exp, project):
         """It has nothing to remove, so it cannot leave history asserting a
         result whose artifact is gone (#127)."""
         trial = _dt()
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
         exp.reset_nodes(['dt'])
         assert set(project.trials.get_status('dt', exp.name).values()) == {'built'}
 
@@ -465,9 +529,9 @@ class TestRebuild:
         """experiment_hist is the whole skip decision — a Trial persists
         nothing that could disagree with it."""
         trial = _dt()
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
         first = project.trials.get_hist(trial_name='dt', experimenter=exp.name)
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
         second = project.trials.get_hist(trial_name='dt', experimenter=exp.name)
         assert [r['info']['build_id'] for r in first] == [r['info']['build_id'] for r in second]
 
@@ -538,7 +602,7 @@ class TestSaveLoad:
         _setup_stage(pipeline, exp)
         exp.build()
         trial = _dt()
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
 
         loaded = project.load_experimenter(exp.name, sample_data)
         flow = loaded.outer_folds[0].train_data_flows[0]
@@ -554,7 +618,7 @@ class TestSaveLoad:
         assert loaded.pipeline is not None
         assert 'scaler' in loaded.pipeline.nodes
         trial = _dt()
-        loaded.exp(_folds(trial, loaded), project.trials)  # uses restored pipeline, no set_pipeline needed
+        loaded.exp(_folds(trial, loaded))  # uses restored pipeline, no set_pipeline needed
         assert _trial_built(project.trials, 'dt', loaded)
 
     def test_load_data_key_mismatch(self, project, sample_data):
@@ -602,13 +666,13 @@ class TestGetStatus:
         """A Trial persists nothing, so it never shows here however often it
         has run — its status is TrialStore's to answer."""
         trial = _dt()
-        exp.exp(_folds(trial, exp), project.trials)
+        exp.exp(_folds(trial, exp))
         assert exp.get_status('dt') is None
         assert _trial_built(project.trials, 'dt', exp)
 
     def test_get_status_error(self, exp, pipeline, project):
         bad_trial = Trial('bad_dt', 'mock.BadPredictor', {'X': '{f1}', 'y': '{target}'})
-        exp.exp(_folds(bad_trial, exp), project.trials)
+        exp.exp(_folds(bad_trial, exp))
         assert _trial_errored(project.trials, 'bad_dt', exp)
 
 

@@ -65,7 +65,7 @@ def _stop_native_redirect(state):
     sys.stdout = state['orig_stdout']
     sys.stderr = state['orig_stderr']
     state['log_f'].close()
-from ._run_common import resolve_common_status, require_built_pipeline
+from ._run_common import resolve_common_status, require_built_pipeline, format_errors
 
 
 
@@ -145,6 +145,13 @@ class Experimenter():
         data_key (str, optional): Identifier verified on reload to prevent
             data mismatch.
         cache (DataCache, optional): Shared LRU cache.
+        trial_store (TrialStore, optional): Where this run reads the Trials it
+            is asked to run and records what they did. Injected once, like
+            *cache*, rather than re-supplied per call — a project has exactly
+            one and it does not change over a run's life. It is not persisted:
+            a ``TrialStore`` is project-level, and a run reopened from its own
+            directory has no way to find one that would not amount to guessing
+            at the layout above it.
 
     Attributes:
         cache (DataCache): Shared LRU cache, or ``None``.
@@ -170,9 +177,10 @@ class Experimenter():
             self, path, name, data, data_names = None,
             sp = ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
             splitter_params=None, title=None, data_key=None,
-            aug_data=None, cache=None
+            aug_data=None, cache=None, trial_store=None
         ):
         self.name = name
+        self.trial_store = trial_store
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
         self._store = ExperimenterStore(self.path)
@@ -230,7 +238,8 @@ class Experimenter():
         self._save()
 
     @staticmethod
-    def load_experimenter(path, data, data_key=None, aug_data=None, cache=None):
+    def load_experimenter(path, data, data_key=None, aug_data=None, cache=None,
+                          trial_store=None):
         """Reopen the Experimenter rooted at *path*.
 
         Everything comes out of that directory — meta and splitters from its
@@ -245,6 +254,8 @@ class Experimenter():
                 given when the Experimenter was created.
             aug_data (optional): External data appended to inner train splits.
             cache (DataCache, optional): Shared LRU cache.
+            trial_store (TrialStore, optional): Not saved with the run, so a
+                reopened Experimenter has one only if it is given one here.
 
         Returns:
             Experimenter: The reopened run.
@@ -276,7 +287,8 @@ class Experimenter():
         exp = Experimenter(
             path, meta['name'], data,
             title=meta.get('title'), data_key=saved_data_key,
-            aug_data=aug_data, cache=cache, **split_kwargs,
+            aug_data=aug_data, cache=cache, trial_store=trial_store,
+            **split_kwargs,
         )
         pipeline = store.load_pipeline()
         if pipeline is not None:
@@ -388,6 +400,15 @@ class Experimenter():
             raise RuntimeError("No pipeline set. Call set_pipeline(pipeline) first.")
         return self.pipeline
 
+    def _require_trial_store(self):
+        if self.trial_store is None:
+            raise RuntimeError(
+                "No trial_store. An Experimenter made by Project.experimenter() / "
+                "load_experimenter() gets the project's; a standalone one takes it "
+                "as Experimenter(..., trial_store=...)."
+            )
+        return self.trial_store
+
     def get_n_splits(self):
         return len(self.outer_folds)
 
@@ -441,71 +462,57 @@ class Experimenter():
         if self.cache is not None:
             self.cache.clear_nodes(nodes)
 
-    def remove_trial_result(self, name, trial_store=None):
-        """Drop what this run has of Trial *name*.
+    def remove_trial_result(self, name):
+        """Drop what this run has of Trial *name* — its results and its history.
 
         A Trial leaves no artifact, so its result is whatever its Collectors
-        kept — held in this run's own registry, which
-        :meth:`Collectors.remove_results` clears along with the matching
-        ``CollectHist`` rows.
+        kept, held in this run's own registry; :meth:`Collectors.remove_results`
+        clears that along with the matching ``CollectHist`` rows. This run's
+        ``experiment_hist`` rows go too, which is what makes the next ``exp()``
+        run the Trial again: folds are skipped on the strength of a recorded
+        ``'built'`` status and nothing else, so the history is the only thing
+        holding one back.
 
-        Pass *trial_store* to drop this run's ``experiment_hist`` rows as well.
-        That is what makes the next ``exp()`` run the Trial again: folds are
-        skipped on the strength of a recorded ``'built'`` status and nothing
-        else, so the history is the only thing holding one back. Only this
-        Experimenter's rows go — another run's record of the same Trial is its
-        own. To remove the Trial from the project entirely, definition
-        included, use ``Project.remove_trial``.
+        Only this Experimenter's rows go — another run's record of the same
+        Trial is its own — and the definition stays, since it belongs to the
+        project. Removing that too is ``Project.remove_trial``.
+
+        The history half is skipped when this run has no :attr:`trial_store`,
+        leaving only the collected results to remove.
 
         Args:
             name (str): Trial name.
-            trial_store (TrialStore, optional): Where this run's Trial history
-                lives. Omitted, the history stays and the folds stay skipped.
         """
         self.collectors.remove_results(name)
-        if trial_store is not None:
-            trial_store.remove_hist(trial_name=name, experimenter=self.name)
+        if self.trial_store is not None:
+            self.trial_store.remove_hist(trial_name=name, experimenter=self.name)
 
-    def show_error_nodes(self, nodes=None, traceback=False, trial_store=None):
-        """Print nodes in ``error`` state.
+    def show_error_nodes(self, nodes=None, traceback=False):
+        """Errors from this run's Pipeline nodes, one line per failed fold.
 
-        Error detail no longer lives on the artifact itself (see
-        ``NodeStore``) — it's recorded in ``TrialStore.experiment_hist``
-        (Trials) or this run's own ``NodeStore`` history (Stages), so this
-        queries both instead of walking fold directories.
+        Pipeline nodes only, as the name says. Error detail does not live on
+        the artifact (see ``NodeStore``) — it is in this run's own
+        ``node_hist`` — so this reads history rather than walking fold
+        directories. Trial errors are the project's to report, since that is
+        where their history lives: ``Project.show_error_trials(experimenter=)``.
 
         Args:
             nodes (list[str], optional): Node names to check. ``None`` checks
                 every node recorded for this run.
             traceback (bool): Include full traceback in output.
-            trial_store (TrialStore, optional): Where Trial history for this
-                run lives. ``None`` skips the Trial half, reporting only
-                Stage errors from this run's own ``NodeStore``.
+
+        Returns:
+            list[str] | None: One line per failed fold, or ``None`` if clean.
         """
         rows = [
             (r['node_name'], r['outer_idx'], r['inner_idx'], r['info'])
             for r in self.node_store.get_hist()
             if r['status'] == 'error'
         ]
-        if trial_store is not None:
-            rows += [
-                (r['trial_name'], r['outer_idx'], r['inner_idx'], r['info'])
-                for r in trial_store.get_hist(experimenter=self.name)
-                if r['status'] == 'error'
-            ]
         if nodes is not None:
             node_set = set(nodes)
             rows = [r for r in rows if r[0] in node_set]
-
-        errors = list()
-        for name, outer_idx, inner_idx, info in rows:
-            err = (info or {}).get('error', {})
-            label = f"[{name}] fold {outer_idx}_{inner_idx}"
-            if traceback:
-                errors.append(f"{label} {err.get('type')}: {err.get('message')}\n{err.get('traceback')}")
-            else:
-                errors.append(f"{label} {err.get('type')}: {err.get('message')}")
-        return errors if errors else None
+        return format_errors(rows, traceback)
 
     def build(self, nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None):
         """Build Stage nodes.
@@ -590,18 +597,14 @@ class Experimenter():
                     jobs.append(Job(name, spec, outer_idx, inner_idx, flow, need_gpu=need_gpu))
         return jobs
 
-    def exp(self, trials, trial_store, collectors=None,
-            n_jobs=1, gpu_id_list=None, logger=None):
+    def exp(self, trials, collectors=None, n_jobs=1, gpu_id_list=None, logger=None):
         """Run *trials* against the Stage graph and invoke matching Collectors.
 
         Args:
-            trials: ``[(Trial, outer_idx, inner_idx), ...]`` — each entry names
-                exactly which fold a Trial runs on. Expanding folds here rather
-                than in the executor keeps fold policy in one place and lets the
-                dispatcher take its target list literally.
-            trial_store (TrialStore): Where Trial definitions are registered
-                and fold outcomes are recorded — also what decides which
-                folds are skipped as already built (see :meth:`_make_jobs`).
+            trials (list[str]): Trial names, out of :attr:`trial_store`. Each
+                runs on every fold of this run; folds already recorded
+                ``'built'`` are dropped, so passing the same names again
+                continues a partial run instead of repeating it.
             collectors (list[str], optional): Names to collect with, out of
                 this run's own :attr:`collectors` registry. ``None`` (default)
                 uses every Collector registered there; ``[]`` collects nothing.
@@ -611,19 +614,32 @@ class Experimenter():
             gpu_id_list (list, optional): GPU IDs to use for GPU-enabled trials.
             logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
 
-        Trial definitions are registered in *trial_store*, and every fold
-        that actually runs records its outcome there as it finishes (see
-        :class:`~mllabs._tracker.TrialHistTracker`). Folds skipped as already
-        built produce no new row — their result was recorded when they ran.
+        **Names, not Trials.** A Trial belongs to the project, and this reads
+        it out of :attr:`trial_store` rather than taking a definition in.
+        Running was previously also how a Trial got registered, which put
+        authoring inside a run — you could not add one to the project without
+        executing it, and an ``exp()`` call could silently redefine a name
+        another run had already used. Authoring is ``Project.set_trial`` now,
+        and this only executes what is already there.
+
+        Every fold that actually runs records its outcome in the store as it
+        finishes (see :class:`~mllabs._tracker.TrialHistTracker`). Folds
+        skipped as already built produce no new row — their result was
+        recorded when they ran.
+
+        Raises:
+            RuntimeError: If this run has no ``trial_store``.
+            KeyError: If a name is not registered in it.
         """
         from ._executor import _execute_single, _execute_multi
         from ._tracker import LoggerExecuteTracker, TrialHistTracker
         logger = resolve_logger(logger)
         pipeline = self._require_pipeline()
         pipeline.check_data_compatibility(self.data)
+        trial_store = self._require_trial_store()
 
         collectors = self._resolve_collectors(collectors)
-        jobs = self._make_jobs(trials, trial_store)
+        jobs = self._make_jobs(trials)
         if not jobs:
             logger.info("No trials to run")
             return
@@ -633,7 +649,6 @@ class Experimenter():
             c.on_attach(self)
             c._setup(len(self.outer_folds), len(self.outer_folds[0].train_data_flows))
         n_jobs = min(n_jobs, len(jobs))
-        trial_store.register_all(t for t, _, _ in trials)
         tracker = TrialHistTracker(
             LoggerExecuteTracker(len(jobs), n_jobs, logger),
             trial_store, self.name, self.pipeline_version,
@@ -681,40 +696,58 @@ class Experimenter():
                 )
         return self.collectors.resolve(names)
 
-    def _make_jobs(self, trials, trial_store):
-        """Expand ``(Trial, outer, inner)`` entries into runnable Jobs.
+    def _make_jobs(self, trials):
+        """Expand Trial names into one Job per fold that still needs running.
 
-        A fold is skipped only if ``TrialStore.experiment_hist`` already has
-        it recorded as ``'built'`` — a fold recorded as ``'error'``, or with
-        no history row at all, gets a job. Whether the Trial's definition
-        changed since that history was recorded is not checked here; history
-        is the sole source of truth for what still needs to run, and it can
-        be, since a Trial leaves nothing on disk that could disagree with it.
-        Rerunning one is therefore ``TrialStore.remove_hist(...)`` and
-        nothing else.
+        A name means the whole grid: every ``(outer_idx, inner_idx)`` of this
+        run. Fold selection is not something a caller has to spell out —
+        ``'built'`` folds are dropped here, so handing the same names back
+        after a partial run continues it rather than repeating it.
+
+        A fold is skipped only if ``TrialStore.experiment_hist`` records it as
+        ``'built'``; one recorded ``'error'``, or with no row at all, gets a
+        job. Whether the definition changed since is not checked, and can no
+        longer differ silently: ``Project.set_trial`` refuses to redefine a
+        name that has a successful run behind it. Rerunning one is
+        :meth:`remove_trial_result` and nothing else.
+
+        The definition, its spec and its GPU verdict are resolved once per
+        name, not once per fold.
         """
         from ._executor import Job
         from .adapter import resolve_node_adapter
         from .adapter._base import GPU_NO
 
-        gpu_cache = {}
-        hist_cache = {}
+        trial_store = self._require_trial_store()
+        folds = [(o, i)
+                 for o in range(len(self.outer_folds))
+                 for i in range(len(self.outer_folds[o].train_data_flows))]
+
         jobs = []
-        for trial, outer_idx, inner_idx in trials:
-            flow = self.outer_folds[outer_idx].train_data_flows[inner_idx]
+        for name in trials:
+            if not isinstance(name, str):
+                raise TypeError(
+                    f"exp(trials=): expected Trial names, got "
+                    f"{type(name).__name__}. Register the Trial with "
+                    f"project.set_trial(trial) and pass its name."
+                )
+            trial = trial_store.get_by_name(name)
+            if trial is None:
+                raise KeyError(
+                    f"Trial '{name}' is not registered. Add it with "
+                    f"project.set_trial(trial) before running it."
+                )
             spec = trial.get_spec()
+            adapter = resolve_node_adapter(spec.processor, spec.adapter)
+            need_gpu = adapter.get_gpu_usage(spec.params) != GPU_NO
+            status = trial_store.get_status(name, self.name)
 
-            if trial.name not in hist_cache:
-                hist_cache[trial.name] = trial_store.get_status(trial.name, self.name)
-            if hist_cache[trial.name].get((outer_idx, inner_idx)) == 'built':
-                continue
-
-            if trial.name not in gpu_cache:
-                adapter = resolve_node_adapter(spec.processor, spec.adapter)
-                gpu_cache[trial.name] = adapter.get_gpu_usage(spec.params) != GPU_NO
-
-            jobs.append(Job(trial.name, spec, outer_idx, inner_idx, flow,
-                            need_gpu=gpu_cache[trial.name]))
+            for outer_idx, inner_idx in folds:
+                if status.get((outer_idx, inner_idx)) == 'built':
+                    continue
+                flow = self.outer_folds[outer_idx].train_data_flows[inner_idx]
+                jobs.append(Job(name, spec, outer_idx, inner_idx, flow,
+                                need_gpu=need_gpu))
         return jobs
 
     def get_train_data(self, edges, o_idx=0, i_idx=0):
