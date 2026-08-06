@@ -267,8 +267,8 @@ class NodeStore(ArtifactStore):
     def get_fold_info(self, outer_idx, inner_idx):
         """``{node_name: info}`` for every node recorded in one specific fold.
 
-        Used by ``DataFlow.load()`` to recover edges for artifacts built
-        in an earlier process, one query per fold instead of per node.
+        Used by ``DataFlow`` to recover the edges of an artifact built in an
+        earlier process, one query per fold instead of per node.
         """
         return {
             r['node_name']: r['info']

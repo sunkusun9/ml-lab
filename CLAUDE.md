@@ -269,7 +269,8 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
 
 ### DataCache (`_cache.py`)
 - `cachetools.LRUCache` 기반, 용량(bytes) 단위 관리. `Project`가 소유(`project.cache`)해서 모든 Experimenter/Trainer가 공유
-- 키는 **`(scope, node, typ)`** — `scope`는 그 fold를 만든 `TrainDataFlow`가 **자기 생성자에서 만드는 랜덤 id**(`self.scope = uuid.uuid4().hex`). 경로 문자열을 쓰지 않는 이유: run을 Project 없이 독립 생성하고 `cache=`를 외부 주입받을 수 있으므로, 서로 다른 물리 디렉토리가 우연히 같은 상대경로 문자열이 되어 충돌할 수 있음
+- 키는 **`(scope, node, typ)`** — `typ`은 `'train'`/`'valid'`/`'test'` **셋 다**. 노드 출력 중 예산 밖에 있는 건 없다
+- `scope`는 그 fold를 만든 `TrainDataFlow`가 **자기 생성자에서 만드는 랜덤 id**(`self.scope = uuid.uuid4().hex`). 경로 문자열을 쓰지 않는 이유: run을 Project 없이 독립 생성하고 `cache=`를 외부 주입받을 수 있으므로, 서로 다른 물리 디렉토리가 우연히 같은 상대경로 문자열이 되어 충돌할 수 있음
   - **`TrainDataFlow` 인스턴스 하나 = 정확히 그 (run, fold) 하나**(fold마다 새로 만들고 공유 안 함)라, 인스턴스 자신의 랜덤 id만으로 이미 "이 run의 이 fold"가 유일하게 식별됨 — `outer_idx`/`inner_idx`를 키에 또 넣지 않는 이유
   - 트레이드오프: 리로드하면(새 Python 인스턴스 = 새 scope id) 이전 인스턴스가 캐싱해둔 항목은 다시 못 만남 — cache miss일 뿐 잘못된 값이 나오는 게 아니라 허용 가능한 손실로 판단
 - `get_data(scope, node, typ)`, `put_data(scope, node, typ, data)`
@@ -285,19 +286,26 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
   - `NodeStore`는 열린 커넥션을 `self`에 들고 있지 않아 picklable — 서브프로세스 워커에 스폰 시점에 인스턴스 자체를 넘긴다(`ProcessWorker(conn, collectors, store, ...)`)
 - **history**: SQLite `node_hist(node_name, outer_idx, inner_idx, pipeline_version, status, info)` — PK는 `(node_name, outer_idx, inner_idx)`(run_name 컬럼 없음 — store 자체가 이미 그 run에 스코프돼 있음)
   - `record(name, outer_idx, inner_idx, pipeline_version=, status=, info=)` — `info`는 `status` 제외 나머지 전부(`build_id`, `definition`, `fit_time`, `edges`, `train_shape`, `warnings`, 실패 시 `error`) JSON 인코딩. `NodeInfoTracker`(`_tracker.py`)가 기록
-  - `get_hist(node_name=, outer_idx=, inner_idx=, pipeline_version=)`/`get_status(node_name)`/`get_info(node_name)`(`{(outer_idx, inner_idx): ...}`)/`get_fold_info(outer_idx, inner_idx)`(fold 하나의 `{node_name: info}` 전체 — `DataFlow.load()`가 씀)/`remove_hist(node_name=)`
+  - `get_hist(node_name=, outer_idx=, inner_idx=, pipeline_version=)`/`get_status(node_name)`/`get_info(node_name)`(`{(outer_idx, inner_idx): ...}`)/`get_fold_info(outer_idx, inner_idx)`(fold 하나의 `{node_name: info}` 전체 — `DataFlow`가 노드의 `edges`를 복원할 때 씀)/`remove_hist(node_name=)`
   - `'error'`는 오직 여기서만 보임 — `Experimenter.show_error_nodes`/`Trainer.get_node_error`가 조회
 
 ### DataFlow / TrainDataFlow (`_flow.py`)
 - **DataFlow**: 생성자가 `NodeStore` 인스턴스(`self.store`, run 전체가 공유) + 이 fold의 `outer_idx`/`inner_idx`를 받음. `status`/`get_obj`/`get_objs`/`get_result`/`list_nodes`/`node_path`는 `self.store.X(name, self.outer_idx, self.inner_idx)`로 위임하는 얇은 메소드. `reset_node`만 위임 + `node_objs`/`_node_edges`에서도 같이 지우는 조합 동작
-  - `node_objs`: `{name: (obj, result)}`, `_node_edges`: `{name: edges}`
-  - **`load()`가 `self.store.get_fold_info(...)`를 한 번 조회**해서 `edges`까지 복원한 뒤 `load_objs(name, edges=...)`. history에 행이 없는 노드는 로드 안 함(안전한 기본값). 여기 올라오는 건 Pipeline 노드뿐이다 — Trial은 애초에 아무것도 안 남기고 Trainer의 Predictor는 자기 store에 있어서, 둘 다 이 store에 아티팩트를 두지 않는다(학습된 모델이 메모리로 딸려 들어오지 않음)
+  - `node_objs`: `{name: obj}` — **`obj.pkl`의 캐시일 뿐**이고 result는 안 들고 있음. `_node_edges`: `{name: edges}`
+  - **생성자는 아무것도 안 읽는다.** run은 fold마다 flow를 하나씩 미리 만들기 때문에, 생성자에서 읽는 건 곧 그리드 전체를 읽는 것이다(5×3 그리드 × 10노드 = processor 150 + 중간 데이터셋 150). 읽기는 `_processor(name)`이 처음 필요할 때 하고, 안 건드린 fold는 끝까지 안 읽힌다
+  - **`_processor(name)`**: `node_objs` → (없으면) `store.status`로 `'built'` 확인 → `load_obj(name)`. 안 빌드됐거나 이력 행이 없으면 **`KeyError`로 시끄럽게 실패**한다. 예전엔 `_resolve`가 조용히 `None`을 반환하고 `get_data`가 그 세그먼트를 건너뛰어서, 컬럼이 빠진 채로 아무 말도 없이 진행됐다
+  - `_fold_edges(name)`: `edges`는 두 pkl 어디에도 없어서 `store.get_fold_info(...)`(fold당 쿼리 1회, 아티팩트 안 건드림)에서 온다. **미스면 재조회** — 빌드 전에 이미 fold 스냅샷을 읽어둔 flow가 있고, 빌드는 flow에 아무것도 안 건네므로 옛 스냅샷으로 답하면 안 된다
+  - 여기 올라오는 건 Pipeline 노드뿐이다 — Trial은 애초에 아무것도 안 남기고 Trainer의 Predictor는 자기 store에 있어서, 둘 다 이 store에 아티팩트를 두지 않는다(학습된 모델이 메모리로 딸려 들어오지 않음). 다른 데서 들고 온 걸 쓰려면 `node_objs`에 직접 넣으면 된다(`Trainer.process`) — store보다 먼저 조회된다
   - `get_data(source_data, edges)` → `{key: data}`
 - **TrainDataFlow** (DataFlow 상속): 노드 빌드 기능 추가. `store`를 그대로 받아 `super().__init__(store, outer_idx=, inner_idx=)`로 넘김 — fold별로 자기 NodeStore를 새로 만들지 않음
   - `data_source`: DataWrapperProvider (train/valid/**test** 제공 — `test_idx` 보유)
   - `outer_idx`/`inner_idx`는 NodeStore 키(아티팩트 경로, history row) 전용 — DataCache 키에는 안 들어감(`self.scope`가 대신함). **Trainer도 자연스러운 `(split_idx, 0)`을 그대로 쓴다**
   - `get_train(edges)`, `get_valid(edges)`, `get_test(edges)` — flow 하나로 job의 모든 입력을 만들 수 있어야 `Job`이 자족적이 됨
-  - `set_objs(name, obj, result, info)`: 현재 fit의 즉석 info에서 `edges`만 추출 — 디스크/history를 안 거침. **`chained` 실행(=노드 빌드)에서만 호출**된다 — leaf(Trial/Predictor)를 여기 올리면 아무도 안 읽는 모델이 flow 메모리에 남는다
+  - **`_resolve_typ`: 셋 다 `DataCache`를 거치지만 복구 방법이 다르다**
+    - valid/test는 **재계산**(`obj.process`)
+    - train은 **`result.pkl` 재읽기**. 재계산하면 안 된다 — train 출력은 `fit_process`가 낸 값이고, cross-fitting 노드에선 같은 행에 대해 `process`가 내는 값과 다르다(`CrossFitTransformer`는 fit 때 OOF, 이후엔 full model). 재계산은 downstream이 보는 숫자를 말없이 바꾼다
+    - 단, `method`가 순수 `fit`인 노드는 fit 시점 출력이 없어 `result.pkl`이 `None`이고, 그때는 `process`가 곧 train 출력의 정의다 — 재계산이 대체재가 아니라 정답인 유일한 경우
+  - **게시(`set_objs`)는 없다** — 빌드는 아티팩트를 쓰고 끝, 다음에 읽는 쪽이 디스크에서 가져간다. 그래서 `node_objs`의 모든 항목은 버려도 안전하다
 
 ### Trainer (`_trainer.py`)
 - **Project 의존성 없음. 주입받는 건 `cache` 하나**(Experimenter와 동형) — 생성자: `Trainer(path, name, data, splitter=None, splitter_params=None, aug_data=None, cache=None)`. store(`TrainerStore(self.path)`)는 자기가 만들고, Pipeline은 `set_pipeline()`으로만
@@ -322,9 +330,9 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
   - `predictors=None`이면 이미 등록된 것들을 그대로 이어서 학습(중단된 학습 재개)
   - `Trial`을 넘기면 `TypeError` — `Predictor.from_trial(trial, experimenter=)`로 명시 승격해야 출처가 기록됨
   - 학습 대상 노드는 **넘긴 predictors 기준**(`_nodes_for(predictors)`)이지 등록된 전체가 아님
-  - `Job.flow`는 Predictor에도 **노드 flow**가 들어감(입력을 만드는 건 노드 그래프) — 아티팩트는 `predictor_store`로 가고, **flow에는 게시되지 않는다**(`chained=False`). Predictor는 leaf라 아무도 안 읽는데 flow에 올리면 모델만 메모리에 남기 때문. 나중에 필요한 쪽(`process()`/`to_inferencer()`)이 `predictor_store`에서 직접 꺼낸다
+  - `Job.flow`는 Predictor에도 **노드 flow**가 들어감(입력을 만드는 건 노드 그래프) — 아티팩트는 `predictor_store`로 간다. 노드 flow의 lazy 로드는 자기 store만 보므로 Predictor 모델은 거기 닿지 않고, 필요한 쪽(`process()`/`to_inferencer()`)이 `predictor_store`에서 직접 꺼낸다
 - `get_status(node_name)` / `get_node_error(node_name)`: `_store_for(name)`으로 두 store 중 하나를 골라 조회 — Predictor 에러도 기록됨
-- `process(data, v=None)`: generator, split마다 Predictor output을 `v`(DSL 문자열)로 필터 후 concat하여 yield. Predictor 모델은 `flow.load()`가 안 집어오므로(이력이 다른 store에 있음 — 그게 메모리에 안 딸려오게 하는 장치) `predictor_store`에서 on-demand로 꺼내고, **edges는 정의에서 채운다** — 아티팩트에도 이 flow의 이력에도 없기 때문(안 채우면 `_resolve`가 전부 None을 반환해 조용히 아무것도 yield 안 함)
+- `process(data, v=None)`: generator, split마다 Predictor output을 `v`(DSL 문자열)로 필터 후 concat하여 yield. Predictor 모델은 노드 flow의 lazy 로드가 닿지 않는 store에 있으므로(그게 메모리에 안 딸려오게 하는 장치) `predictor_store`에서 꺼내 `flow.node_objs`에 직접 넣고, **edges는 정의에서 채운다** — 아티팩트에도 이 flow의 이력에도 없기 때문
 - `to_inferencer(v=None)`: 학습된 Processor를 추출하여 Inferencer 생성
 - `reset_nodes(nodes)`: 하위 종속 노드 포함 초기화. Predictor는 leaf라 그래프 캐스케이드 대상이 아니지만, 리셋된 노드를 읽는 Predictor는 `node_names()` 교집합으로 같이 리셋됨
 - 저장/로드: `save()`(meta + splits를 `_store`에 기록), 복원은 `Trainer.load_trainer()`. Pipeline은 `{path}/pipeline.pkl`, splitter/split_indices는 `__trainer.db`의 splits BLOB, **Predictor는 `predictor_defs`에서** 복원
@@ -625,10 +633,10 @@ p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
 단일 프로세스로 `Job` 리스트를 실행. 세 종류가 전부 같은 `_process`를 타고, 호출부가 바꾸는 건 **결과가 어디로 가느냐**뿐이다.
 
 - **`store`는 그 job 종류의 기록을 소유한 store** — 노드/Predictor는 `NodeStore`, Trial은 `TrialStore`. 아티팩트 기록은 `store.stores_artifacts`가 True일 때만(Trial은 False라 아무것도 안 남는다)
-- **`chained`는 "이 job들이 flow를 통해 서로 먹이는가"** — Pipeline 노드에서만 True. 두 가지가 같이 켜진다: 완료된 obj/result를 `set_objs`로 flow에 게시(뒤 job이 읽으라고), 그리고 edges가 참조하는 게 다 빌드될 때까지 대기(`get_missing_nodes`). leaf(Trial/Predictor)는 둘 다 안 함
+- **`chained`는 "이 job들이 flow를 통해 서로 먹이는가"** — Pipeline 노드에서만 True. 하는 일은 하나: edges가 참조하는 게 다 빌드될 때까지 대기(`get_missing_nodes`). leaf(Trial/Predictor)는 안 함
   - 대기 게이트를 leaf에 걸면 안 되는 이유: 참조 노드가 끝내 안 빌드되면 그 job이 에러 하나 없이 조용히 사라진다 — `_job_inputs`가 `KeyError`를 내고 prep error로 기록되는 게 올바른 동작
-  - `set_objs`를 leaf에 하면 안 되는 이유: 아무도 안 읽는데 학습된 모델만 flow 메모리에 실행 내내 붙어 있게 된다
-- **완료 표시는 `done` 집합**(`(outer_idx, inner_idx, name)`) — 예전엔 `flow.node_objs` 등록 여부가 겸했는데, 그러면 flow에 안 올리는 leaf가 영원히 `ready`로 남는다
+  - **끝난 job을 flow에 건네주지 않는다** — 디스크의 아티팩트가 다음 job이 읽을 것이고, flow가 필요할 때 알아서 읽는다. 그래서 `chained`가 걸린 곳에선 `store.stores_artifacts`가 참이어야 하는데, chained는 곧 Pipeline 노드이고 그건 `NodeStore`로 가므로 성립
+- **완료 표시는 `done` 집합**(`(outer_idx, inner_idx, name)`) — 단일/멀티 양쪽 다. `flow.node_objs` 등록 여부로는 안 되는데, flow는 leaf를 아예 안 담고 lazy 로드 때문에 담긴 이유도 여러 가지가 되기 때문
 - **`collectors`는 별개**로 Collector 얘기만 한다: `None`이면 `ext_data` 준비와 매칭을 통째로 스킵(노드엔 Collector가 안 붙음), 리스트면 실행(`[]`는 매치될 게 없는 리스트일 뿐)
 - **반환값은 job 종류와 무관하게 항상 `{(outer_idx, inner_idx, name): error_info}`** — 실패한 job이 ready-루프에서 영원히 재시도되지 않으려면 키가 fold까지 포함한 job 신원이어야 하고, 반환도 그 신원 그대로여야 한다(축약하면 같은 outer fold의 다른 inner fold 실패가 사라지고, 호출부의 `len(jobs) - len(errors)` 집계도 틀어짐). 호출부는 이름만 필요할 때 `{n for _, _, n in errors}`로 뽑는다
 
@@ -636,7 +644,7 @@ p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
 
 ### `_execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, tracker=None, ..., chained=False)`
 워커 풀 실행. `store`/`chained`/`collectors`의 의미와 반환 모양은 `_execute_single`과 동일.
-- **`chained`일 때만 완료 결과를 되읽어 flow에 올린다** — 되읽기는 `job.flow`가 아니라 인자로 받은 `store`에서. 워커는 이 호출이 지정한 store에 쓰기 때문이고, chained면 둘이 어차피 같지만(노드의 flow는 자기가 쓴 store를 읽는다) 그 전제를 코드가 기대는 대신 말하게 둔 것
+- **끝난 job의 아티팩트를 되읽지 않는다** — 부모는 오케스트레이션만 한다. 워커 결과를 매번 읽어 flow에 올리면, 정작 다음 job이 스스로 할 수 있는 로드 하나 때문에 부모가 그 run의 모든 모델과 중간 출력을 떠안게 된다
 - **ready-job 계산은 매 dispatch 사이클마다 처음부터 다시 스캔**(`_collect_ready()`) — 노드는 형제 노드가 끝나야 readiness가 바뀌므로 목록을 한 번만 만들어두는 방식이 안 맞는다. leaf에도 그대로 맞음(서로 의존 안 하니 한 번 ready면 계속 ready)
 - **워커 배정 fallback**: "내 타입" job이 아직 남아있으면 그 타입 몫 worker를 다른 타입에 안 뺏긴다(`elif free_cpu and not cpu_ready and gpu_fallback_cpu`). ready 목록을 매 사이클 재계산하는 탓에 같은 `_try_dispatch()` 호출 안에서 GPU pass가 막 dispatch한 job이 CPU pass의 판정엔 반영 안 되지만(다음 'done'/'error' 이벤트에서 바로잡힘) 무시할 수준
 - `ProcessWorker(conn, collectors or [], store, ...)`로 store를 그대로 넘김 — 워커 메시지 튜플은 `spec, outer_idx, inner_idx, train_data, valid_data, test_data, ext_data`(워커가 `store.write_objs(spec.name, ...)`로 직접 쓰므로 경로를 미리 조립해 보낼 필요 없음)
@@ -645,9 +653,9 @@ p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
 #### 워커 사망 처리
 `wait()`는 파이프가 닫힌 것도 ready로 돌려주므로, OOM kill이나 네이티브 라이브러리 segfault로 워커가 죽으면 `recv()`가 `EOFError`를 던진다. 이걸 예외로 전파시키면 정리 코드에 도달하지 못해 나머지 워커가 종료 sentinel을 못 받고 영원히 블록된다(주피터 커널은 안 죽으므로 `daemon=True`도 소용없어 메모리와 CUDA 컨텍스트를 잡은 채 남는다).
 - 사망을 **예외가 아니라 정상 결과**로 취급: in-flight job을 `WorkerLost` 에러로 기록하고, 그 conn을 `all_conns`에서 제거(EOF는 지속 상태라 안 빼면 무한 스핀), 남은 워커로 계속 진행. 전멸하면 못 돌린 job까지 에러로 남겨 호출부 집계가 안 틀리게 함
-- **정리는 `try/finally`** — 루프를 빠져나가는 경로가 여럿(`store.get_objs`, 이력 SQLite 쓰기, tracker 호출)이라 "끝까지 도달했나"에 정리를 걸면 안 된다. `send(None)` → `join(_JOIN_TIMEOUT=10)` → 살아있으면 `terminate()` → `close()`, 각 단계 예외 안전
+- **정리는 `try/finally`** — 루프를 빠져나가는 경로가 여럿(이력 SQLite 쓰기, Collector push, tracker 호출)이라 "끝까지 도달했나"에 정리를 걸면 안 된다. `send(None)` → `join(_JOIN_TIMEOUT=10)` → 살아있으면 `terminate()` → `close()`, 각 단계 예외 안전
 - 기동 시 `'ready'` 대기도 같은 처리 — spawn은 모듈을 재import하므로 Collector 클래스가 모듈 최상위가 아니면 자식이 `'ready'` 전에 죽는다
-- **미해결**: 루프 안 부모쪽 작업(`store.get_objs`/`flow.set_objs`/`tracker.*`/`abort_node`)의 개별 예외는 여전히 실행 전체를 중단시킨다. `finally` 덕에 누수는 없지만 job 단위로 흡수하지는 않음
+- **미해결**: 루프 안 부모쪽 작업(`c.push`/`tracker.*`/`abort_node`)의 개별 예외는 여전히 실행 전체를 중단시킨다. `finally` 덕에 누수는 없지만 job 단위로 흡수하지는 않음
 
 #### Collector 실행
 - **`_run_collectors`는 `(warn_msgs, outcomes)`를 반환** — `outcomes`는 매칭된 Collector당 하나씩 `{collector, status, elapsed, info}`. 실제 캐칭은 `_safe_collect`가 `ext`/`collect`/`push` 세 구간에 대해 하고, 공용 `obj.process` 준비(`output_test`/`output_train`)가 깨지면 매칭된 전원에게 `phase='output'` outcome을 발급한다 — 이 준비는 Trial이 이미 `'built'`로 기록된 **뒤에** 돌기 때문에 여기서 예외가 새면 실행 전체가 죽는다

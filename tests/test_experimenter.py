@@ -211,8 +211,17 @@ class TestBuild:
         _setup_stage(pipeline, exp)
         exp.build()
         flow = _flow(exp)
-        assert 'scaler' in flow.node_objs
         assert flow.status('scaler') == 'built'
+
+    def test_build_leaves_nothing_in_flow_memory(self, exp, pipeline):
+        """A build writes its artifact and hands the flow nothing — whoever
+        reads the node next takes it off disk."""
+        _setup_stage(pipeline, exp)
+        exp.build()
+        flow = _flow(exp)
+        assert 'scaler' not in flow.node_objs
+        flow.get_train({'X': 'scaler:(*)'})
+        assert 'scaler' in flow.node_objs
 
     def test_build_skips_built(self, exp, pipeline):
         _setup_stage(pipeline, exp)
@@ -455,11 +464,11 @@ class TestTrialLeavesNoArtifact:
         exp.exp(_folds(_dt(), exp))
         flow = _flow(exp)
         assert flow.status('scaler') == 'built'
-        assert 'scaler' in flow.node_objs
+        assert flow.get_obj('scaler') is not None
 
     def test_a_trial_reads_nodes_built_in_the_same_process(self, exp, pipeline, project):
-        """Nodes are published into the flow by build(); a Trial reading one
-        through a namespace segment has to find it there."""
+        """A Trial reading a node through a namespace segment loads it out of
+        the store — build() published nothing into the flow."""
         _setup_stage(pipeline, exp)
         exp.build()
         trial = _dt(edges={'X': 'scaler:(*)', 'y': '{target}'})
@@ -501,28 +510,30 @@ class TestTrialLeavesNoArtifact:
 
 
 class TestRebuild:
+    # build_id, not object identity: nothing is held in flow memory across a
+    # build anymore, so two reads of the same artifact are two objects and
+    # `is not` would pass without anything having been rebuilt.
+    def _build_id(self, exp):
+        return exp.node_store.get_info('scaler')[(0, 0)]['build_id']
+
     def test_build_with_rebuild_true(self, exp, pipeline):
         _setup_stage(pipeline, exp)
         exp.build()
-        flow = _flow(exp)
-        old_obj = flow.node_objs['scaler'][0]
+        old_id = self._build_id(exp)
         exp.build(rebuild=True)
-        new_obj = _flow(exp).node_objs['scaler'][0]
-        assert flow.status('scaler') == 'built'
-        assert old_obj is not new_obj
+        assert _flow(exp).status('scaler') == 'built'
+        assert self._build_id(exp) != old_id
 
     def test_set_node_replace_then_build(self, exp, pipeline):
         _setup_stage(pipeline, exp)
         exp.build()
-        flow = _flow(exp)
-        old_obj = flow.node_objs['scaler'][0]
+        old_id = self._build_id(exp)
         # Staleness is a value diff now (no serial) — 'replace' with the exact
         # same definition is correctly a no-op, so this needs an actual change.
         pipeline.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
         _publish(pipeline, exp)
         exp.build()
-        new_obj = _flow(exp).node_objs['scaler'][0]
-        assert new_obj is not old_obj
+        assert self._build_id(exp) != old_id
         assert _flow(exp).status('scaler') == 'built'
 
     def test_exp_skips_folds_already_recorded_built(self, exp, pipeline, project):
@@ -606,8 +617,10 @@ class TestSaveLoad:
 
         loaded = project.load_experimenter(exp.name, sample_data)
         flow = loaded.outer_folds[0].train_data_flows[0]
-        assert 'scaler' in flow.node_objs
+        # Reopening reads no artifact: what it recovers is the ability to.
+        assert flow.node_objs == {}
         assert flow.status('scaler') == 'built'
+        assert flow.get_train({'X': 'scaler:(*)'})['X'].get_shape()[0] > 0
         assert _trial_built(project.trials, 'dt', loaded)
 
     def test_load_restores_pipeline(self, project, exp, pipeline, sample_data):
@@ -729,17 +742,54 @@ class TestNodeStore:
         assert store.get_status('node1') == {(0, 0): 'built'}
         assert store.get_info('node1') == {(0, 0): {'role': 'stage', 'edges': {'X': '{f1}'}}}
 
-    def test_dataflow_autoload(self, tmp_path):
-        """DataFlow composes a NodeStore now (no inheritance) and needs a
-        node_hist row to know a node is a Stage (role) and how to route its
-        edges — see DataFlow.load()."""
+    def test_dataflow_reads_nothing_until_asked(self, tmp_path):
+        """Constructing a flow touches no artifact — a run makes one per fold
+        up front, so anything read here is read for every fold of the grid."""
         store = NodeStore(tmp_path)
         store.write_objs('node1', 0, 0, StandardScaler(), None)
         store.record('node1', 0, 0, status='built',
-                     info={'role': 'stage', 'edges': {'X': '{f1}'}})
+                     info={'edges': {'X': '{f1}'}})
         flow = DataFlow(store, outer_idx=0, inner_idx=0)
-        assert 'node1' in flow.node_objs
+        assert flow.node_objs == {}
         assert flow.status('node1') == 'built'
+
+    def test_dataflow_recovers_edges_on_first_use(self, tmp_path):
+        """DataFlow composes a NodeStore (no inheritance) and neither pickle
+        carries edges, so routing comes from the node_hist row."""
+        store = NodeStore(tmp_path)
+        store.write_objs('node1', 0, 0, StandardScaler(), None)
+        store.record('node1', 0, 0, status='built',
+                     info={'edges': {'X': '{f1}'}})
+        flow = DataFlow(store, outer_idx=0, inner_idx=0)
+        assert flow._processor('node1') is not None
+        assert flow._node_edges['node1'] == {'X': '{f1}'}
+
+    def test_dataflow_raises_for_a_node_that_is_not_built(self, tmp_path):
+        """Loudly — the old answer was a segment that contributed no columns
+        and said nothing about it."""
+        flow = DataFlow(NodeStore(tmp_path), outer_idx=0, inner_idx=0)
+        with pytest.raises(KeyError, match='not built'):
+            flow._processor('node1')
+
+    def test_dataflow_raises_for_an_artifact_with_no_history(self, tmp_path):
+        store = NodeStore(tmp_path)
+        store.write_objs('node1', 0, 0, StandardScaler(), None)
+        flow = DataFlow(store, outer_idx=0, inner_idx=0)
+        with pytest.raises(KeyError, match='no recorded edges'):
+            flow._processor('node1')
+
+    def test_dataflow_sees_a_node_built_after_it_read_the_fold(self, tmp_path):
+        """The fold's history is cached, but a build hands the flow nothing —
+        so a miss has to re-query rather than answer from the old snapshot."""
+        store = NodeStore(tmp_path)
+        flow = DataFlow(store, outer_idx=0, inner_idx=0)
+        with pytest.raises(KeyError):
+            flow._processor('node1')
+
+        store.write_objs('node1', 0, 0, StandardScaler(), None)
+        store.record('node1', 0, 0, status='built',
+                     info={'edges': {'X': '{f1}'}})
+        assert flow._processor('node1') is not None
 
 
 class TestGetMissingNodes:
