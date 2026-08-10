@@ -547,6 +547,7 @@ v0 (생성 시 자동, 빈 Pipeline)
 - **open은 `PipelineBuilder` 자신**이다. 편집 가능한 상태는 그것뿐이라 따로 만들 게 없고, 그래서 언제나 하나다. 번호가 없다 — 초안은 채택한 쪽 밑에서 계속 변하므로 번호는 기록이 지킬 수 없는 주장이 된다
 - **`build()`가 버전을 발급한다.** 정의가 직전 published와 같으면 새로 찍지 않고 **그 번호를 그대로 준다**(`PipelineBuilder._version` → `_same_definition`). 그래서 **버전은 정의가 바뀔 때 정확히 한 번 생기고**, 별도 publish 행위가 없으며, 번호 없는 스냅샷으로 뭔가를 돌릴 방법 자체가 없어서 **모든 이력 행이 자기가 무엇으로 돌았는지 말할 수 있다**. 손 안 댄 빌더를 빌드하면 v0가 그대로 나온다 — 정의한 게 없으니 바뀐 것도 없다
   - **같은 정의인지는 `diff_from`만으로 판정할 수 없다**(`_same_definition`이 DataSource 비교를 더하는 이유). `diff_from`은 "어떤 아티팩트를 지워야 하나"를 답해서 **노드 이름만** 돌려주는데, 아무 노드도 읽지 않는 schema 변경은 stale을 안 만들면서도 엄연히 다른 정의다. 이걸 빼면 노드 없이 schema만 있는 파이프라인은 처음 찍힌 버전에서 영영 못 벗어난다
+  - **비교 대상은 published 하나뿐이다 — 의도된 것이다.** 워킹카피를 예전 정의로 되돌려 빌드하면 archived와 내용이 같은 새 번호가 생기는데, "정의가 바뀔 때 버전이 생긴다"는 규칙에 어긋나지 않고(되돌린 것도 변경이다) 깨지는 것도 없다(staleness는 내용 비교라 아티팩트가 그대로 산다). archived까지 뒤져서 옛 번호를 재사용하려면 published 포인터를 뒤로 옮기거나 archived를 채택시켜야 하는데, 둘 다 이 단순한 상태 기계를 망가뜨린다
 - **published는 항상 정확히 하나** — 새로 찍히면 이전 것은 archived로 내려간다
 - **archived만 삭제 가능**(`Project.remove_pipeline_version`). 지워도 그걸로 돌린 것은 안 깨진다(각자 `pipeline.pkl` 사본을 가짐) — 없어지는 건 provenance가 가리킬 대상뿐
 - **db 없는 빌더**(`PipelineBuilder()`)는 발급할 곳이 없어 `version=None, status='open'`으로 남는다. `Trainer.set_pipeline`이 거부하는 유일한 경우
