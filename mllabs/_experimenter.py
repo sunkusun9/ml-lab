@@ -164,9 +164,9 @@ class Experimenter():
             Constructing the Experimenter restores it, so reopening one
             brings back its Collectors with it.
         pipeline (Pipeline): The adopted Pipeline, kept as this Experimenter's own
-            ``pipeline.pkl``. The ``(pipeline_name, pipeline_version)``
-            pointer is recorded too, but only as provenance — it names the
-            project version this copy was taken from.
+            ``pipeline.pkl``. ``pipeline_version`` is recorded too, but only
+            as provenance — it names the published version this copy was
+            taken from, and is ``None`` for an unpublished draft.
 
     Note:
         ``build``, ``exp`` and other node-graph-aware methods use
@@ -232,10 +232,22 @@ class Experimenter():
             for i, (test_idx, inner_folds) in enumerate(raw_splits)
         ]
         self.pipeline = None
-        self.pipeline_name = 'pipeline'
-        self.pipeline_version = None
         self._os_log_state = None
         self._save()
+
+    @property
+    def pipeline_version(self):
+        """The adopted Pipeline's version — ``None`` for the working copy.
+
+        Read off :attr:`pipeline` rather than kept beside it, so there is no
+        second copy to fall out of step with it.
+        """
+        return self.pipeline.version if self.pipeline is not None else None
+
+    @property
+    def pipeline_build_id(self):
+        """Which build of the Pipeline was adopted. Identifies a draft, which has no version."""
+        return self.pipeline.build_id if self.pipeline is not None else None
 
     @staticmethod
     def load_experimenter(path, data, data_key=None, aug_data=None, cache=None,
@@ -244,7 +256,7 @@ class Experimenter():
 
         Everything comes out of that directory — meta and splitters from its
         ``__exp.db``, the Pipeline from its ``pipeline.pkl`` — so no Project
-        is involved and no ``(pipeline_name, pipeline_version)`` is resolved.
+        is involved and no ``pipeline_version`` is resolved.
         The name is the directory's own.
 
         Args:
@@ -290,7 +302,7 @@ class Experimenter():
         )
         pipeline = store.load_pipeline()
         if pipeline is not None:
-            exp.set_pipeline(pipeline, meta.get('pipeline_name') or 'pipeline')
+            exp.set_pipeline(pipeline)
         return exp
 
     def open_os_log(self, log_path=None):
@@ -345,15 +357,20 @@ class Experimenter():
         finally:
             self.close_os_log()
 
-    def set_pipeline(self, pipeline, pipeline_name=None):
-        """Adopt an already-loaded Pipeline.
+    def set_pipeline(self, pipeline):
+        """Adopt an already-loaded Pipeline, published or still a draft.
 
         Takes the Pipeline object directly rather than a version number —
-        this class has no way to load one by name/version itself (see the
-        class docstring); ``Project.experimenter()`` resolves that before
+        this class has no way to load one by version itself (see the class
+        docstring); ``Project.add_experimenter()`` resolves that before
         calling this. ``self.pipeline_version`` is read straight off
         *pipeline* (its ``.version``), so it's never tracked as a separate,
-        possibly-diverging value.
+        possibly-diverging value; a draft has none, and its ``build_id``
+        is what says which draft it was.
+
+        Any status is accepted, unlike ``Trainer.set_pipeline``. Experimenting
+        against a definition still being edited is the point of experimenting;
+        it is training that has to be able to say what it trained on.
 
         The Pipeline is written to this Experimenter's own ``pipeline.pkl``,
         which is what the constructor reads back — reopening needs only this
@@ -372,24 +389,17 @@ class Experimenter():
 
         Args:
             pipeline (Pipeline): Already-built, already-loaded Pipeline.
-            pipeline_name (str, optional): Name to record this Pipeline
-                under in this Experimenter's own meta. Defaults to the one
-                this Experimenter was created with.
 
         Returns:
             Pipeline: *pipeline*, unchanged.
         """
         require_built_pipeline(pipeline)
-        if pipeline_name is not None:
-            self.pipeline_name = pipeline_name
         if self.pipeline is not None:
             stale = pipeline.diff_from(self.pipeline)
             if stale:
                 self.reset_nodes(sorted(stale))
         self.pipeline = pipeline
-        self.pipeline_version = pipeline.version
         self._store.save_pipeline(pipeline)
-        self._store.set(self.name, 'pipeline_name', self.pipeline_name)
         self._store.set(self.name, 'pipeline_version', self.pipeline_version)
         return pipeline
 
@@ -833,7 +843,6 @@ class Experimenter():
             'name': self.name,
             'data_key': self.data_key,
             'title': self.title,
-            'pipeline_name': self.pipeline_name,
             'pipeline_version': self.pipeline_version,
         })
         self._store.save_splitters(self.name, {

@@ -8,8 +8,8 @@ Experimenters exist is a different one, answered by
 
 Three kinds of state live here:
 
-- the meta row (data_key, title, and the ``(pipeline_name, pipeline_version)``
-  pointer, which is provenance for the Pipeline copy — see below)
+- the meta row (data_key, title, and ``pipeline_version``, which is
+  provenance for the Pipeline copy — see below)
 - the splitters, as a pickle blob rather than columns: they are arbitrary
   sklearn objects and not ref-serializable
 - the Pipeline, written beside the db as ``pipeline.pkl`` rather than into it,
@@ -26,13 +26,12 @@ _SCHEMA_SQL = """
         name             TEXT PRIMARY KEY,
         data_key         TEXT,
         title            TEXT,
-        pipeline_name    TEXT,
         pipeline_version INTEGER,
         splitters        BLOB
     );
 """
 
-_COLUMNS = ('name', 'data_key', 'title', 'pipeline_name', 'pipeline_version')
+_COLUMNS = ('name', 'data_key', 'title', 'pipeline_version')
 
 #: Basename of the Experimenter's own db, without the ``.db`` suffix.
 DB_NAME = '__exp'

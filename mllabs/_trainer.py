@@ -9,7 +9,8 @@ from ._trainer_store import TrainerStore
 from ._trial import Trial
 from ._edge_dsl import parse, eval_expr, referenced_nodes
 from ._logger import resolve_logger
-from ._common import resolve_common_status, require_built_pipeline
+from ._common import (resolve_common_status, require_built_pipeline,
+                      require_frozen_pipeline)
 
 
 class TrainFold:
@@ -77,9 +78,9 @@ class Trainer:
     Attributes:
         name (str): Trainer name.
         pipeline (Pipeline): The adopted Pipeline, kept as this Trainer's own
-            ``pipeline.pkl``. The ``(pipeline_name, pipeline_version)``
-            pointer is persisted too, but only as provenance — it names the
-            project version this copy was taken from.
+            ``pipeline.pkl``. ``pipeline_version`` is persisted too, but only
+            as provenance — it names the published version this copy was
+            taken from.
         predictors (list[Predictor]): Everything :meth:`train` has been given,
             read from ``predictor_defs``.
         selected_nodes (list[str]): Pipeline nodes those Predictors read,
@@ -107,8 +108,6 @@ class Trainer:
         self.aug_data = wrap(aug_data) if aug_data is not None else None
 
         self.pipeline = None
-        self.pipeline_name = 'pipeline'
-        self.pipeline_version = None
 
         split_indices = self._make_splits()
         self.train_folds = self._make_train_folds(split_indices)
@@ -159,14 +158,21 @@ class Trainer:
         trainer.predictor_defs = PredictorStore(trainer.predictor_path)
         trainer.aug_data = wrap(aug_data) if aug_data is not None else None
         trainer.pipeline = None
-        trainer.pipeline_name = meta.get('pipeline_name') or 'pipeline'
-        trainer.pipeline_version = None
         trainer.train_folds = trainer._make_train_folds(splits.get('split_indices'))
 
         pipeline = store.load_pipeline()
         if pipeline is not None:
-            trainer.set_pipeline(pipeline, trainer.pipeline_name)
+            trainer.set_pipeline(pipeline)
         return trainer
+
+    @property
+    def pipeline_version(self):
+        """The adopted Pipeline's version — always a frozen one, or ``None`` if unset.
+
+        Read off :attr:`pipeline` rather than kept beside it, so there is no
+        second copy to fall out of step with it.
+        """
+        return self.pipeline.version if self.pipeline is not None else None
 
     # ------------------------------------------------------------------
     # split / fold setup
@@ -205,14 +211,21 @@ class Trainer:
     # node selection
     # ------------------------------------------------------------------
 
-    def set_pipeline(self, pipeline, pipeline_name=None):
-        """Adopt an already-loaded Pipeline.
+    def set_pipeline(self, pipeline):
+        """Adopt an already-loaded Pipeline. It must be a frozen version.
 
         Takes the Pipeline object directly rather than a version number —
-        this class has no way to load one by name/version itself (see the
-        class docstring); ``Project.trainer()`` resolves that before calling
+        this class has no way to load one by version itself (see the class
+        docstring); ``Project.add_trainer()`` resolves that before calling
         this. ``self.pipeline_version`` is read straight off *pipeline* (its
         ``.version``), never tracked separately.
+
+        The working copy is refused. What a Trainer produces is what gets
+        deployed, so it has to be able to say what it was trained against, and
+        a draft changes under it. An *archived* version is fine — it is frozen,
+        so it answers that question as well as the published one does. What is
+        ruled out is training against something still being edited, not
+        training against something old.
 
         The Pipeline is written to this Trainer's own ``pipeline.pkl``, which
         :meth:`load` reads back — reopening needs only this directory, never
@@ -229,20 +242,19 @@ class Trainer:
         since-changed node is simply stale.
 
         Args:
-            pipeline (Pipeline): Already-built, already-loaded Pipeline.
-            pipeline_name (str, optional): Name to record this Pipeline
-                under in this Trainer's own persisted meta.
+            pipeline (Pipeline): Already-built, already-published Pipeline.
+
+        Raises:
+            ValueError: If *pipeline* is the unpublished working copy.
         """
         require_built_pipeline(pipeline)
+        require_frozen_pipeline(pipeline)
         pipeline.check_data_compatibility(self.data)
-        if pipeline_name is not None:
-            self.pipeline_name = pipeline_name
         if self.pipeline is not None:
             stale = pipeline.diff_from(self.pipeline)
             if stale:
                 self.reset_nodes(sorted(stale))
         self.pipeline = pipeline
-        self.pipeline_version = pipeline.version
         self._store.save_pipeline(pipeline)
         self.save()
         return pipeline
@@ -646,7 +658,6 @@ class Trainer:
             ]
         self._store.save({
             'name': self.name,
-            'pipeline_name': self.pipeline_name,
             'pipeline_version': self.pipeline_version,
         })
         self._store.save_splits(self.name, {

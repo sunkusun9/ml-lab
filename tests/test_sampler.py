@@ -44,14 +44,14 @@ def make_exp(path, data, aug_data=None, name='e1'):
 
 
 def make_project_exp(root, data, aug_data=None, name='e1'):
-    """An Experimenter created through a Project, so it can be reloaded.
+    """An Experimenter created through a Project, so it can be reopened.
 
-    Reloading goes through ``Project.load_experimenter`` — the Experimenter
-    itself has no ``load()``, since it holds no Project reference to resolve
-    its saved meta/pipeline pointer with.
+    aug_data is not persisted with the Experimenter, so it comes from the
+    project — that is where reopening finds it, and a project without one
+    reopens the Experimenter without one.
     """
-    project = Project(root)
-    project.experimenter(name, data, aug_data=aug_data, **SPLITTERS)
+    project = Project(root, data=data, aug_data=aug_data)
+    project.add_experimenter(name, **SPLITTERS)
     return project
 
 
@@ -285,15 +285,15 @@ class TestExperimenterAugData:
         assert 'f2' in train.get_columns()
 
     def test_load_passes_aug_data(self, tmp_path, base_data, aug_df):
-        project = make_project_exp(tmp_path / 'proj', base_data, aug_data=aug_df)
-        exp2 = project.load_experimenter('e1', base_data, aug_data=aug_df)
+        make_project_exp(tmp_path / 'proj', base_data, aug_data=aug_df)
+        exp2 = Project(tmp_path / 'proj').experimenters['e1']
         assert exp2.aug_data is not None
         n = exp2.outer_folds[0].train_data_flows[0].data_source.get_train().get_shape()[0]
         assert n > 0
 
     def test_load_without_aug_data(self, tmp_path, base_data):
-        project = make_project_exp(tmp_path / 'proj', base_data)
-        exp2 = project.load_experimenter('e1', base_data)
+        make_project_exp(tmp_path / 'proj', base_data)
+        exp2 = Project(tmp_path / 'proj').experimenters['e1']
         assert exp2.aug_data is None
 
 

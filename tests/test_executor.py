@@ -48,8 +48,10 @@ def sample_data():
 
 
 @pytest.fixture
-def pipeline():
-    p = PipelineBuilder()
+def pipeline(tmp_path):
+    # Given a db, so build() mints a version — a Trainer refuses a Pipeline
+    # that has none, since nothing could name what it trained against.
+    p = PipelineBuilder(path=tmp_path / 'pipeline')
     p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
     return p
 

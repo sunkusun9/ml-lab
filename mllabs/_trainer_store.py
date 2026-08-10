@@ -27,13 +27,12 @@ from ._common import load_pipeline, save_pipeline
 _SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS trainer (
         name             TEXT PRIMARY KEY,
-        pipeline_name    TEXT,
         pipeline_version INTEGER,
         splits           BLOB
     );
 """
 
-_COLUMNS = ('name', 'pipeline_name', 'pipeline_version')
+_COLUMNS = ('name', 'pipeline_version')
 
 #: Basename of the Trainer's own db, without the ``.db`` suffix.
 DB_NAME = '__trainer'

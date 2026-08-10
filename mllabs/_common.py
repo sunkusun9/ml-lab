@@ -10,7 +10,7 @@ def save_pipeline(path, pipeline):
 
     A run keeps its own copy of the Pipeline it is working against, so that
     reopening it needs nothing but its directory — no Project to resolve a
-    ``(pipeline_name, pipeline_version)`` pointer into an object. The pointer
+    ``pipeline_version`` pointer into an object. The pointer
     is still recorded alongside, as provenance for which project version this
     copy came from.
     """
@@ -45,6 +45,24 @@ def require_built_pipeline(pipeline):
         )
     if not isinstance(pipeline, Pipeline):
         raise TypeError(f"Expected a Pipeline, got {type(pipeline).__name__}")
+
+
+def require_frozen_pipeline(pipeline):
+    """Raise unless *pipeline* is a published or archived version.
+
+    The Trainer-side gate. Both frozen statuses pass: what matters is that the
+    definition cannot change under what was trained against it, and an archived
+    version is as fixed as the published one. Only the working copy is refused.
+    """
+    from ._pipeline_store import OPEN
+
+    if pipeline.status == OPEN:
+        raise ValueError(
+            "This Pipeline is the working copy, which is still editable, so "
+            "nothing could later name what was trained against it. It has no "
+            "version because its builder has no db to mint one from — build it "
+            "from a builder that has one (project.pipeline)."
+        )
 
 
 def resolve_common_status(statuses):
