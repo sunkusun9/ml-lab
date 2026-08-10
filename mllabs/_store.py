@@ -35,8 +35,8 @@ class ArtifactStore:
       ``get_info``/``remove_hist``) — both override these for real, each
       against its own table. Declared here only so the shape is documented
       in one place; there's no shared body because ``TrialStore`` keys on
-      an extra experimenter name that ``NodeStore`` (already scoped to one
-      run) doesn't need, so the signatures aren't identical across
+      an extra experimenter name that ``NodeStore`` (already scoped to a
+      single Experimenter or Trainer) doesn't need, so the signatures aren't identical across
       overrides.
 
     ``stores_artifacts`` states which half a given store actually implements,
@@ -95,12 +95,12 @@ class ArtifactStore:
 
 
 class NodeStore(ArtifactStore):
-    """Artifact + run-history store for one run (an Experimenter or Trainer).
+    """Artifact + execution-history store for one Experimenter or Trainer.
 
-    Constructed once per run, at that run's own base path (e.g.
+    Constructed once per Experimenter/Trainer, at its own base path (e.g.
     ``{project}/exp/{name}`` or ``{project}/trainers/{name}``) — a Trainer
     and an Experimenter never share a base path, so nothing here needs a
-    ``run_name`` column to disambiguate; a fold is identified purely by
+    name column to disambiguate; a fold is identified purely by
     ``(node_name, outer_idx, inner_idx)`` within that base path.
 
     Node artifacts live at ``{path}/{outer_idx}/{inner_idx}/{node_name}/``:
@@ -123,7 +123,7 @@ class NodeStore(ArtifactStore):
     process does. record/get_hist/etc. are the history side.
 
     Args:
-        path: This run's base path.
+        path: The Experimenter's or Trainer's base path.
     """
 
     stores_artifacts = True

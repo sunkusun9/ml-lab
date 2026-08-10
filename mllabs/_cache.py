@@ -25,7 +25,7 @@ class DataCache:
     resolved to absolute and two different directories could coincide). A
     ``TrainDataFlow`` instance *is* one specific (outer_idx, inner_idx) fold —
     one gets constructed per fold, never shared — so its own scope id already
-    uniquely identifies "this run, this fold" without needing to fold path
+    uniquely identifies which Experimenter/Trainer and which fold, without needing to fold path
     strings or numeric coordinates into the key at all. The one thing this
     trades away: a fresh reload (new Python objects, e.g. via
     ``Project.load_experimenter``) gets fresh scope ids, so cached entries

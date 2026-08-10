@@ -246,11 +246,12 @@ class ProcessWorker(_mp_ctx.Process):
         ('error', error_info)
 
     Args:
-        store (NodeStore): This run's store, constructed in the parent and
-            handed to the worker at spawn — ``NodeStore`` holds nothing but
-            a path (no open connections on ``self``), so it pickles across
-            the process boundary fine. Used to write the fitted obj/result
-            once a job finishes, the same call a single-process run makes.
+        store (NodeStore): The store owning this job kind's records,
+            constructed in the parent and handed to the worker at spawn —
+            ``NodeStore`` holds nothing but a path (no open connections on
+            ``self``), so it pickles across the process boundary fine. Used to
+            write the fitted obj/result once a job finishes, the same call
+            single-process execution makes.
     """
 
     def __init__(self, conn, collectors, store, gpu_id=None, log_path=None):
@@ -510,8 +511,8 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
 
     A finished job's artifact is never read back here. The parent only
     orchestrates; reading each worker's obj/result to hand to the flow made it
-    accumulate every fitted model and every intermediate output in the run,
-    for the sake of a load the next job can do itself.
+    accumulate every fitted model and every intermediate output of the whole
+    execution, for the sake of a load the next job can do itself.
 
     Worker assignment prefers matching type: a free worker of the "wrong"
     type is handed to a ready job only when nothing of its own type is
@@ -530,7 +531,7 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
     notebook kernel that never exits, so they sat there holding their memory
     and, for GPU workers, their CUDA context. The job in flight is recorded as
     a ``WorkerLost`` error instead, the connection leaves ``all_conns`` (EOF is
-    a persistent state — polling it again would spin), and the run continues on
+    a persistent state — polling it again would spin), and execution continues on
     whatever workers are left. If none are, the jobs that never got to run are
     recorded too, so the caller's ``len(jobs) - len(errors)`` still counts.
 

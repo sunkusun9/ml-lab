@@ -7,12 +7,12 @@ from ._store import CollectorEntity, CollectorStore, build_collector
 class Collectors:
     """Registry that owns Collector instances and their storage.
 
-    One registry belongs to one run — an Experimenter builds its own over
+    One registry belongs to one Experimenter — it builds its own over
     ``{exp path}/collectors`` and hands it out as ``Experimenter.collectors``.
     Everything a Collector writes is keyed by node name and nothing more
     (``MetricCollector``'s PK is ``(node, idx, inner_idx, split)``; the
     file-based ones use ``{path}/{node}...``), so the path is what keeps two
-    runs apart. Sharing one registry between runs would have them overwrite
+    Experimenters apart. Sharing one registry between them would have them overwrite
     each other's results for every Trial whose name they have in common —
     silently, and precisely when the results were worth comparing.
 
@@ -24,8 +24,8 @@ class Collectors:
 
     ``hist`` is the :class:`~mllabs.CollectHist` over the same path — one row
     per (collector, node, fold) describing what that collect call did. It has
-    no ``experimenter`` column because the registry holding it already is one
-    run's.
+    no ``experimenter`` column because the registry holding it already belongs
+    to one.
 
     Args:
         path (str | Path, optional): Base directory. A Collector registered

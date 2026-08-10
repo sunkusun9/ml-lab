@@ -5,11 +5,11 @@ from ._data_wrapper import wrap, unwrap, DataWrapperProvider
 from ._flow import TrainDataFlow
 from ._store import NodeStore
 from ._predictor_store import PredictorStore
-from ._trainer_store import TrainerStore, DB_NAME as _TRAINER_DB
+from ._trainer_store import TrainerStore
 from ._trial import Trial
 from ._edge_dsl import parse, eval_expr, referenced_nodes
 from ._logger import resolve_logger
-from ._run_common import resolve_common_status, require_built_pipeline
+from ._common import resolve_common_status, require_built_pipeline
 
 
 class TrainFold:
@@ -49,7 +49,7 @@ class Trainer:
     """Runs cross-validation training on a subset of Pipeline nodes.
 
     No ``Project`` dependency, and nothing to inject but a ``cache``: like
-    :class:`~mllabs.Experimenter`, the run owns its own store — here a
+    :class:`~mllabs.Experimenter`, a Trainer owns its own store — here a
     :class:`~mllabs._trainer_store.TrainerStore`, built from ``path`` — and
     everything needed to reopen it lives in that directory. ``Project``
     supplies the path and records the name in its index.
@@ -137,9 +137,7 @@ class Trainer:
             KeyError: If *path* holds no saved Trainer.
         """
         path = Path(path)
-        # Checked before building the store, which would otherwise create the
-        # directory and an empty db for a Trainer that does not exist.
-        if not (path / f'{_TRAINER_DB}.db').exists():
+        if not TrainerStore.stored_at(path):
             raise KeyError(f"No trainer saved at {path}")
         store = TrainerStore(path)
         meta = store.fetch()
@@ -227,7 +225,7 @@ class Trainer:
         node artifacts the change invalidated via :meth:`reset_nodes`, which
         also cascades into any selected Predictor that reads a reset node —
         unlike ``Experimenter.set_pipeline``, a Trainer has no notion of a
-        "historical" run to preserve, so a Predictor trained against a
+        past execution to preserve, so a Predictor trained against a
         since-changed node is simply stale.
 
         Args:

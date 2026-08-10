@@ -1,4 +1,4 @@
-"""SQLite persistence for Trial definitions and their run history.
+"""SQLite persistence for Trial definitions and their execution history.
 
 Two tables:
 
@@ -17,8 +17,8 @@ redefining a name overwrites its row in both tables.
 
 Neither table stores a content hash. Whether a stored definition still
 matches a given Trial is a plain value comparison (``has``) — a hash would
-only restate what that already compares directly. ``experiment_hist`` is a
-run log, not the source of truth for a definition: it does not attempt to
+only restate what that already compares directly. ``experiment_hist`` is an
+execution log, not the source of truth for a definition: it does not attempt to
 recover what a name's definition used to be before it was redefined.
 
 **A Trial leaves no artifact.** It is a candidate being measured, so what is
@@ -75,11 +75,11 @@ _SCHEMA_SQL = """
 
 
 class TrialStore(ArtifactStore):
-    """Registry of Trial definitions plus a per-fold run history.
+    """Registry of Trial definitions plus a per-fold execution history.
 
     Inherits :class:`~mllabs._store.ArtifactStore`'s method shape but does
     not override any of it — it never persists obj/result artifacts, only
-    definitions (``trials``) and run history (``experiment_hist``). See
+    definitions (``trials``) and execution history (``experiment_hist``). See
     ``ArtifactStore`` for why the interface is shared anyway.
 
     ``stores_artifacts`` is left at the base class's ``False``, which is what
@@ -170,7 +170,7 @@ class TrialStore(ArtifactStore):
         """A row back as the :class:`~mllabs.Trial` it was stored from.
 
         Definitions come back as objects rather than dicts because this store
-        is now where a run reads the Trial it is about to execute:
+        is now where an Experimenter reads the Trial it is about to execute:
         ``Experimenter.exp`` is given names and resolves them here, so what
         comes out has to be the same thing that went in.
         """

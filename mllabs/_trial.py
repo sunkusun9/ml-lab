@@ -28,7 +28,7 @@ class Trial:
 
     The Trainer side makes the opposite call, which is why it has its own
     :class:`~mllabs.Predictor` rather than reusing this class: a Trainer keeps
-    no historical runs, so a model trained against a since-changed node is
+    no past executions to preserve, so a model trained against a since-changed node is
     just stale and ``Trainer.reset_nodes`` cascades into it.
 
     Attributes:

@@ -1,9 +1,9 @@
 """One Experimenter's own persisted state, living in its own directory.
 
 An Experimenter owns this — it builds one from its ``path`` rather than being
-handed one, so everything needed to reopen a run is inside that directory and
+handed one, so everything needed to reopen it is inside that directory and
 nothing has to be resolved from a Project. The project-wide question of *which*
-runs exist is a different one, answered by
+Experimenters exist is a different one, answered by
 :class:`~mllabs._project_store.ProjectStore`.
 
 Three kinds of state live here:
@@ -19,7 +19,7 @@ import pickle as pkl
 import sqlite3
 from pathlib import Path
 
-from ._run_common import load_pipeline, save_pipeline
+from ._common import load_pipeline, save_pipeline
 
 _SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS experimenter (
@@ -34,7 +34,7 @@ _SCHEMA_SQL = """
 
 _COLUMNS = ('name', 'data_key', 'title', 'pipeline_name', 'pipeline_version')
 
-#: Basename of the per-run db, without the ``.db`` suffix.
+#: Basename of the Experimenter's own db, without the ``.db`` suffix.
 DB_NAME = '__exp'
 
 
@@ -47,6 +47,17 @@ class ExperimenterStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.executescript(_SCHEMA_SQL)
+
+    @staticmethod
+    def stored_at(path, name=DB_NAME):
+        """Whether *path* holds a saved Experimenter.
+
+        A static method because constructing the store creates the directory
+        and an empty db — asking whether one exists must not bring it into
+        being. Which file answers the question is this class's business, so
+        callers do not spell the name out.
+        """
+        return (Path(path) / f'{name}.db').exists()
 
     def save(self, meta):
         """Insert or replace the meta row from a ``{column: value}`` dict.
@@ -86,7 +97,7 @@ class ExperimenterStore:
         """The meta row as a dict (without ``splitters``), or ``None``.
 
         *name* is optional: there is only ever one row, so omitting it reads
-        whichever run this directory holds.
+        whichever Experimenter this directory holds.
         """
         query = "SELECT * FROM experimenter"
         params = ()
@@ -113,7 +124,7 @@ class ExperimenterStore:
             )
 
     def load_splitters(self, name=None):
-        """The stored splitters dict, or ``None`` if this run has none."""
+        """The stored splitters dict, or ``None`` if there are none."""
         query = "SELECT splitters FROM experimenter"
         params = ()
         if name is not None:

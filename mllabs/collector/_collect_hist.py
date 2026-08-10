@@ -26,7 +26,7 @@ def utc_now():
 
 
 class CollectHist:
-    """Per-fold outcome of every collect call, for one run's registry.
+    """Per-fold outcome of every collect call, for one Experimenter's registry.
 
     Lives beside the :class:`~mllabs.Collectors` registry that owns it, which
     is one Experimenter's — so a row is identified by

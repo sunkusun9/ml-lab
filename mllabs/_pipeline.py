@@ -624,7 +624,7 @@ class Pipeline:
     handed to ``Experimenter.exp``.
 
     Consumers (Experimenter, Trainer, Inferencer) hold one of these rather than
-    a builder, so later edits to the builder cannot silently change a run that
+    a builder, so later edits to the builder cannot silently change work that
     is already under way.
 
     Attributes:
@@ -1055,7 +1055,7 @@ class PipelineBuilder:
 
         This is the hand-off point to Experimenter/Trainer/Inferencer: they take
         the built Pipeline, never the builder, so later ``set_grp``/``set_node``
-        calls do not reach into a run already in progress. Call ``build()``
+        calls do not reach into work already in progress. Call ``build()``
         again and re-set it to publish new definitions.
 
         Returns:

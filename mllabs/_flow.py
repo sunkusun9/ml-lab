@@ -18,14 +18,14 @@ class DataFlow:
 
     Wraps a :class:`~mllabs._store.NodeStore` (composition, not inheritance)
     plus this fold's own ``(outer_idx, inner_idx)`` — ``NodeStore`` is shared
-    across every fold of a run (constructed once, at that run's base path),
-    so both are needed on every call into it. Transforms source data through
-    the stage graph given edges. No build functionality.
+    across every fold of an Experimenter/Trainer (constructed once, at its base
+    path), so both are needed on every call into it. Transforms source data
+    through the stage graph given edges. No build functionality.
 
     Nothing is read from the store until something asks for it. Constructing
-    a flow is free, which matters because a run constructs one per fold up
-    front: opening a built run used to materialise every fold's processors
-    before the caller had asked for anything.
+    a flow is free, which matters because an Experimenter/Trainer constructs one
+    per fold up front: reopening a built one used to materialise every fold's
+    processors before the caller had asked for anything.
 
     ``node_objs`` is a cache of ``obj.pkl``, not a place anything lives. The
     store is the only source, so dropping an entry is always safe and there is
@@ -33,8 +33,8 @@ class DataFlow:
     next takes it off disk.
 
     Args:
-        store (NodeStore): This run's artifact+history store (shared across
-            every fold of the run — see :class:`TrainDataFlow`).
+        store (NodeStore): The owning Experimenter's/Trainer's artifact+history
+            store (shared across all of its folds — see :class:`TrainDataFlow`).
         outer_idx, inner_idx: This fold's coordinates within ``store``.
     """
 
@@ -186,18 +186,19 @@ class TrainDataFlow(DataFlow):
     """Single (outer, inner) fold data flow with stage build capability.
 
     Args:
-        store (NodeStore): This run's artifact+history store — the *same*
-            instance across every fold of a run (an Experimenter's OuterFolds
-            or a Trainer's TrainFolds each construct it once and share it).
-            Since it's per-run, an Experimenter's and a Trainer's stores are
-            always at different base paths — no coordinate-faking needed to
+        store (NodeStore): The owning Experimenter's/Trainer's artifact+history
+            store — the *same* instance across every one of its folds (an
+            Experimenter's OuterFolds or a Trainer's TrainFolds each construct
+            it once and share it). Since there is one per Experimenter/Trainer,
+            their stores are always at different base paths — no coordinate-faking needed to
             keep their artifacts/history apart (contrast the DataCache note
             below, which is a separate, shared-project-wide concern).
         data_source: DataSourceProvider providing train/valid/test raw data
         cache: DataCache shared instance (optional) — keyed by
             ``(self.scope, node, typ)``. ``self.scope`` is a random id this
             instance generates for itself in its own constructor (2026-08-01)
-            — since exactly one TrainDataFlow exists per (run, fold), that id
+            — since exactly one TrainDataFlow exists per fold of one
+            Experimenter/Trainer, that id
             alone already uniquely identifies this fold; no need to fold
             ``outer_idx``/``inner_idx`` or a store path string into the key.
         outer_idx, inner_idx: This fold's coordinates — the NodeStore key
