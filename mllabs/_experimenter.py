@@ -10,7 +10,7 @@ from sklearn.model_selection import ShuffleSplit
 from ._data_wrapper import wrap, unwrap, DataWrapperProvider
 from ._flow import TrainDataFlow
 from ._store import NodeStore
-from ._experimenter_store import ExperimenterStore, DB_NAME as _EXP_DB
+from ._experimenter_store import ExperimenterStore
 from ._describer import desc_spec
 from ._logger import resolve_logger
 from .collector import Collectors
@@ -65,7 +65,8 @@ def _stop_native_redirect(state):
     sys.stdout = state['orig_stdout']
     sys.stderr = state['orig_stderr']
     state['log_f'].close()
-from ._run_common import resolve_common_status, require_built_pipeline, format_errors
+from ._common import resolve_common_status, require_built_pipeline, format_errors
+from ._pipeline import Pipeline
 
 
 
@@ -73,8 +74,8 @@ from ._run_common import resolve_common_status, require_built_pipeline, format_e
 class OuterFold:
     """One outer fold: test indices and per-inner-fold TrainDataFlows.
 
-    Every TrainDataFlow of every OuterFold shares the same NodeStore (this
-    run's own — see ``Experimenter.node_store``); only ``outer_idx``/``j``
+    Every TrainDataFlow of every OuterFold shares the same NodeStore (the
+    Experimenter's own — see ``Experimenter.node_store``); only ``outer_idx``/``j``
     (inner_idx) tell them apart.
 
     DataWrapperProvider inside each TrainDataFlow persists only indices — DataWrapper is transient.
@@ -118,19 +119,19 @@ class Experimenter():
     Splits data using *sp* (outer) and optionally *sp_v* (inner), then runs
     node builds and Trial experiments fold-by-fold.
 
-    No ``Project`` dependency, and nothing to inject but a ``cache``: the run
-    owns its own :class:`~mllabs.ExperimenterStore`, built from ``path``, and
-    everything needed to reopen it lives in that directory. ``Project`` only
-    supplies the path and records the name in its index.
+    No ``Project`` dependency, and nothing to inject but a ``cache``: an
+    Experimenter owns its own :class:`~mllabs.ExperimenterStore`, built from
+    ``path``, and everything needed to reopen it lives in that directory.
+    ``Project`` only supplies the path and records the name in its index.
 
     Constructing is *creating*. It splits the data and writes a fresh state,
-    so pointing it at an existing directory starts that run over rather than
-    resuming it — :meth:`load_experimenter` is how an existing one comes back.
+    so pointing it at an existing directory starts over rather than
+    resuming — :meth:`load_experimenter` is how an existing one comes back.
     A Pipeline is never a constructor argument either way; adopt one with
-    :meth:`set_pipeline`, which saves it as this run's ``pipeline.pkl``.
+    :meth:`set_pipeline`, which saves it as this Experimenter's ``pipeline.pkl``.
 
     Args:
-        path: This run's own base directory (``{project}/exp/{name}`` when
+        path: Its own base directory (``{project}/exp/{name}`` when
             created via a Project), created if it does not exist.
         name (str): Experimenter name. This is its identity — the directory
             above and the key used in TrialStore history.
@@ -145,28 +146,28 @@ class Experimenter():
         data_key (str, optional): Identifier verified on reload to prevent
             data mismatch.
         cache (DataCache, optional): Shared LRU cache.
-        trial_store (TrialStore, optional): Where this run reads the Trials it
-            is asked to run and records what they did. Injected once, like
-            *cache*, rather than re-supplied per call — a project has exactly
-            one and it does not change over a run's life. It is not persisted:
-            a ``TrialStore`` is project-level, and a run reopened from its own
-            directory has no way to find one that would not amount to guessing
-            at the layout above it.
+        trial_store (TrialStore, optional): Where this Experimenter reads the
+            Trials it is asked to run and records what they did. Injected once,
+            like *cache*, rather than re-supplied per call — a project has
+            exactly one and it does not change over an Experimenter's life. It
+            is not persisted: a ``TrialStore`` is project-level, and an
+            Experimenter reopened from its own directory has no way to find one
+            that would not amount to guessing at the layout above it.
 
     Attributes:
         cache (DataCache): Shared LRU cache, or ``None``.
-        collectors (Collectors): This run's own Collector registry, over
+        collectors (Collectors): This Experimenter's own Collector registry, over
             ``{path}/collectors`` — definitions, collected data and
-            :class:`~mllabs.CollectHist` alike. It belongs to the run rather
-            than the project because what a Collector writes is keyed by node
-            name and nothing else, so two runs sharing a registry would
+            :class:`~mllabs.CollectHist` alike. It belongs here rather
+            than to the project because what a Collector writes is keyed by node
+            name and nothing else, so two Experimenters sharing a registry would
             overwrite each other on any Trial name they have in common.
-            Constructing the Experimenter restores it, so reopening a run
+            Constructing the Experimenter restores it, so reopening one
             brings back its Collectors with it.
-        pipeline (Pipeline): The adopted Pipeline, kept as this run's own
-            ``pipeline.pkl``. The ``(pipeline_name, pipeline_version)``
-            pointer is recorded too, but only as provenance — it names the
-            project version this copy was taken from.
+        pipeline (Pipeline): The adopted Pipeline, kept as this Experimenter's own
+            ``pipeline.pkl``. ``pipeline_version`` is recorded too, but only
+            as provenance — it names the published version this copy was
+            taken from, and is ``None`` for an unpublished draft.
 
     Note:
         ``build``, ``exp`` and other node-graph-aware methods use
@@ -231,11 +232,18 @@ class Experimenter():
             )
             for i, (test_idx, inner_folds) in enumerate(raw_splits)
         ]
-        self.pipeline = None
-        self.pipeline_name = 'pipeline'
-        self.pipeline_version = None
+        self.pipeline = Pipeline.empty()
         self._os_log_state = None
         self._save()
+
+    @property
+    def pipeline_version(self):
+        """The adopted Pipeline's version — ``None`` only for an in-memory build.
+
+        Read off :attr:`pipeline` rather than kept beside it, so there is no
+        second copy to fall out of step with it.
+        """
+        return self.pipeline.version
 
     @staticmethod
     def load_experimenter(path, data, data_key=None, aug_data=None, cache=None,
@@ -244,7 +252,7 @@ class Experimenter():
 
         Everything comes out of that directory — meta and splitters from its
         ``__exp.db``, the Pipeline from its ``pipeline.pkl`` — so no Project
-        is involved and no ``(pipeline_name, pipeline_version)`` is resolved.
+        is involved and no ``pipeline_version`` is resolved.
         The name is the directory's own.
 
         Args:
@@ -254,20 +262,18 @@ class Experimenter():
                 given when the Experimenter was created.
             aug_data (optional): External data appended to inner train splits.
             cache (DataCache, optional): Shared LRU cache.
-            trial_store (TrialStore, optional): Not saved with the run, so a
+            trial_store (TrialStore, optional): Not saved on disk, so a
                 reopened Experimenter has one only if it is given one here.
 
         Returns:
-            Experimenter: The reopened run.
+            Experimenter: The reopened Experimenter.
 
         Raises:
             KeyError: If *path* holds no saved Experimenter.
             ValueError: If *data_key* does not match the saved value.
         """
         path = Path(path)
-        # Checked before building the store, which would otherwise create the
-        # directory and an empty db for a run that does not exist.
-        if not (path / f'{_EXP_DB}.db').exists():
+        if not ExperimenterStore.stored_at(path):
             raise KeyError(f"No experimenter saved at {path}")
         store = ExperimenterStore(path)
         meta = store.fetch()
@@ -292,7 +298,7 @@ class Experimenter():
         )
         pipeline = store.load_pipeline()
         if pipeline is not None:
-            exp.set_pipeline(pipeline, meta.get('pipeline_name') or 'pipeline')
+            exp.set_pipeline(pipeline)
         return exp
 
     def open_os_log(self, log_path=None):
@@ -347,15 +353,19 @@ class Experimenter():
         finally:
             self.close_os_log()
 
-    def set_pipeline(self, pipeline, pipeline_name=None):
-        """Adopt an already-loaded Pipeline.
+    def set_pipeline(self, pipeline):
+        """Adopt an already-loaded Pipeline, published or still a draft.
 
         Takes the Pipeline object directly rather than a version number —
-        this class has no way to load one by name/version itself (see the
-        class docstring); ``Project.experimenter()`` resolves that before
+        this class has no way to load one by version itself (see the class
+        docstring); ``Project.add_experimenter()`` resolves that before
         calling this. ``self.pipeline_version`` is read straight off
         *pipeline* (its ``.version``), so it's never tracked as a separate,
         possibly-diverging value.
+
+        Any status is accepted, unlike ``Trainer.set_pipeline``. Experimenting
+        against a definition still being edited is the point of experimenting;
+        it is training that has to be able to say what it trained on.
 
         The Pipeline is written to this Experimenter's own ``pipeline.pkl``,
         which is what the constructor reads back — reopening needs only this
@@ -374,31 +384,23 @@ class Experimenter():
 
         Args:
             pipeline (Pipeline): Already-built, already-loaded Pipeline.
-            pipeline_name (str, optional): Name to record this Pipeline
-                under in this Experimenter's own meta. Defaults to the one
-                this Experimenter was created with.
 
         Returns:
             Pipeline: *pipeline*, unchanged.
         """
         require_built_pipeline(pipeline)
-        if pipeline_name is not None:
-            self.pipeline_name = pipeline_name
-        if self.pipeline is not None:
+        # Only a *switch* invalidates. With nothing adopted yet the empty
+        # Pipeline is the absence of a prior definition, not a claim that
+        # nothing was built — reopening restores artifacts, and diffing
+        # against the placeholder would delete every one of them.
+        if not self.pipeline.is_empty:
             stale = pipeline.diff_from(self.pipeline)
             if stale:
                 self.reset_nodes(sorted(stale))
         self.pipeline = pipeline
-        self.pipeline_version = pipeline.version
         self._store.save_pipeline(pipeline)
-        self._store.set(self.name, 'pipeline_name', self.pipeline_name)
         self._store.set(self.name, 'pipeline_version', self.pipeline_version)
         return pipeline
-
-    def _require_pipeline(self):
-        if self.pipeline is None:
-            raise RuntimeError("No pipeline set. Call set_pipeline(pipeline) first.")
-        return self.pipeline
 
     def _require_trial_store(self):
         if self.trial_store is None:
@@ -426,7 +428,7 @@ class Experimenter():
     def get_status(self, node_name):
         """Return the disk status of a Pipeline node across all folds.
 
-        One :class:`NodeStore` covers this whole run, every fold sharing the
+        One :class:`NodeStore` covers this whole Experimenter, every fold sharing the
         same instance (told apart by ``outer_idx``/``inner_idx``). Returns
         the common status if all folds agree, or ``'inconsistent'`` if they
         differ.
@@ -463,21 +465,21 @@ class Experimenter():
             self.cache.clear_nodes(nodes)
 
     def remove_trial_result(self, name):
-        """Drop what this run has of Trial *name* — its results and its history.
+        """Drop what this Experimenter has of Trial *name* — its results and its history.
 
         A Trial leaves no artifact, so its result is whatever its Collectors
-        kept, held in this run's own registry; :meth:`Collectors.remove_results`
-        clears that along with the matching ``CollectHist`` rows. This run's
-        ``experiment_hist`` rows go too, which is what makes the next ``exp()``
-        run the Trial again: folds are skipped on the strength of a recorded
-        ``'built'`` status and nothing else, so the history is the only thing
-        holding one back.
+        kept, held in this Experimenter's own registry;
+        :meth:`Collectors.remove_results` clears that along with the matching
+        ``CollectHist`` rows. Its ``experiment_hist`` rows go too, which is what
+        makes the next ``exp()`` run the Trial again: folds are skipped on the
+        strength of a recorded ``'built'`` status and nothing else, so the
+        history is the only thing holding one back.
 
-        Only this Experimenter's rows go — another run's record of the same
-        Trial is its own — and the definition stays, since it belongs to the
-        project. Removing that too is ``Project.remove_trial``.
+        Only this Experimenter's rows go — another Experimenter's record of the
+        same Trial is its own — and the definition stays, since it belongs to
+        the project. Removing that too is ``Project.remove_trial``.
 
-        The history half is skipped when this run has no :attr:`trial_store`,
+        The history half is skipped when there is no :attr:`trial_store`,
         leaving only the collected results to remove.
 
         Args:
@@ -488,17 +490,17 @@ class Experimenter():
             self.trial_store.remove_hist(trial_name=name, experimenter=self.name)
 
     def show_error_nodes(self, nodes=None, traceback=False):
-        """Errors from this run's Pipeline nodes, one line per failed fold.
+        """Errors from this Experimenter's Pipeline nodes, one line per failed fold.
 
         Pipeline nodes only, as the name says. Error detail does not live on
-        the artifact (see ``NodeStore``) — it is in this run's own
+        the artifact (see ``NodeStore``) — it is in this Experimenter's own
         ``node_hist`` — so this reads history rather than walking fold
         directories. Trial errors are the project's to report, since that is
         where their history lives: ``Project.show_error_trials(experimenter=)``.
 
         Args:
             nodes (list[str], optional): Node names to check. ``None`` checks
-                every node recorded for this run.
+                every node recorded here.
             traceback (bool): Include full traceback in output.
 
         Returns:
@@ -531,7 +533,7 @@ class Experimenter():
         from ._executor import _execute_single, _execute_multi
         from ._tracker import LoggerExecuteTracker, NodeInfoTracker
         logger = resolve_logger(logger)
-        pipeline = self._require_pipeline()
+        pipeline = self.pipeline
         pipeline.check_data_compatibility(self.data)
         node_names = set(pipeline.get_node_names(nodes))
         target_nodes = [i for i in pipeline.topo_order() if i in node_names]
@@ -602,14 +604,14 @@ class Experimenter():
 
         Args:
             trials (list[str]): Trial names, out of :attr:`trial_store`. Each
-                runs on every fold of this run; folds already recorded
+                runs on every fold here; folds already recorded
                 ``'built'`` are dropped, so passing the same names again
-                continues a partial run instead of repeating it.
+                continues an interrupted pass instead of repeating it.
             collectors (list[str], optional): Names to collect with, out of
-                this run's own :attr:`collectors` registry. ``None`` (default)
-                uses every Collector registered there; ``[]`` collects nothing.
-                Outcomes go to that registry's ``hist`` — the history belongs
-                to the run, not to the selection made for one call.
+                this Experimenter's own :attr:`collectors` registry. ``None``
+                (default) uses every Collector registered there; ``[]`` collects
+                nothing. Outcomes go to that registry's ``hist`` — the history
+                belongs to the Experimenter, not to the selection made for one call.
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
             gpu_id_list (list, optional): GPU IDs to use for GPU-enabled trials.
             logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
@@ -617,9 +619,9 @@ class Experimenter():
         **Names, not Trials.** A Trial belongs to the project, and this reads
         it out of :attr:`trial_store` rather than taking a definition in.
         Running was previously also how a Trial got registered, which put
-        authoring inside a run — you could not add one to the project without
-        executing it, and an ``exp()`` call could silently redefine a name
-        another run had already used. Authoring is ``Project.set_trial`` now,
+        authoring inside execution — you could not add one to the project
+        without executing it, and an ``exp()`` call could silently redefine a
+        name another Experimenter had already used. Authoring is ``Project.set_trial`` now,
         and this only executes what is already there.
 
         Every fold that actually runs records its outcome in the store as it
@@ -628,13 +630,13 @@ class Experimenter():
         recorded when they ran.
 
         Raises:
-            RuntimeError: If this run has no ``trial_store``.
+            RuntimeError: If this Experimenter has no ``trial_store``.
             KeyError: If a name is not registered in it.
         """
         from ._executor import _execute_single, _execute_multi
         from ._tracker import LoggerExecuteTracker, TrialHistTracker
         logger = resolve_logger(logger)
-        pipeline = self._require_pipeline()
+        pipeline = self.pipeline
         pipeline.check_data_compatibility(self.data)
         trial_store = self._require_trial_store()
 
@@ -676,13 +678,13 @@ class Experimenter():
             logger.info(f"Exp complete: {len(jobs)} job(s)")
 
     def _resolve_collectors(self, names):
-        """Collector instances for *names*, out of this run's own registry.
+        """Collector instances for *names*, out of this Experimenter's own registry.
 
         Names rather than instances, for the same reason ``processor`` and
         ``adapter`` are string refs: a Collector this registry does not know
-        has no place in this run to write to, and would quietly deposit its
-        results outside the run — which is exactly what a per-run registry
-        exists to prevent. ``Collectors.resolve`` raises on an unknown name,
+        has no place here to write to, and would quietly deposit its
+        results outside this Experimenter — which is exactly what giving each
+        one its own registry prevents. ``Collectors.resolve`` raises on an unknown name,
         so a typo is not a silent "collected nothing" either.
         """
         if names is not None:
@@ -699,16 +701,16 @@ class Experimenter():
     def _make_jobs(self, trials):
         """Expand Trial names into one Job per fold that still needs running.
 
-        A name means the whole grid: every ``(outer_idx, inner_idx)`` of this
-        run. Fold selection is not something a caller has to spell out —
+        A name means the whole grid: every ``(outer_idx, inner_idx)`` here.
+        Fold selection is not something a caller has to spell out —
         ``'built'`` folds are dropped here, so handing the same names back
-        after a partial run continues it rather than repeating it.
+        after an interrupted pass continues it rather than repeating it.
 
         A fold is skipped only if ``TrialStore.experiment_hist`` records it as
         ``'built'``; one recorded ``'error'``, or with no row at all, gets a
         job. Whether the definition changed since is not checked, and can no
         longer differ silently: ``Project.set_trial`` refuses to redefine a
-        name that has a successful run behind it. Rerunning one is
+        name that has succeeded before. Rerunning one is
         :meth:`remove_trial_result` and nothing else.
 
         The definition, its spec and its GPU verdict are resolved once per
@@ -760,7 +762,7 @@ class Experimenter():
         return self.outer_folds[o_idx].get_test_data(edges, i_idx)
 
     def get_node_info(self):
-        pipeline = self._require_pipeline()
+        pipeline = self.pipeline
         lines = [f"# Experiment Pipeline Summary\n"]
         lines.append(f"- **DataSource**\n")
 
@@ -802,8 +804,8 @@ class Experimenter():
         stdout/stderr to ``{path}/__worker_logs/worker_{i}.log``, capturing
         native library chatter (TensorFlow, LightGBM, CatBoost, cuDNN/XLA) that
         would otherwise pollute the console. This process's own (master)
-        output goes to ``worker_logs/master.log``. Each run overwrites the
-        previous.
+        output goes to ``worker_logs/master.log``. Each execution overwrites
+        the previous.
 
         Args:
             worker: ``int`` for a per-worker log, ``'master'`` for this
@@ -835,7 +837,6 @@ class Experimenter():
             'name': self.name,
             'data_key': self.data_key,
             'title': self.title,
-            'pipeline_name': self.pipeline_name,
             'pipeline_version': self.pipeline_version,
         })
         self._store.save_splitters(self.name, {

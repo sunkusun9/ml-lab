@@ -20,7 +20,7 @@ collectors.set_collector(
 
 The three positional arguments are the name, the Collector class (as a string or a class), and the Connector (as an instance or a ref spec). Everything else goes in `params`.
 
-Constructing the registry *is* restoring it, and the Experimenter constructs one — reopening a run with `load_experimenter` hands back everything registered on it before.
+Constructing the registry *is* restoring it, and the Experimenter constructs one — reopening a run hands back everything registered on it before.
 
 ```python
 collectors.names()

@@ -1,13 +1,14 @@
-"""Project-level index of which runs exist.
+"""Project-level index of which Experimenters and Trainers exist.
 
-Names only. Everything *about* a run — its splitters, its data key, which
-Pipeline it adopted — belongs to that run and is stored in its own directory,
+Names only. Everything *about* one — its splitters, its data key, which
+Pipeline it adopted — belongs to it and is stored in its own directory,
 so this table stays a list and never becomes a second source of truth to keep
-in sync. Answering "what is in this project?" without opening every run
+in sync. Answering "what is in this project?" without opening every
 directory is the whole job.
 
-Registration is :class:`~mllabs.Project`'s doing: a run constructed directly,
-without going through a Project, is simply not in anyone's index.
+Registration is :class:`~mllabs.Project`'s doing: an Experimenter or Trainer
+constructed directly, without going through a Project, is simply not in
+anyone's index.
 """
 import sqlite3
 from pathlib import Path

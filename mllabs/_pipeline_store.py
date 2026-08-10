@@ -41,9 +41,19 @@ _SCHEMA_SQL = """
     );
     CREATE TABLE IF NOT EXISTS versions (
         version INTEGER PRIMARY KEY,
-        path TEXT NOT NULL
+        status TEXT NOT NULL,
+        path TEXT NOT NULL,
+        builder_path TEXT NOT NULL
     );
 """
+
+#: A version that has been frozen and is the current one. Always exactly one.
+PUBLISHED = 'published'
+#: A version that was published and has since been succeeded by a newer one.
+#: Frozen and still referenceable, and the only status that can be deleted.
+ARCHIVED = 'archived'
+#: The builder's working copy. Editable, unnumbered, never a row in ``versions``.
+OPEN = 'open'
 
 
 class PipelineStore:
@@ -163,43 +173,94 @@ class PipelineStore:
     # built Pipeline versions
     # ------------------------------------------------------------------
 
-    def save_version(self, pipeline):
-        """Pickle *pipeline* as the next version; return the version number.
+    def publish(self, pipeline, builder, version=None):
+        """Freeze *pipeline* as the next version; return the version number.
 
-        Every call mints a new version — there is no content dedup. The
-        counter lives here, in the same db as the definitions that produced
-        it, rather than in a project-wide registry.
+        Two artifacts, because they answer different needs. ``v{n}.pkl`` is the
+        built Pipeline, which is what an Experimenter or Trainer adopts.
+        ``v{n}_builder.pkl`` is *builder* itself, kept because ``build()``
+        resolves group inheritance away — a built snapshot has no groups left to
+        edit, so it could never come back as a working definition.
+
+        Whatever was published before becomes :data:`ARCHIVED`: only the newest
+        is the current one.
+
+        Args:
+            pipeline (Pipeline): The built Pipeline to freeze.
+            builder (PipelineBuilder): The definition it was built from.
+            version (int, optional): Number to publish under. Defaults to the
+                next one. ``Project`` passes 0 to seed the empty baseline, so
+                that "there is always a published version" holds from the
+                moment a project exists.
         """
         with sqlite3.connect(str(self.db_path)) as conn:
-            row = conn.execute("SELECT COALESCE(MAX(version), 0) FROM versions").fetchone()
-            version = row[0] + 1
+            if version is None:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(version), 0) FROM versions"
+                ).fetchone()
+                version = row[0] + 1
             version_path = self.db_path.parent / f'v{version}.pkl'
+            builder_path = self.db_path.parent / f'v{version}_builder.pkl'
             pipeline.version = version
+            pipeline.status = PUBLISHED
             with open(version_path, 'wb') as f:
                 pkl.dump(pipeline, f)
+            with open(builder_path, 'wb') as f:
+                pkl.dump(builder, f)
             conn.execute(
-                "INSERT INTO versions (version, path) VALUES (?, ?)",
-                (version, str(version_path)),
+                "UPDATE versions SET status = ? WHERE status = ?", (ARCHIVED, PUBLISHED)
+            )
+            conn.execute(
+                "INSERT INTO versions (version, status, path, builder_path) VALUES (?, ?, ?, ?)",
+                (version, PUBLISHED, str(version_path), str(builder_path)),
             )
         return version
 
     def load_version(self, version=None):
-        """Load a saved Pipeline version (latest if *version* is omitted)."""
-        if not self.exists():
-            raise KeyError(f"No pipeline db at {self.db_path}")
-        with sqlite3.connect(str(self.db_path)) as conn:
-            if version is None:
-                row = conn.execute(
-                    "SELECT path FROM versions ORDER BY version DESC LIMIT 1"
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT path FROM versions WHERE version = ?", (version,)
-                ).fetchone()
-        if not row:
-            raise KeyError(f"No saved pipeline version {version!r} in {self.db_path}")
-        with open(row[0], 'rb') as f:
+        """A frozen Pipeline by number, or the published one if *version* is omitted."""
+        row = self._version_row(version)
+        with open(row['path'], 'rb') as f:
             return pkl.load(f)
+
+    def load_builder(self, version=None):
+        """The PipelineBuilder a version was published from."""
+        row = self._version_row(version)
+        with open(row['builder_path'], 'rb') as f:
+            return pkl.load(f)
+
+    def get_status(self, version):
+        """:data:`PUBLISHED` or :data:`ARCHIVED`, or ``None`` if there is no such version."""
+        if not self.exists():
+            return None
+        with sqlite3.connect(str(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT status FROM versions WHERE version = ?", (version,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def remove_version(self, version):
+        """Delete an archived version and both its pickles.
+
+        Archived only. ``published`` is the current definition and ``open`` is
+        the working copy — neither is disposable. Removing an archived version
+        breaks nothing that ran against it, since every Experimenter and Trainer
+        keeps its own Pipeline copy; what goes is what a provenance pointer
+        refers to.
+
+        Raises:
+            KeyError: If there is no such version.
+            ValueError: If it is not archived.
+        """
+        row = self._version_row(version)
+        if row['status'] != ARCHIVED:
+            raise ValueError(
+                f"Pipeline version {version} is {row['status']}, and only "
+                f"{ARCHIVED} versions can be removed."
+            )
+        for key in ('path', 'builder_path'):
+            Path(row[key]).unlink(missing_ok=True)
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute("DELETE FROM versions WHERE version = ?", (version,))
 
     def list_versions(self):
         if not self.exists():
@@ -208,3 +269,23 @@ class PipelineStore:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM versions ORDER BY version").fetchall()
         return [dict(r) for r in rows]
+
+    def _version_row(self, version=None):
+        if not self.exists():
+            raise KeyError(f"No pipeline db at {self.db_path}")
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            if version is None:
+                row = conn.execute(
+                    "SELECT * FROM versions WHERE status = ?", (PUBLISHED,)
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM versions WHERE version = ?", (version,)
+                ).fetchone()
+        if not row:
+            raise KeyError(
+                f"No published pipeline in {self.db_path}" if version is None
+                else f"No pipeline version {version!r} in {self.db_path}"
+            )
+        return row

@@ -2,7 +2,7 @@ import re
 import uuid
 from pathlib import Path
 from ._describer import desc_pipeline, desc_node, compare_nodes
-from ._pipeline_store import PipelineStore
+from ._pipeline_store import PipelineStore, OPEN, PUBLISHED, ARCHIVED
 from ._edge_dsl import referenced_nodes, validate_edges, iter_segments, eval_expr
 
 
@@ -193,6 +193,21 @@ def _definition_of(spec):
     ``name`` is excluded — renaming a node does not change what it computes.
     """
     return {k: getattr(spec, k) for k in _DEFINITION_KEYS}
+
+
+def _same_definition(pipeline, other):
+    """True if *pipeline* and *other* say exactly the same thing.
+
+    Not the same question as :meth:`Pipeline.diff_from`, which answers "what
+    artifacts must be reset" and so returns *node* names only. A DataSource
+    change that no node reads stales nothing — deliberately — but it is still
+    a different definition, and a version has to appear for it. Without the
+    DataSource comparison here, a Pipeline of a schema and no nodes could
+    never leave the version it was first published as.
+    """
+    return (not pipeline.diff_from(other)
+            and pipeline.datasource.schema == other.datasource.schema
+            and pipeline.datasource.targets == other.datasource.targets)
 
 
 class _SchemaColumns:
@@ -624,7 +639,7 @@ class Pipeline:
     handed to ``Experimenter.exp``.
 
     Consumers (Experimenter, Trainer, Inferencer) hold one of these rather than
-    a builder, so later edits to the builder cannot silently change a run that
+    a builder, so later edits to the builder cannot silently change work that
     is already under way.
 
     Attributes:
@@ -632,9 +647,14 @@ class Pipeline:
             the DataSource (a :class:`_BuiltDataSource`).
         pipeline_id (str): Identity of the builder this was built from.
         build_id (str): Identity of this particular build.
-        version (int | None): Set by :meth:`Project.build_pipeline` once this
-            Pipeline is persisted as a version; ``None`` for an unsaved,
-            in-memory build.
+        version (int | None): Set by :meth:`Project.publish_pipeline` when this
+            Pipeline is frozen as a version. ``None`` while it is an
+            unpublished build of the working copy, which is deliberate: a draft
+            changes under anyone who adopted it, so a number here would be a
+            claim the record could not keep. ``build_id`` says which draft.
+        status (str): ``'open'`` until published, then ``'published'``. A
+            version demoted by a later publish is ``'archived'`` — read from
+            the store, since the copies already handed out cannot be updated.
     """
 
     def __init__(self, nodes, datasource, pipeline_id, build_id=None):
@@ -643,11 +663,40 @@ class Pipeline:
         self.pipeline_id = pipeline_id
         self.build_id = build_id if build_id is not None else str(uuid.uuid4())
         self.version = None
+        self.status = OPEN
         self._topo_order = _affected_nodes(self.nodes, [None])
         self._specs = {
             name: node.get_spec()
             for name, node in self.nodes.items() if name is not None
         }
+
+    @classmethod
+    def empty(cls, pipeline_id=None):
+        """A Pipeline with no nodes — "there is nothing to build", as an object.
+
+        Having no pipeline is a legitimate state, not a missing one: Trials
+        read the DataSource directly, so an Experimenter with no nodes at all
+        still runs. Saying that with an empty Pipeline rather than ``None``
+        means every consumer stays branch-free — ``build()`` finds no jobs,
+        ``topo_order()`` is empty, ``check_data_compatibility`` passes
+        vacuously — instead of each one guarding for absence.
+
+        Inside a Project this is version 0, published at creation, so the empty
+        state is a real row rather than a fabricated object. This constructor
+        is for the standalone case, where there is no store to mint from — the
+        same reason a db-less builder's build stays ``open`` and unnumbered.
+        """
+        return cls({}, _BuiltDataSource('Data_Source', {}, [], []), pipeline_id)
+
+    @property
+    def is_empty(self):
+        """No nodes at all — only the DataSource, which ``nodes`` always holds.
+
+        What it means depends on which side of an adoption you are on: as the
+        Pipeline being adopted, nothing to build; as the one being replaced,
+        nothing that was ever adopted, so nothing a switch could invalidate.
+        """
+        return len(self.nodes) == 1
 
     @property
     def datasource(self):
@@ -1051,15 +1100,26 @@ class PipelineBuilder:
         _check_data_compatibility(self.datasource.schema, data)
 
     def build(self):
-        """Resolve group inheritance and return an immutable :class:`Pipeline`.
+        """Resolve group inheritance and return an immutable, published :class:`Pipeline`.
 
         This is the hand-off point to Experimenter/Trainer/Inferencer: they take
         the built Pipeline, never the builder, so later ``set_grp``/``set_node``
-        calls do not reach into a run already in progress. Call ``build()``
-        again and re-set it to publish new definitions.
+        calls do not reach into work already in progress.
+
+        **Building publishes.** A builder with a db mints a version here, which
+        makes a version appear exactly when the definition changes — an
+        unchanged builder returns the version it already has rather than a
+        duplicate of it. There is no separate publish step and no such thing as
+        an unnumbered snapshot to run against, so every history row can name the
+        definition it ran on.
+
+        A builder with no db (constructed without a path) has nowhere to mint
+        from, so its build stays ``open`` and unnumbered. That is the one
+        in-memory case ``Trainer.set_pipeline`` refuses.
 
         Returns:
-            Pipeline: Snapshot with every node's inherited values resolved.
+            Pipeline: Snapshot with every node's inherited values resolved,
+            carrying ``version`` and ``status`` unless this builder has no db.
         """
         nodes = {}
         for name, node in self.nodes.items():
@@ -1085,7 +1145,24 @@ class PipelineBuilder:
             targets=list(ds.targets),
             output_edges=list(ds.output_edges),
         )
-        return Pipeline(nodes, datasource, self.pipeline_id)
+        pipeline = Pipeline(nodes, datasource, self.pipeline_id)
+        if self._store is not None:
+            self._version(pipeline)
+        return pipeline
+
+    def _version(self, pipeline):
+        """Give *pipeline* the version its definition belongs to, minting one if new."""
+        try:
+            current = self._store.load_version()
+        except KeyError:
+            current = None
+        if current is not None and _same_definition(pipeline, current):
+            # Same definition, so the same version — a second row would be a
+            # duplicate of it, and every build would make one.
+            pipeline.version = current.version
+            pipeline.status = PUBLISHED
+            return
+        self._store.publish(pipeline, self)
 
     def copy(self):
         """Return a deep copy of the entire pipeline.

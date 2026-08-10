@@ -2,32 +2,62 @@
 
 ## Creating a project
 
-A `Project` is a directory. It hands out paths and owns what is shared across runs — the pipelines, the Collector registry, the Trial store, the cache.
+A `Project` is a directory. It hands out paths and owns what is shared across runs — the dataset, the pipeline, the Trial store, the cache.
 
 ```python
 from mllabs import Project
 
-project = Project('exp')          # created if missing
+project = Project('exp', data=df)      # created if missing
 ```
+
+The dataset belongs here because it is the one thing a run cannot restore from its own directory. Give it once and `add_experimenter` / `add_trainer` and the registries stop asking for a dataframe. `project.set_data(df)` sets it later; `aug_data=` is the same, for data appended to inner train splits.
 
 Everything else is reached from it:
 
 ```python
-project.pipeline_builder('main')       # a PipelineBuilder under pipelines/main/
+project.pipeline                       # the PipelineBuilder — one per project
 project.trials                         # the project-wide TrialStore
 project.list_experimenters()           # names only
+project.experimenters                  # the objects, opened on demand
 ```
 
 Collectors are not among them — a registry belongs to the run that writes into it, as `e.collectors`. See [Collectors](collectors.md).
 
-A project can hold several pipelines, each keyed by name with its own version counter. `'pipeline'` is the default name.
+**One pipeline per project.** What you actually want from several is to refer back to an earlier definition, and that is a version's job rather than a name's — so `pipeline/` holds one builder and its numbered versions.
+
+## Adding and removing runs
+
+```python
+project.add_experimenter('cv5', sp=..., splitter_params={'y': 'target'})
+project.add_trainer('final')
+
+e = project.experimenters['cv5']       # reach an existing one
+t = project.trainers['final']
+
+project.remove_experimenter('cv5')     # deletes the directory
+```
+
+`add_*` is strictly an addition: a taken name raises. Constructing an Experimenter splits the data afresh and resets its provenance, so doing that over an existing one is damage rather than a reopen — and an accessor that quietly created when the name was free would turn a typo into a second run instead of an error.
+
+Two different questions decide whether a name is free. `ProjectStore` says what this project *manages*; `ExperimenterStore.stored_at(path)` says whether the directory is *occupied*, possibly by something built outside the project. Either one refuses, with a message saying which.
+
+`remove_experimenter` also drops that name's rows from `experiment_hist`. The name is what keys them, so left behind they would attach to whatever is added under it next and `exp()` would skip folds it had never run. Trial *definitions* stay — those belong to the project.
+
+The registries open only names they are not already holding, so what `add_*` returned is what comes back:
+
+```python
+e = project.add_experimenter('cv5', ...)
+project.experimenters['cv5'] is e      # True
+```
+
+`list_experimenters()` answers the cheaper question — which names exist — without opening anything.
 
 ## Declaring the DataSource
 
 The DataSource describes the raw input: a variable type per column, and which columns are targets.
 
 ```python
-p = project.pipeline_builder('main')
+p = project.pipeline
 
 p.set_datasource(
     {'age': 'numerical', 'income': 'numerical',
@@ -123,20 +153,34 @@ Two spec forms are understood, both resolved only when the processor is construc
 
 ## Building a version
 
+**Building publishes.** There is no separate publish step:
+
 ```python
-pipeline = project.build_pipeline(p)
+pipeline = project.pipeline.build()
 pipeline.version        # 1, then 2, then 3 …
+pipeline.status         # 'published'
 ```
 
-`build_pipeline()` builds the current definition and saves it as the next version. There is no content de-duplication: rebuilding an unchanged builder still mints a new version, which is harmless — a version identical in content stales nothing when adopted.
+A version appears exactly when the definition changes. Build an unchanged builder and you get back the version it already has, not a duplicate of it — so every history row can name the definition it ran on, and there is no unnumbered snapshot to run against.
 
-`p.build()` on its own returns an in-memory Pipeline with `version = None`, useful in tests.
+A project is created with **version 0**: the empty Pipeline, published. That is what "nothing has been built yet" *is* here, rather than an absence every caller has to handle — `load_pipeline()` always returns something, a Trainer can adopt it, and building an untouched builder gives back v0 because nothing was defined and so nothing changed.
+
+| status | |
+|---|---|
+| `open` | the builder itself — editable, unnumbered, never a row |
+| `published` | the current version. Always exactly one |
+| `archived` | superseded by a later publish. Frozen, still referenceable, and the only status that can be deleted |
 
 ```python
-project.list_pipeline_versions('main')
-project.load_pipeline('main')        # latest
-project.load_pipeline('main', 2)     # a specific version
+project.list_pipeline_versions()
+project.load_pipeline()          # the published one — a read, never a write
+project.load_pipeline(2)         # a specific version
+project.remove_pipeline_version(1)   # archived only
 ```
+
+Removing an archived version breaks nothing that ran against it: every Experimenter and Trainer keeps its own Pipeline copy. What is lost is what a provenance pointer refers to.
+
+`PipelineBuilder()` constructed without a path has nowhere to mint from, so its build stays `open` with `version = None` — useful in tests, and the one thing `Trainer.set_pipeline` refuses.
 
 ## Inspecting
 
@@ -155,7 +199,7 @@ display(Markdown(p.desc_node('scale')))  # one node and its neighbours
 
 ## Editing an existing pipeline
 
-The builder is backed by SQLite and reloads itself, so `project.pipeline_builder('main')` in a fresh session returns what you last defined. `sync()` re-reads the database and reports what changed, including nodes whose *inherited* values moved because their group did.
+The builder is backed by SQLite and reloads itself, so `project.pipeline` in a fresh session returns what you last defined. Asking twice gives the same object rather than a second builder over the same database, which would let two in-memory copies drift apart. `sync()` re-reads the database and reports what changed, including nodes whose *inherited* values moved because their group did.
 
 ```python
 p.rename_grp('pre', 'preprocess')

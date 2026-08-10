@@ -7,28 +7,28 @@ Where an `Experimenter` compares candidates, a `Trainer` trains the ones you cho
 ```python
 from sklearn.model_selection import KFold
 
-t = project.trainer('final', df,
-                    pipeline_name='main',
-                    pipeline_version=pipeline.version)
+t = project.add_trainer('final', pipeline_version=pipeline.version)
 
-t = project.trainer('cv5', df,
-                    splitter=KFold(n_splits=5, shuffle=True, random_state=42),
-                    splitter_params={'y': 'target'},
-                    pipeline_name='main', pipeline_version=pipeline.version)
+t = project.add_trainer('cv5',
+                        splitter=KFold(n_splits=5, shuffle=True, random_state=42),
+                        splitter_params={'y': 'target'},
+                        pipeline_version=pipeline.version)
 ```
 
 No splitter means one fold over the whole dataset — the usual choice for a final model. With a splitter you get one fold per split, and `Inferencer` will average across them at serve time.
 
+`pipeline_version=` defaults to the published version, which is frozen and therefore exactly what a Trainer may adopt — what it refuses is the working copy, and the default never hands it one.
+
 Like an Experimenter, a Trainer owns its directory and reopens from it:
 
 ```python
-t = project.load_trainer('final', df)
+t = project.trainers['final']
 t = Trainer.load_trainer('trainers/final', df)      # no Project needed
 ```
 
 Reopening replays the **stored split indices** rather than recomputing them, so the folds are exactly the ones that were trained — which also lets a Trainer with no splitter reopen at all.
 
-`aug_data` appends rows to the training split at the DataSource level and is not persisted; pass it again when reopening.
+`aug_data` appends rows to the training split at the DataSource level. Set it on the project (`Project(path, aug_data=...)` / `set_aug_data`) so a reopened Trainer gets it too.
 
 ## Predictors
 

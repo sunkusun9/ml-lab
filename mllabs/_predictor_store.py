@@ -5,7 +5,7 @@ use, so redefining a name overwrites its row exactly as it overwrites the
 artifact directory.
 
 Definitions only. A Predictor's per-split outcome (status, fit_time, error,
-...) is run history and lives in the Trainer's predictor ``NodeStore``
+...) is execution history and lives in the Trainer's predictor ``NodeStore``
 alongside the artifacts it describes, recorded by ``NodeInfoTracker`` the
 same way Pipeline nodes are. That split is why this store is much smaller
 than :class:`~mllabs.TrialStore`, which carries both halves: a TrialStore is

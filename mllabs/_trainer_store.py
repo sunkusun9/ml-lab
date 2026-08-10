@@ -12,7 +12,7 @@ simpler and its result being artifacts rather than a comparison:
   because a Trainer may have no splitter at all (a single full-data fold), and
   reopening must land on exactly the folds that were trained
 - there is no ``data_key``/``title``: nothing here is compared against another
-  run, so there is nothing to label or guard a mismatch against
+  Trainer, so there is nothing to label or guard a mismatch against
 
 What a Trainer trains is *not* here — that is
 :class:`~mllabs.PredictorStore`'s, kept separate so the definitions stay
@@ -22,20 +22,19 @@ import pickle as pkl
 import sqlite3
 from pathlib import Path
 
-from ._run_common import load_pipeline, save_pipeline
+from ._common import load_pipeline, save_pipeline
 
 _SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS trainer (
         name             TEXT PRIMARY KEY,
-        pipeline_name    TEXT,
         pipeline_version INTEGER,
         splits           BLOB
     );
 """
 
-_COLUMNS = ('name', 'pipeline_name', 'pipeline_version')
+_COLUMNS = ('name', 'pipeline_version')
 
-#: Basename of the per-run db, without the ``.db`` suffix.
+#: Basename of the Trainer's own db, without the ``.db`` suffix.
 DB_NAME = '__trainer'
 
 
@@ -48,6 +47,16 @@ class TrainerStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.executescript(_SCHEMA_SQL)
+
+    @staticmethod
+    def stored_at(path, name=DB_NAME):
+        """Whether *path* holds a saved Trainer.
+
+        Static for the same reason as
+        :meth:`ExperimenterStore.stored_at` — constructing the store would
+        create the very thing being asked about.
+        """
+        return (Path(path) / f'{name}.db').exists()
 
     def save(self, meta):
         """Insert or replace the meta row from a ``{column: value}`` dict.

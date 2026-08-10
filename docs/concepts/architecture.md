@@ -2,10 +2,10 @@
 
 ```
 Project ─────────── owns the directory layout and what is project-wide
-  │                 (pipelines, Collectors, TrialStore, cache, run names)
+  │                 (dataset, pipeline, TrialStore, cache, the runs it manages)
   │
   ├─ PipelineBuilder ──build()──► Pipeline    mutable definition → immutable graph
-  │
+  │                                           building publishes a version
   ├─ Experimenter ─── evaluates Trials with cross-validation      exp/{name}/
   │
   └─ Trainer ──────── trains Predictors on full data          trainers/{name}/
@@ -17,11 +17,13 @@ Project ─────────── owns the directory layout and what is 
 
 `Project` hands out paths from one root and holds the state that spans runs:
 
-- the pipelines, each with its own version counter
-- the `Collectors` registry and its collection history
+- the **dataset** (`data` / `aug_data`) — the one thing a run cannot restore from its own directory
+- the pipeline — one per project, with its version lifecycle
 - the `TrialStore` — every Trial definition and every fold outcome, from every Experimenter
 - the shared `DataCache`
-- an index of which Experimenters and Trainers exist — **names only**
+- the Experimenters and Trainers it manages: `list_experimenters()` for the names, `experimenters` for the objects
+
+Collectors are not among them — a registry belongs to the run that writes into it.
 
 Everything else belongs to an individual run. A `Project` is a convenience over the components, not a requirement: each of them takes a path and works standalone.
 
@@ -34,9 +36,9 @@ e = Experimenter.load_experimenter('exp/cv', df)     # no Project involved
 t = Trainer.load_trainer('trainers/final', df)
 ```
 
-The `(pipeline_name, pipeline_version)` a run records is **provenance** — it names which project version its copy was taken from, and is not needed to reopen anything.
+The `pipeline_version` a run records is **provenance** — it names which project version its copy was taken from, and is not needed to reopen anything.
 
-This is why `Project` indexes run *names* and nothing more: there is no second copy of a run's state to drift out of sync.
+This is why `Project` indexes run *names* and nothing more: there is no second copy of a run's state to drift out of sync. It does hold the live objects it has opened, so the same name gives back the same one — two instances over a single directory would each carry their own Collectors and node caches.
 
 ## Experimenter — evaluates Trials
 

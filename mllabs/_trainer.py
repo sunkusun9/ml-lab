@@ -5,11 +5,13 @@ from ._data_wrapper import wrap, unwrap, DataWrapperProvider
 from ._flow import TrainDataFlow
 from ._store import NodeStore
 from ._predictor_store import PredictorStore
-from ._trainer_store import TrainerStore, DB_NAME as _TRAINER_DB
+from ._trainer_store import TrainerStore
 from ._trial import Trial
 from ._edge_dsl import parse, eval_expr, referenced_nodes
 from ._logger import resolve_logger
-from ._run_common import resolve_common_status, require_built_pipeline
+from ._pipeline import Pipeline
+from ._common import (resolve_common_status, require_built_pipeline,
+                      require_frozen_pipeline)
 
 
 class TrainFold:
@@ -49,7 +51,7 @@ class Trainer:
     """Runs cross-validation training on a subset of Pipeline nodes.
 
     No ``Project`` dependency, and nothing to inject but a ``cache``: like
-    :class:`~mllabs.Experimenter`, the run owns its own store — here a
+    :class:`~mllabs.Experimenter`, a Trainer owns its own store — here a
     :class:`~mllabs._trainer_store.TrainerStore`, built from ``path`` — and
     everything needed to reopen it lives in that directory. ``Project``
     supplies the path and records the name in its index.
@@ -77,9 +79,9 @@ class Trainer:
     Attributes:
         name (str): Trainer name.
         pipeline (Pipeline): The adopted Pipeline, kept as this Trainer's own
-            ``pipeline.pkl``. The ``(pipeline_name, pipeline_version)``
-            pointer is persisted too, but only as provenance — it names the
-            project version this copy was taken from.
+            ``pipeline.pkl``. ``pipeline_version`` is persisted too, but only
+            as provenance — it names the published version this copy was
+            taken from.
         predictors (list[Predictor]): Everything :meth:`train` has been given,
             read from ``predictor_defs``.
         selected_nodes (list[str]): Pipeline nodes those Predictors read,
@@ -106,9 +108,7 @@ class Trainer:
         self.predictor_defs = PredictorStore(self.predictor_path)
         self.aug_data = wrap(aug_data) if aug_data is not None else None
 
-        self.pipeline = None
-        self.pipeline_name = 'pipeline'
-        self.pipeline_version = None
+        self.pipeline = Pipeline.empty()
 
         split_indices = self._make_splits()
         self.train_folds = self._make_train_folds(split_indices)
@@ -137,9 +137,7 @@ class Trainer:
             KeyError: If *path* holds no saved Trainer.
         """
         path = Path(path)
-        # Checked before building the store, which would otherwise create the
-        # directory and an empty db for a Trainer that does not exist.
-        if not (path / f'{_TRAINER_DB}.db').exists():
+        if not TrainerStore.stored_at(path):
             raise KeyError(f"No trainer saved at {path}")
         store = TrainerStore(path)
         meta = store.fetch()
@@ -160,15 +158,22 @@ class Trainer:
         trainer.predictor_store = NodeStore(trainer.predictor_path)
         trainer.predictor_defs = PredictorStore(trainer.predictor_path)
         trainer.aug_data = wrap(aug_data) if aug_data is not None else None
-        trainer.pipeline = None
-        trainer.pipeline_name = meta.get('pipeline_name') or 'pipeline'
-        trainer.pipeline_version = None
+        trainer.pipeline = Pipeline.empty()
         trainer.train_folds = trainer._make_train_folds(splits.get('split_indices'))
 
         pipeline = store.load_pipeline()
         if pipeline is not None:
-            trainer.set_pipeline(pipeline, trainer.pipeline_name)
+            trainer.set_pipeline(pipeline)
         return trainer
+
+    @property
+    def pipeline_version(self):
+        """The adopted Pipeline's version — always a frozen one, or ``None`` if unset.
+
+        Read off :attr:`pipeline` rather than kept beside it, so there is no
+        second copy to fall out of step with it.
+        """
+        return self.pipeline.version
 
     # ------------------------------------------------------------------
     # split / fold setup
@@ -207,14 +212,21 @@ class Trainer:
     # node selection
     # ------------------------------------------------------------------
 
-    def set_pipeline(self, pipeline, pipeline_name=None):
-        """Adopt an already-loaded Pipeline.
+    def set_pipeline(self, pipeline):
+        """Adopt an already-loaded Pipeline. It must be a frozen version.
 
         Takes the Pipeline object directly rather than a version number —
-        this class has no way to load one by name/version itself (see the
-        class docstring); ``Project.trainer()`` resolves that before calling
+        this class has no way to load one by version itself (see the class
+        docstring); ``Project.add_trainer()`` resolves that before calling
         this. ``self.pipeline_version`` is read straight off *pipeline* (its
         ``.version``), never tracked separately.
+
+        The working copy is refused. What a Trainer produces is what gets
+        deployed, so it has to be able to say what it was trained against, and
+        a draft changes under it. An *archived* version is fine — it is frozen,
+        so it answers that question as well as the published one does. What is
+        ruled out is training against something still being edited, not
+        training against something old.
 
         The Pipeline is written to this Trainer's own ``pipeline.pkl``, which
         :meth:`load` reads back — reopening needs only this directory, never
@@ -227,24 +239,25 @@ class Trainer:
         node artifacts the change invalidated via :meth:`reset_nodes`, which
         also cascades into any selected Predictor that reads a reset node —
         unlike ``Experimenter.set_pipeline``, a Trainer has no notion of a
-        "historical" run to preserve, so a Predictor trained against a
+        past execution to preserve, so a Predictor trained against a
         since-changed node is simply stale.
 
         Args:
-            pipeline (Pipeline): Already-built, already-loaded Pipeline.
-            pipeline_name (str, optional): Name to record this Pipeline
-                under in this Trainer's own persisted meta.
+            pipeline (Pipeline): Already-built, already-published Pipeline.
+
+        Raises:
+            ValueError: If *pipeline* is the unpublished working copy.
         """
         require_built_pipeline(pipeline)
+        require_frozen_pipeline(pipeline)
         pipeline.check_data_compatibility(self.data)
-        if pipeline_name is not None:
-            self.pipeline_name = pipeline_name
-        if self.pipeline is not None:
+        # See Experimenter.set_pipeline: the empty Pipeline means nothing has
+        # been adopted, so there is nothing to invalidate against.
+        if not self.pipeline.is_empty:
             stale = pipeline.diff_from(self.pipeline)
             if stale:
                 self.reset_nodes(sorted(stale))
         self.pipeline = pipeline
-        self.pipeline_version = pipeline.version
         self._store.save_pipeline(pipeline)
         self.save()
         return pipeline
@@ -277,8 +290,6 @@ class Trainer:
         With no Predictors at all, every node is selected — training the whole
         preprocessing graph is still meaningful on its own.
         """
-        if self.pipeline is None:
-            return []
         if not predictors:
             return list(self.pipeline.topo_order())
         needed = set()
@@ -289,11 +300,6 @@ class Trainer:
                         needed.add(name)
                         self._collect_upstream(self.pipeline, name, needed)
         return [n for n in self.pipeline.topo_order() if n in needed]
-
-    def _require_pipeline(self):
-        if self.pipeline is None:
-            raise RuntimeError("No pipeline set. Call set_pipeline(pipeline) first.")
-        return self.pipeline
 
     def _collect_upstream(self, pipeline, node_name, selected):
         spec = pipeline.get_node_spec(node_name)
@@ -337,7 +343,7 @@ class Trainer:
         return None
 
     def reset_nodes(self, nodes):
-        pipeline = self._require_pipeline()
+        pipeline = self.pipeline
         predictor_names = set(self.predictor_names())
         selected_set = set(self.selected_nodes) | predictor_names
         affected = set(n for n in nodes if n in selected_set)
@@ -471,7 +477,7 @@ class Trainer:
         from ._tracker import LoggerExecuteTracker, NodeInfoTracker
 
         logger = resolve_logger(logger)
-        pipeline = self._require_pipeline()
+        pipeline = self.pipeline
         pipeline.check_data_compatibility(self.data)
 
         if predictors is None:
@@ -613,7 +619,7 @@ class Trainer:
             RuntimeError: If any selected node is not built.
         """
         from ._inferencer import Inferencer
-        pipeline = self._require_pipeline()
+        pipeline = self.pipeline
 
         all_selected = self.selected_nodes + self.predictor_names()
         for name in all_selected:
@@ -648,7 +654,6 @@ class Trainer:
             ]
         self._store.save({
             'name': self.name,
-            'pipeline_name': self.pipeline_name,
             'pipeline_version': self.pipeline_version,
         })
         self._store.save_splits(self.name, {

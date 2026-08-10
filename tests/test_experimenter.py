@@ -36,46 +36,37 @@ def sample_data():
 
 
 @pytest.fixture
-def project(tmp_path):
-    return Project(tmp_path / 'proj')
+def project(tmp_path, sample_data):
+    return Project(tmp_path / 'proj', data=sample_data)
 
 
 @pytest.fixture
 def pipeline(project):
-    p = project.pipeline_builder('main')
+    p = project.pipeline
     p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
     return p
 
 
 @pytest.fixture
 def exp(project, sample_data, pipeline):
-    version = project.build_pipeline(pipeline).version
-    return project.experimenter(
+    version = pipeline.build().version
+    return project.add_experimenter(
         'e1', sample_data,
-        sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
-        pipeline_name='main', pipeline_version=version,
+        sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42), pipeline_version=version,
     )
 
 
 def _publish(pipeline, exp):
     """Hand the current definitions to *exp* as a fresh, versioned snapshot.
 
-    Goes through the builder's own version counter (same as
-    ``Project.build_pipeline`` — ``builder._store.save_version(pipeline)``,
-    no ``project`` object actually needed for that part) rather than an
-    in-memory unversioned build: ``set_pipeline`` reads ``pipeline.version``
-    straight off the object, and an Experimenter persists
-    ``(pipeline_name, pipeline_version)`` as its reload pointer, so an
-    unversioned (``version=None``) build would silently break
-    ``project.load_experimenter`` for any test that reloads afterward.
+    ``build()`` publishes, so this mints a version whenever the definitions
+    actually changed and reuses the current one when they did not.
 
     Experimenter holds a built Pipeline, so edits made to the builder after
     construction only take effect once they are built and set again.
     """
     if exp is not None:
-        built = pipeline.build()
-        pipeline._store.save_version(built)
-        exp.set_pipeline(built)
+        exp.set_pipeline(pipeline.build())
 
 
 def _setup_stage(pipeline, exp=None):
@@ -324,8 +315,9 @@ class TestExpTakesNames:
     def test_a_project_run_is_given_the_projects_store(self, exp, project):
         assert exp.trial_store is project.trials
 
-    def test_a_reopened_run_is_given_it_too(self, project, sample_data, exp):
-        assert project.load_experimenter('e1', sample_data).trial_store is project.trials
+    def test_a_reopened_one_is_given_it_too(self, project, sample_data, exp):
+        reopened = Project(project.path, data=sample_data)
+        assert reopened.experimenters['e1'].trial_store is reopened.trials
 
 
 class TestExp:
@@ -548,15 +540,27 @@ class TestRebuild:
 
 
 class TestSetPipeline:
-    def test_no_pipeline_raises_on_build(self, tmp_path, sample_data):
+    def test_no_pipeline_is_nothing_to_build(self, tmp_path, sample_data):
+        """Having no Pipeline is a state, not a fault: the default is the empty
+        one, so there is simply nothing to build."""
         e = Experimenter(path=tmp_path / 'no_pipeline', name='e1', data=sample_data)
-        with pytest.raises(RuntimeError, match='set_pipeline'):
-            e.build()
+        assert e.pipeline.is_empty
+        assert e.pipeline_version is None
+        e.build()
 
-    def test_no_pipeline_raises_on_exp(self, tmp_path, sample_data):
-        e = Experimenter(path=tmp_path / 'no_pipeline', name='e1', data=sample_data)
-        with pytest.raises(RuntimeError, match='set_pipeline'):
-            e.exp([], None)
+    def test_no_pipeline_still_runs_trials(self, tmp_path, sample_data):
+        """A Trial reads the DataSource directly, so an Experimenter with no
+        nodes at all is still a working one — no preprocessing, raw columns."""
+        from mllabs import TrialStore, Trial
+        store = TrialStore(tmp_path)
+        e = Experimenter(path=tmp_path / 'no_pipeline', name='e1', data=sample_data,
+                         trial_store=store)
+        trial = Trial('dt', 'sklearn.tree.DecisionTreeClassifier',
+                      edges={'X': '{f1, f2}', 'y': '{target}'},
+                      params={'max_depth': 2, 'random_state': 0})
+        store.register(trial)
+        e.exp(['dt'])
+        assert e.trial_store.get_status('dt', 'e1') == {(0, 0): 'built'}
 
     def test_constructor_pipeline_sets_attribute(self, exp, pipeline):
         from mllabs._pipeline import Pipeline
@@ -570,7 +574,7 @@ class TestSetPipeline:
 
     def test_set_pipeline_keeps_a_copy_in_the_run(self, exp, pipeline):
         """The run owns the Pipeline it works against, so reopening it needs
-        only its directory. The (pipeline_name, pipeline_version) pointer is
+        only its directory. The pipeline_version pointer is
         recorded alongside as provenance."""
         exp.set_pipeline(pipeline.build())
         assert (exp.path / 'pipeline.pkl').exists()
@@ -615,7 +619,8 @@ class TestSaveLoad:
         trial = _dt()
         exp.exp(_folds(trial, exp))
 
-        loaded = project.load_experimenter(exp.name, sample_data)
+        loaded = Experimenter.load_experimenter(exp.path, sample_data,
+                                               trial_store=project.trials)
         flow = loaded.outer_folds[0].train_data_flows[0]
         # Reopening reads no artifact: what it recovers is the ability to.
         assert flow.node_objs == {}
@@ -627,7 +632,8 @@ class TestSaveLoad:
         _setup_stage(pipeline, exp)
         exp.build()
 
-        loaded = project.load_experimenter(exp.name, sample_data)
+        loaded = Experimenter.load_experimenter(exp.path, sample_data,
+                                               trial_store=project.trials)
         assert loaded.pipeline is not None
         assert 'scaler' in loaded.pipeline.nodes
         trial = _dt()
@@ -635,13 +641,13 @@ class TestSaveLoad:
         assert _trial_built(project.trials, 'dt', loaded)
 
     def test_load_data_key_mismatch(self, project, sample_data):
-        project.experimenter('dk', sample_data, data_key='key_a')
+        e = project.add_experimenter('dk', sample_data, data_key='key_a')
         with pytest.raises(ValueError, match='data_key'):
-            project.load_experimenter('dk', sample_data, data_key='key_b')
+            Experimenter.load_experimenter(e.path, sample_data, data_key='key_b')
 
     def test_load_preserves_splits(self, project, exp, pipeline, sample_data):
         _setup_stage(pipeline, exp)
-        loaded = project.load_experimenter(exp.name, sample_data)
+        loaded = Experimenter.load_experimenter(exp.path, sample_data)
         assert loaded.get_n_splits() == exp.get_n_splits()
         assert loaded.get_n_splits_inner() == exp.get_n_splits_inner()
 
@@ -655,7 +661,7 @@ class TestSaveLoad:
     def test_meta_lives_in_the_runs_own_store(self, exp):
         meta = exp._store.fetch()
         assert meta['name'] == exp.name
-        assert set(meta.keys()) == {'name', 'data_key', 'title', 'pipeline_name', 'pipeline_version'}
+        assert set(meta.keys()) == {'name', 'data_key', 'title', 'pipeline_version'}
 
     def test_splitters_live_in_the_store(self, exp):
         """Not a side file — the store owns them, as a blob (sklearn splitters

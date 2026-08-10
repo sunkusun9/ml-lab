@@ -38,16 +38,16 @@ def sample_data():
     })
 
 
-def _pipeline_version(project, name):
+def _pipeline_version(project):
     """A single-stage Pipeline (StandardScaler) — the model itself is a Trial,
     not a pipeline node, since Pipeline is stage-only under the current
     Project/Trial split."""
-    p = project.pipeline_builder(name)
+    p = project.pipeline
     p.set_datasource({'f1': 'numerical', 'f2': 'numerical', 'f3': 'numerical', 'target': 'binary'})
     p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
               method='transform', edges={'X': '{f1, f2, f3}'})
     p.set_node('scaler', grp='scale')
-    return project.build_pipeline(p).version
+    return p.build().version
 
 
 def _register(trial, e):
@@ -79,10 +79,9 @@ def _run(built, *trials, collectors=None, n_jobs=1):
 def built_exp(tmp_path, sample_data):
     """Stage built; Trial 'dt' defined but not yet exp()'d."""
     project = Project(tmp_path / 'proj_built')
-    version = _pipeline_version(project, 'pipeline_built')
-    e = project.experimenter('exp_built', sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
-                             pipeline_name='pipeline_built', pipeline_version=version)
+    version = _pipeline_version(project)
+    e = project.add_experimenter('exp_built', sample_data,
+                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42), pipeline_version=version)
     e.build()
     trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 42})
     return Built(project=project, e=e, trial=trial)
@@ -92,11 +91,10 @@ def built_exp(tmp_path, sample_data):
 def built_exp_inner(tmp_path, sample_data):
     """Same as built_exp, plus an inner CV split (KFold, 3 folds)."""
     project = Project(tmp_path / 'proj_inner')
-    version = _pipeline_version(project, 'pipeline_inner')
-    e = project.experimenter('exp_inner', sample_data,
+    version = _pipeline_version(project)
+    e = project.add_experimenter('exp_inner', sample_data,
                              sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
-                             sp_v=KFold(n_splits=3, shuffle=True, random_state=42),
-                             pipeline_name='pipeline_inner', pipeline_version=version)
+                             sp_v=KFold(n_splits=3, shuffle=True, random_state=42), pipeline_version=version)
     e.build()
     trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 42})
     return Built(project=project, e=e, trial=trial)
@@ -106,10 +104,9 @@ def built_exp_inner(tmp_path, sample_data):
 def multi_head_exp(tmp_path, sample_data):
     """Two Trials ('dt1', 'dt2') reading the same stage, neither exp()'d yet."""
     project = Project(tmp_path / 'proj_multi')
-    version = _pipeline_version(project, 'pipeline_multi')
-    e = project.experimenter('exp_multi', sample_data,
-                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
-                             pipeline_name='pipeline_multi', pipeline_version=version)
+    version = _pipeline_version(project)
+    e = project.add_experimenter('exp_multi', sample_data,
+                             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42), pipeline_version=version)
     e.build()
     trial1 = Trial('dt1', TREE, EDGES, params={'max_depth': 3, 'random_state': 42})
     trial2 = Trial('dt2', TREE, EDGES, params={'max_depth': 5, 'random_state': 42})
@@ -934,10 +931,9 @@ class TestRegistryIsPerRun:
 
     @staticmethod
     def _run_one(project, name, version, sample_data, trial):
-        e = project.experimenter(
+        e = project.add_experimenter(
             name, sample_data,
-            sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
-            pipeline_name='pipe', pipeline_version=version)
+            sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42), pipeline_version=version)
         e.build()
         mc = e.collectors.set_collector(
             'acc', MetricCollector, Connector(),
@@ -948,7 +944,7 @@ class TestRegistryIsPerRun:
     @pytest.fixture
     def two_runs(self, tmp_path, sample_data):
         project = Project(tmp_path / 'proj_two')
-        version = _pipeline_version(project, 'pipe')
+        version = _pipeline_version(project)
         trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 42})
         a = self._run_one(project, 'run_a', version, sample_data, trial)
         b = self._run_one(project, 'run_b', version, sample_data, trial)
@@ -1115,10 +1111,9 @@ class TestProcessCollector:
     @pytest.fixture
     def proba_exp(self, tmp_path, sample_data):
         project = Project(tmp_path / 'proj_proba')
-        version = _pipeline_version(project, 'pipeline_proba')
-        e = project.experimenter('exp_proba', sample_data,
-                                 sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
-                                 pipeline_name='pipeline_proba', pipeline_version=version)
+        version = _pipeline_version(project)
+        e = project.add_experimenter('exp_proba', sample_data,
+                                 sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42), pipeline_version=version)
         e.build()
         trial = Trial('dt', TREE, EDGES, method='predict_proba', params={'max_depth': 3, 'random_state': 42})
         return Built(project=project, e=e, trial=trial)

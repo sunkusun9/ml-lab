@@ -10,7 +10,7 @@ A project has five pieces:
 
 | | |
 |---|---|
-| **Project** | Owns the directory layout and everything that is genuinely project-wide: the pipelines, the Collector registry, the Trial store, the shared cache. |
+| **Project** | Owns the directory layout and everything that is genuinely project-wide: the dataset, the pipeline, the Trial store, the shared cache. |
 | **PipelineBuilder → Pipeline** | A mutable builder that produces an immutable node graph. Preprocessing only. |
 | **Experimenter** | Evaluates **Trials** — candidate models — with cross-validation. |
 | **Trainer** | Trains **Predictors** — the candidates you chose — on full data. |
@@ -19,15 +19,14 @@ A project has five pieces:
 ```python
 from mllabs import Project, Trial
 
-project = Project('exp')
+project = Project('exp', data=df)
 
-p = project.pipeline_builder('main')
+p = project.pipeline
 p.set_datasource({'age': 'numerical', 'city': 'nominal', 'target': 'binary'})
 p.set_node('scale', processor='sklearn.preprocessing.StandardScaler',
            method='fit_transform', edges={'X': '{age}'})
 
-e = project.experimenter('cv', df, pipeline_name='main',
-                         pipeline_version=project.build_pipeline(p).version)
+e = project.add_experimenter('cv', pipeline_version=p.build().version)
 e.build()
 
 project.set_trial(Trial('lgb', 'lightgbm.LGBMClassifier',
@@ -39,7 +38,7 @@ Three ideas run through all of it:
 
 **Definitions are declarations, not objects.** A node names its processor as `"module.ClassName"`, its inputs as a DSL string, its parameters as plain data. Nothing is imported or instantiated until the moment it runs — so a pipeline is serializable, and importing `mllabs` never drags in TensorFlow.
 
-**A run owns its state.** An Experimenter or Trainer keeps its splitter, its adopted Pipeline and its artifacts in its own directory, and reopens from that path alone — `Experimenter.load_experimenter(path, data)` needs no `Project`.
+**A run owns its state.** An Experimenter or Trainer keeps its splitter, its adopted Pipeline and its artifacts in its own directory, and reopens from that path alone — `Experimenter.load_experimenter(path, data)` needs no `Project`. The dataset is the exception, and the reason a `Project` holds one: it is the only thing a run cannot read back from its own directory.
 
 **Identity is by value.** There are no content hashes or generation counters. Whether a node's artifact is stale is decided by comparing two Pipeline versions field by field.
 

@@ -15,15 +15,15 @@ Pipeline         ── immutable snapshot. group inheritance already resolved
 `Experimenter`, `Trainer` and `Inferencer` accept **only the built form**; passing a builder raises `TypeError`. That is the point of the split: editing the builder afterwards cannot leak into a run already in progress.
 
 ```python
-p = project.pipeline_builder('main')
+p = project.pipeline
 p.set_node('scale', processor='sklearn.preprocessing.StandardScaler',
            method='fit_transform', edges={'X': '{age, income}'})
 
-pipeline = project.build_pipeline(p)   # saved as the next version
+pipeline = p.build()                   # published as the next version
 e.set_pipeline(pipeline)
 ```
 
-`build()` alone gives an in-memory Pipeline with `version = None`. `Project.build_pipeline()` also persists it and stamps the version. Every call mints a new version — there is no content de-duplication — and the counter lives in that pipeline's own database, not in a project-wide index.
+**Building publishes.** A builder with a database mints a version here, which makes a version appear exactly when the definition changes — build it again unchanged and you get the same number back rather than a duplicate. There is no separate publish step and no unnumbered snapshot to run against, so every history row can name the definition it ran on. A builder with no database (constructed without a path) has nowhere to mint from and stays `open` with `version = None`. See [Project & Pipeline](../guide/project-pipeline.md#building-a-version) for the version lifecycle.
 
 ## Nodes
 

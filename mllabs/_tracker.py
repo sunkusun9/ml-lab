@@ -135,13 +135,13 @@ def _info_without_status(info):
 
 
 class TrialHistTracker(ExecuteTracker):
-    """Records Trial run history while delegating display to another tracker.
+    """Records Trial execution history while delegating display to another tracker.
 
     Wrapping the tracker puts the recording where the outcome actually is:
     ``done``/``error`` fire once per (trial, fold) with the real result, in the
-    parent process, so multi-worker runs are covered without the executor
+    parent process, so multi-worker execution is covered without the executor
     knowing anything about history. The alternative — re-reading status off
-    disk after the run — cannot tell a fold that just ran from one that was
+    disk afterwards — cannot tell a fold that just ran from one that was
     already built, and duplicates work the tracker has done anyway.
 
     Collect outcomes ride along here rather than in a third wrapper: they are
@@ -154,7 +154,7 @@ class TrialHistTracker(ExecuteTracker):
         tracker (ExecuteTracker): The display/logging tracker to delegate to.
         store (TrialStore): Where history is written.
         experimenter (str): Experimenter name — half of the history key.
-        pipeline_version (int): The Experimenter's ``pipeline_version`` for the run.
+        pipeline_version (int): The Experimenter's ``pipeline_version``.
         collect_hist (CollectHist, optional): Where Collector outcomes are
             written — the running Experimenter's own. ``None`` records nothing,
             which is what a registry with no path (memory-only) leaves.
@@ -218,21 +218,22 @@ class TrialHistTracker(ExecuteTracker):
 
 
 class NodeInfoTracker(ExecuteTracker):
-    """Records Stage node run history while delegating display to another tracker.
+    """Records Stage node execution history while delegating display to another tracker.
 
     Stage-side counterpart to :class:`TrialHistTracker` — same reasoning
     (``done``/``error`` fire once per (node, fold) with the real result, in
-    the parent process, so recording doesn't depend on re-reading disk after
-    the run). Writes to the run's own :class:`~mllabs._store.NodeStore`
-    history (``node_hist`` — merged into ``NodeStore`` 2026-08-01, no
-    ``run_name`` needed since that store is already scoped to one run) — this
-    is what replaced the ``info.pkl`` ``NodeStore.write_info`` used to write
-    on error.
+    the parent process, so recording doesn't depend on re-reading disk
+    afterwards). Writes to the owning Experimenter's/Trainer's own
+    :class:`~mllabs._store.NodeStore` history (``node_hist`` — merged into
+    ``NodeStore`` 2026-08-01, no name column needed since that store is already
+    scoped to one of them) — this is what replaced the ``info.pkl``
+    ``NodeStore.write_info`` used to write on error.
 
     Args:
         tracker (ExecuteTracker): The display/logging tracker to delegate to.
-        store (NodeStore): This run's store — where history is written.
-        pipeline_version (int, optional): The run's ``pipeline_version``.
+        store (NodeStore): The owning Experimenter's/Trainer's store — where
+            history is written.
+        pipeline_version (int, optional): Its ``pipeline_version``.
     """
 
     def __init__(self, tracker, store, pipeline_version=None):

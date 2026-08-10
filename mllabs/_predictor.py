@@ -3,7 +3,7 @@ from ._pipeline import ProcessorSpec
 
 
 class Predictor:
-    """The terminal output node of a :class:`~mllabs.Trainer` run.
+    """The terminal output node a :class:`~mllabs.Trainer` trains.
 
     Structurally a Predictor carries the same execution definition a
     :class:`~mllabs.Trial` does (processor, method, adapter, params, edges) —

@@ -170,24 +170,50 @@ class TestSelection:
         with pytest.raises(TypeError, match='from_trial'):
             trainer.train([Trial('dt', DT, DT_EDGES)])
 
-    def test_no_pipeline_raises_on_train(self, pipeline, sample_data, sp_v):
+    def test_no_pipeline_is_nothing_to_train(self, pipeline, sample_data, sp_v):
+        """The default is the empty Pipeline, so no nodes are selected and
+        train() has nothing to do — not an error."""
         trainer = _make_trainer(pipeline, sample_data, sp_v)
-        with pytest.raises(RuntimeError, match='set_pipeline'):
-            trainer.train()
+        assert trainer.pipeline.is_empty
+        assert trainer.selected_nodes == []
+        trainer.train()
 
-    def test_no_pipeline_raises_on_to_inferencer(self, pipeline, sample_data, sp_v):
+    def test_no_pipeline_gives_an_empty_inferencer(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
-        with pytest.raises(RuntimeError, match='set_pipeline'):
-            trainer.to_inferencer()
+        inferencer = trainer.to_inferencer()
+        assert inferencer.selected_nodes == []
 
     def test_set_pipeline_keeps_a_copy_and_the_pointer(self, pipeline, sample_data, sp_v):
         """The Trainer owns the Pipeline it trains against; the pointer stays
         in its own store as provenance."""
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         built = pipeline.build()
-        trainer.set_pipeline(built, pipeline_name='pipeline')
+        trainer.set_pipeline(built)
         assert (trainer.path / 'pipeline.pkl').exists()
         assert trainer._store.fetch()['pipeline_version'] == built.version
+
+    def test_it_refuses_the_working_copy(self, pipeline, sample_data, sp_v):
+        """What a Trainer produces is what gets deployed, so it has to be able
+        to say what it trained against — and a builder with no db mints no
+        version, so its build stays editable and unnamed."""
+        bare = PipelineBuilder()
+        bare.set_datasource({'f1': 'numerical', 'f2': 'numerical',
+                             'f3': 'numerical', 'target': 'binary'})
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        with pytest.raises(ValueError, match='working copy'):
+            trainer.set_pipeline(bare.build())
+
+    def test_an_archived_version_is_fine(self, pipeline, sample_data, sp_v):
+        """Frozen is what matters, not current — an older version answers
+        "what was this trained against" as well as the published one does."""
+        first = pipeline.build()
+        pipeline.set_node('scaler', grp='scale', edges={'X': '{f1}'}, exist='replace')
+        pipeline.build()
+        assert pipeline._store.get_status(first.version) == 'archived'
+
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline._store.load_version(first.version))
+        assert trainer.pipeline_version == first.version
 
     def test_load_restores_the_pipeline_without_being_given_one(
             self, pipeline, sample_data, sp_v):
