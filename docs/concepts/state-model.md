@@ -56,9 +56,11 @@ The one thing that *does* invalidate work automatically is adopting a new Pipeli
 
 No generation counters or content hashes are involved; definitions are compared by value. A useful consequence: **editing a node that a given Trial does not read leaves that Trial's results intact.**
 
+The diff is skipped entirely when what is being replaced is the **empty** Pipeline. That is the state of a run that has adopted nothing yet — a placeholder, not a claim that nothing was built — and reopening a run adopts its saved Pipeline over exactly that placeholder. Diffing against it would delete every artifact on disk.
+
 ### Trials and Predictors diverge here
 
-- **Trials are left alone.** A Trial's artifact and its `experiment_hist` row document the pipeline version it actually ran against, which stays true after a newer version is adopted. Re-running is a separate, explicit act.
+- **Trials are left alone.** A Trial leaves no artifact, and its `experiment_hist` row documents the pipeline version it actually ran against, which stays true after a newer version is adopted. Re-running is a separate, explicit act.
 - **Predictors cascade.** A Trainer has no notion of a historical run to preserve, so a Predictor reading a reset node is simply stale, and `reset_nodes()` clears it too.
 
 ## Related

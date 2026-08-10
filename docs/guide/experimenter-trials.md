@@ -7,34 +7,34 @@ An `Experimenter` runs one cross-validation experiment: it builds the Pipeline's
 ```python
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 
-e = project.experimenter(
-    'cv5', df,
+e = project.add_experimenter(
+    'cv5',
     sp=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
     sp_v=StratifiedShuffleSplit(n_splits=1, train_size=0.9, random_state=42),
     splitter_params={'y': 'target'},
-    pipeline_name='main',
-    pipeline_version=project.build_pipeline(p).version,
+    pipeline_version=p.build().version,
 )
 ```
 
 - `sp` — the outer splitter. Its held-out part is the *test* fold of each outer split.
 - `sp_v` — the inner splitter, giving each outer fold a train/validation pair for things like early stopping. `None` means one inner fold with no validation set.
 - `splitter_params` — maps a splitter keyword to a column, so `{'y': 'target'}` makes the split stratified on that column.
+- `data=` defaults to the project's; `pipeline_version=` defaults to the published one.
 
 The name is the identity: it is the directory under `exp/` and the key under which every fold outcome is filed in the `TrialStore`.
 
-!!! warning "Constructing means starting over"
-    The constructor recomputes the splits and writes fresh state. To continue an existing run, reopen it:
+!!! warning "`add_*` adds — it never reopens"
+    A taken name raises. Constructing an Experimenter recomputes the splits and writes fresh state, so doing that over an existing one restarts it rather than resuming. Reach an existing one through the registry, which is safe to re-run in a notebook cell:
 
     ```python
-    e = project.load_experimenter('cv5', df)
+    e = project.experimenters['cv5']
     e = Experimenter.load_experimenter('exp/cv5', df)   # no Project needed
     ```
 
 ## Adopting a Pipeline
 
 ```python
-e.set_pipeline(project.build_pipeline(p))
+e.set_pipeline(p.build())
 e.pipeline_version
 ```
 
@@ -105,7 +105,7 @@ Folds already recorded `'built'` are dropped, so passing the same names again co
 !!! note "`set_trials()` returns what changed, not what to run"
     Its return value is an authoring diff — a Trial that was already registered and never ran comes back empty. To run a round, pass the names of that round and let `exp()` skip the folds that are done.
 
-The store itself is not an argument: an Experimenter made by `project.experimenter()` / `load_experimenter()` already holds it, and a standalone one takes it as `Experimenter(..., trial_store=...)`. An unregistered name raises `KeyError`. Every Collector registered on the run takes part unless `collectors=` narrows it by name — see [Collectors](collectors.md).
+The store itself is not an argument: an Experimenter reached through a `Project` already holds it, and a standalone one takes it as `Experimenter(..., trial_store=...)`. An unregistered name raises `KeyError`. Every Collector registered on the run takes part unless `collectors=` narrows it by name — see [Collectors](collectors.md).
 
 !!! note "A built fold is not re-run"
     A fold recorded as `'built'` is skipped silently, whatever the definition says now. To run it again:
@@ -165,7 +165,8 @@ While the capture is open and `n_jobs > 1`, each worker gets its own log file to
 `aug_data` appends rows to the inner training split at the DataSource level. It is not persisted — pass it again when reopening.
 
 ```python
-e = project.load_experimenter('cv5', df, aug_data=extra_df)
+project.set_aug_data(extra_df)          # or Project(path, aug_data=extra_df)
+e = project.experimenters['cv5']
 ```
 
 ## Related
