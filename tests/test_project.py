@@ -509,6 +509,23 @@ class TestExperimenterUnderProject:
         with pytest.raises(KeyError):
             project.experimenters['nope']
 
+    def test_the_added_one_is_the_one_the_registry_gives_back(self, project, builder,
+                                                              sample_data):
+        """Two live Experimenters over one directory would each hold their own
+        Collectors and node caches, so a change through one would be invisible
+        to the other."""
+        e = self._exp(project, builder, sample_data)
+        assert project.experimenters['run_a'] is e
+
+    def test_the_registry_opens_only_what_it_is_not_holding(self, project, builder,
+                                                            sample_data):
+        e = self._exp(project, builder, sample_data, name='a')
+        reopened = Project(project.path, data=sample_data)
+        b = reopened.add_experimenter('b', sample_data)
+        assert reopened.experimenters['b'] is b
+        assert reopened.experimenters['a'].name == 'a'
+        assert reopened.experimenters['a'] is not e
+
     def test_asking_for_one_leaves_no_directory_behind(self, project, sample_data):
         """Reading the registry must not bring into being what it is asked about."""
         assert 'nope' not in project.experimenters
@@ -793,15 +810,16 @@ class TestRemoveTrial:
             assert reopened.get_collector('acc').get_metric('dt') is None
             assert reopened.hist.get_hist(node_name='dt') == []
 
-    def test_cleans_the_registries_it_is_given(self, project, builder, sample_data):
-        """A registry opened from disk is not the one the caller holds, and a
-        Collector may answer from an in-memory cache — so the run itself has to
-        be cleanable, not just whatever Project reopens."""
+    def test_cleans_the_live_experimenter_the_caller_holds(self, project, builder, sample_data):
+        """A registry reopened from disk is not the one the caller holds, and a
+        Collector may answer from an in-memory cache — so removal has to go
+        through the Experimenter object, which the project is holding."""
         e, collectors = self._run(project, builder, sample_data)
         acc = collectors.get_collector('acc')
         assert acc.has_node('dt')
-        project.remove_trial('dt', experimenters=[e])
+        project.remove_trial('dt')
         assert not acc.has_node('dt')
+        assert project.experimenters['run_a'] is e
 
     def test_a_removed_trial_runs_again_from_scratch(self, project, builder, sample_data):
         """Removal takes the definition too, so re-running means authoring it

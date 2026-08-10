@@ -18,7 +18,6 @@ from ._cache import DataCache
 from ._trial_store import TrialStore
 from ._project_store import ProjectStore
 from ._common import format_errors
-from .collector import Collectors
 
 DATA_FILE = 'data.pkl'
 AUG_DATA_FILE = 'aug_data.pkl'
@@ -76,8 +75,8 @@ class Project:
         self._data = None
         self._aug_data = None
         self._pipeline = None
-        self._experimenters = None
-        self._trainers = None
+        self._experimenters = {}
+        self._trainers = {}
         if data is not None:
             self.set_data(data)
         if aug_data is not None:
@@ -179,26 +178,30 @@ class Project:
     def experimenters(self):
         """This project's Experimenters, by name.
 
-        The objects, restored on first access — which needs the project's data,
-        that being the one thing an Experimenter cannot read back from its own
+        The objects, opened on demand — which needs the project's data, that
+        being the one thing an Experimenter cannot read back from its own
         directory. :meth:`list_experimenters` answers the cheaper question of
         which names this project manages.
+
+        Only names not already held are opened, so one added through
+        :meth:`add_experimenter` comes back as the very object that call
+        returned. Two live Experimenters over one directory would each hold
+        their own Collectors and node caches, and a change through one would be
+        invisible to the other.
         """
-        if self._experimenters is None:
-            self._experimenters = {
-                name: self._open_experimenter(name)
-                for name in self.list_experimenters()
-            }
-        return self._experimenters
+        return self._hold(self._experimenters, self.list_experimenters(),
+                          self._open_experimenter)
 
     @property
     def trainers(self):
-        """This project's Trainers, by name. Restored like :attr:`experimenters`."""
-        if self._trainers is None:
-            self._trainers = {
-                name: self._open_trainer(name) for name in self.list_trainers()
-            }
-        return self._trainers
+        """This project's Trainers, by name. Opened like :attr:`experimenters`."""
+        return self._hold(self._trainers, self.list_trainers(), self._open_trainer)
+
+    def _hold(self, held, names, open_one):
+        for name in names:
+            if name not in held:
+                held[name] = open_one(name)
+        return held
 
     def add_experimenter(self, name, data=None, pipeline_version=None,
                          aug_data=None, **kwargs):
@@ -237,8 +240,7 @@ class Project:
         )
         exp.set_pipeline(self.load_pipeline(pipeline_version))
         self.store.register_experimenter(name)
-        if self._experimenters is not None:
-            self._experimenters[name] = exp
+        self._experimenters[name] = exp
         return exp
 
     def add_trainer(self, name, data=None, pipeline_version=None, aug_data=None, **kwargs):
@@ -263,8 +265,7 @@ class Project:
         if pipeline_version is not None:
             trainer.set_pipeline(self.load_pipeline(pipeline_version))
         self.store.register_trainer(name)
-        if self._trainers is not None:
-            self._trainers[name] = trainer
+        self._trainers[name] = trainer
         return trainer
 
     def remove_experimenter(self, name):
@@ -281,8 +282,7 @@ class Project:
         self._drop('Experimenter', name, self.list_experimenters(), 'exp')
         self.store.remove_experimenter(name)
         self.trials.remove_hist(experimenter=name)
-        if self._experimenters is not None:
-            self._experimenters.pop(name, None)
+        self._experimenters.pop(name, None)
 
     def remove_trainer(self, name):
         """Delete the Trainer named *name* — its directory, Predictors included.
@@ -295,8 +295,7 @@ class Project:
         """
         self._drop('Trainer', name, self.list_trainers(), 'trainers')
         self.store.remove_trainer(name)
-        if self._trainers is not None:
-            self._trainers.pop(name, None)
+        self._trainers.pop(name, None)
 
     def list_experimenters(self):
         """Names of every Experimenter this project manages."""
@@ -448,7 +447,7 @@ class Project:
                 pending.append(trial.name)
         return pending
 
-    def remove_trial(self, name, experimenters=None):
+    def remove_trial(self, name):
         """Drop *name* from the project — definition, history and collected data.
 
         A Trial leaves no artifact, so everything it produced is spread across
@@ -458,33 +457,30 @@ class Project:
         ``CollectHist`` rows describing it. Project is the only thing that
         sees all of them, so removing a Trial belongs here.
 
+        Every Experimenter, with no way to ask for a subset. Leaving one out
+        would leave results behind for a Trial the project no longer defines,
+        and nothing afterwards would say which one still had them.
+
         The definition and the whole of its history go in one statement each;
-        the per-Experimenter half is a pass over :meth:`list_experimenters`,
-        delegating to :meth:`Experimenter.remove_trial_result`. Opening a
-        registry costs only its two db files — no Experimenter is constructed
-        and no dataset is needed — but a registry opened here is not the one you
-        may already be holding, and some Collectors answer from an in-memory
-        cache (``ModelAttrCollector``/``SHAPCollector``). Pass those
-        Experimenters as *experimenters* so their own registries are cleaned.
+        the rest is a pass over :attr:`experimenters`, delegating to
+        :meth:`Experimenter.remove_trial_result`. That opens the ones not
+        already held, which is what makes the removal reach a Collector
+        answering from an in-memory cache (``ModelAttrCollector``/
+        ``SHAPCollector``) — a registry reopened from disk would not be the
+        instance holding that cache.
 
         Args:
             name (str): Trial name. Removing one that was never registered is
                 a no-op, not an error.
-            experimenters (list[Experimenter], optional): Open Experimenters to
-                clean through, matched by name. Any not listed is handled
-                by opening its registry from disk.
+
+        Raises:
+            ValueError: If this project has no dataset, which opening an
+                Experimenter needs.
         """
         self.trials.remove(name)
         self.trials.remove_hist(trial_name=name)
-        held = {e.name: e for e in (experimenters or ())}
-        for exp_name in self.list_experimenters():
-            exp = held.get(exp_name)
-            if exp is not None:
-                exp.remove_trial_result(name)
-                continue
-            path = self.exp_path(exp_name) / 'collectors'
-            if path.exists():
-                Collectors(path).remove_results(name)
+        for exp in self.experimenters.values():
+            exp.remove_trial_result(name)
 
     # ------------------------------------------------------------------
     # pipeline versions

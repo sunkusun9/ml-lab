@@ -188,7 +188,9 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 - `Project(path, data=None, aug_data=None, cache_maxsize=4GB)` — `DataCache`를 소유하고 모든 Experimenter/Trainer가 공유
 - **데이터셋**: `data`/`aug_data` property(첫 접근에 `data.pkl`/`aug_data.pkl`에서 읽음 — 이름·이력 조회는 데이터를 안 건드림), `set_data(data)`/`set_aug_data(aug_data)`로 저장. 형식은 pkl(pandas/polars/cudf/numpy 다 되고 프로젝트가 이미 pipeline/splitter를 피클로 저장). 없으면 `_resolve_data`가 `ValueError`로 안내
 - 경로: `pipeline_path`(property), `exp_path(name)`, `trainer_path(name)`, `inferencer_path(name)` — **collector 경로 없음**(레지스트리는 Experimenter 소유)
-- **레지스트리**: `experimenters`/`trainers` — `{name: 객체}`, **첫 접근에 디스크에서 복원**(그래서 데이터셋이 필요). `list_experimenters()`/`list_trainers()`는 이름만 답하는 싼 질문이라 별개로 남는다
+- **레지스트리**: `experimenters`/`trainers` — `{name: 객체}`. 접근할 때마다 `list_*()`를 훑어 **아직 안 들고 있는 이름만** 연다(그래서 데이터셋이 필요). `list_experimenters()`/`list_trainers()`는 이름만 답하는 싼 질문이라 별개로 남는다
+  - **`add_*`가 만든 객체가 곧 레지스트리가 돌려주는 객체다** — "안 들고 있는 것만 연다"의 요점이 이것. 한 디렉토리에 살아있는 인스턴스가 둘이면 각자 자기 Collectors와 노드 캐시를 들고 있어서, 한쪽으로 가한 변경이 다른 쪽엔 안 보인다(`Project.pipeline`이 builder 하나를 고수하는 것과 같은 이유)
+  - 그래서 "다 훑었나" 플래그가 없다 — dict는 **내가 든 것** 하나만 뜻하고, 접근당 비용은 sqlite 쿼리 하나
 - **`add_experimenter(name, data=None, pipeline_version=None, aug_data=None, **kw)` / `add_trainer(...)`**: **추가 전용** — 이미 있는 이름이면 `ValueError`. 생성은 split을 다시 계산하고 provenance를 리셋하므로 기존 것 위에 하면 재개가 아니라 피해다(#128). 기존 것은 `project.experimenters[name]`으로
   - **존재 판정이 두 질문이다**: `ProjectStore`가 "이 프로젝트가 무엇을 관리하나"(멤버십), `ExperimenterStore.stored_at`/`TrainerStore.stored_at`이 "그 디렉토리가 이미 찼나"(점유). 색인엔 없는데 디스크엔 있는 건 모순이 아니라 "우리 것은 아니지만 자리는 찼다"는 정확한 사실이고, `add_*`는 둘 다 거부한다
   - `pipeline_version` 기본값이 **Experimenter는 working copy**(어떤 status든 받고, Pipeline 없는 Experimenter는 아무것도 못 하니까), **Trainer는 없음**(open은 거부당하고 어떤 frozen 버전인지를 대신 고르는 건 추측이라)
@@ -204,11 +206,11 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 - **`show_error_trials(experimenter=None, traceback=False)`**: Trial 실행 에러를 fold당 한 줄로. `Experimenter.show_error_nodes`의 Trial판이고 **여기 있는 이유는 이력의 주인이 여기라서**(노드 이력은 Experimenter, Trial 이력은 프로젝트). 실패가 없으면 `None`
 - **`pending_trials(experimenter=None)`**: 등록된 Trial 중 **에러났거나 이력이 아예 없는** 이름 목록. 둘 다 "아직 돌려야 할 것"이라 한 목록으로 낸다 — 손으로 쓰면 후자만 잡아서 실패한 게 조용히 빠진다(#130이 노트북에서 지목한 실제 버그)
   - **일부러 거칠다**: fold 일부만 돌다 끊긴 건 안 잡는다 — 그걸 판정하려면 fold 그리드와 대조해야 하는데 이 store는 그걸 모른다. 반환된 이름을 그냥 돌려도 안전하다(`exp()`가 끝난 fold를 건너뜀)
-- **`remove_trial(name, experimenters=None)`**: Trial 하나를 프로젝트에서 완전히 지운다 — 정의(`TrialStore.trials`) + 이력(`experiment_hist`, **모든 experimenter**) + 각 Experimenter가 수집한 데이터와 그 `CollectHist`. Trial은 아티팩트를 안 남기는 대신 흔적이 서로 모르는 store들에 흩어져 있고, **그걸 다 보는 건 Project뿐**이라 여기 있다(단일 store 위의 편의 래퍼가 아니라, 주인 없는 교차 연산에 주인을 준 것)
-  - 프로젝트 전역 절반(정의 + 전 experimenter 이력)은 각각 SQL 한 문장이고, Experimenter별 절반은 `list_experimenters()` 순회 → `Experimenter.remove_trial_result(name)` 위임
-  - **Experimenter를 열지 않는다** — `Collectors({exp_path}/collectors)`로 레지스트리만 경로에서 연다(db 두 개뿐, 데이터셋 불필요). Experimenter를 만들면 `DataFlow.__init__`이 그 fold의 아티팩트를 전부 적재하므로 trial 하나 지우자고 치를 비용이 아님
-  - `experimenters=`: **이미 열어둔 Experimenter가 있으면 그걸 넘길 것** — 경로로 새로 연 레지스트리는 내가 든 인스턴스가 아니고, 일부 Collector는 메모리 캐시에서 답한다(`ModelAttrCollector`/`SHAPCollector`의 `_cache`)
-  - 특정 Experimenter만 다시 돌리고 싶은 거라면 이게 아니라 `e.remove_trial_result(name, trial_store)`
+- **`remove_trial(name)`**: Trial 하나를 프로젝트에서 완전히 지운다 — 정의(`TrialStore.trials`) + 이력(`experiment_hist`, **모든 experimenter**) + 각 Experimenter가 수집한 데이터와 그 `CollectHist`. Trial은 아티팩트를 안 남기는 대신 흔적이 서로 모르는 store들에 흩어져 있고, **그걸 다 보는 건 Project뿐**이라 여기 있다(단일 store 위의 편의 래퍼가 아니라, 주인 없는 교차 연산에 주인을 준 것)
+  - 프로젝트 전역 절반(정의 + 전 experimenter 이력)은 각각 SQL 한 문장이고, Experimenter별 절반은 **`experimenters` 순회** → `Experimenter.remove_trial_result(name)` 위임
+  - **대상을 고르는 인자가 없다** — 하나 빼면 프로젝트가 더 이상 정의하지 않는 Trial의 결과가 남고, 그 뒤엔 어느 Experimenter가 아직 들고 있는지 아무도 못 답한다
+  - **레지스트리로 여는 게 요점이다** — 경로로 `Collectors`만 여는 우회는 내가 든 인스턴스가 아니라서, 메모리 캐시로 답하는 Collector(`ModelAttrCollector`/`SHAPCollector`의 `_cache`)를 못 지운다. Experimenter를 여는 비용은 `DataFlow.__init__`이 아무것도 안 읽게 된 뒤로(#139) `__exp.db` + `pipeline.pkl` 읽기와 split 재계산뿐
+  - 특정 Experimenter만 다시 돌리고 싶은 거라면 이게 아니라 `e.remove_trial_result(name)`
 
 ### ArtifactStore (`_store.py`, 공통 인터페이스)
 `NodeStore`/`TrialStore`가 공유하는 메소드 모양의 base class. 두 그룹:
