@@ -25,25 +25,28 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 
 ## 아키텍처 개요
 ```
-Project(path, cache_maxsize)          경로·캐시 소유. 프로젝트 전역인 것만
-  ├─ PipelineBuilder ──build()──► Pipeline    가변 정의 → 불변 노드 그래프
+Project(path, data, aug_data, cache_maxsize)   경로·데이터·캐시 소유 + 관리 목록
+  ├─ data / aug_data                데이터셋 (data.pkl / aug_data.pkl, 지연 로드)
+  ├─ pipeline ──build()──► Pipeline 프로젝트당 하나. 빌더가 곧 open 버전, build가 publish
   ├─ TrialStore                     Trial 정의 + 실행 이력 (프로젝트 전역 — 결과 비교가 목적)
   ├─ ProjectStore                   이름 목록만 (experimenters / trainers)
-  ├─ Experimenter(name)             CV 실험 (exp/{name}/) — Trial을 평가
+  ├─ experimenters{name: Experimenter}   CV 실험 (exp/{name}/) — Trial을 평가
   │    ├─ ExperimenterStore         meta + splitter + pipeline.pkl (이 Experimenter만)
   │    └─ Collectors ──CollectorStore──► Collector 정의(entity 행 + params pkl) → 재조립
   │         └─ CollectHist          수집 이력 (이 Experimenter만)
-  └─ Trainer(name)                  전체 데이터 학습 (trainers/{name}/) — Predictor를 학습
+  └─ trainers{name: Trainer}        전체 데이터 학습 (trainers/{name}/) — Predictor를 학습
        ├─ TrainerStore              meta + splits + pipeline.pkl (이 Trainer만)
        ├─ PredictorStore            Predictor 정의 (이 Trainer만 — 비교할 일이 없어서)
        └─ to_inferencer() ──► Inferencer
 ```
 **경계**: Experimenter/Trainer 하나에 대한 것(splitter, 채택한 Pipeline, 아티팩트/이력, Collector,
-학습할 Predictor)은 전부 그 디렉토리 안. Project는 "이 프로젝트에 뭐가 있나"만 답한다 →
-**어느 쪽이든 Project 없이 열 수 있다** (`Experimenter.load_experimenter(path, data)` /
-`Trainer.load_trainer(path, data)`).
+학습할 Predictor)은 전부 그 디렉토리 안 → **어느 쪽이든 Project 없이 열 수 있다**
+(`Experimenter.load_experimenter(path, data)` / `Trainer.load_trainer(path, data)`).
 
-- **Project** (`_project.py`): 디렉토리 레이아웃 + `TrialStore`/`ProjectStore`/`cache`. 프로젝트 전역인 것만 소유하고, Pipeline 버전조차 색인하지 않는다(각 pipeline이 자기 db에서 관리)
+**예외는 데이터셋 하나뿐이다** — 자기 디렉토리에서 복원할 수 없는 유일한 것이라 Project가 들고 있고,
+그래서 프로젝트에 무엇이 있냐를 묻는 데 데이터프레임을 들고 오지 않아도 된다.
+
+- **Project** (`_project.py`): 디렉토리 레이아웃 + 데이터셋 + `pipeline`/`TrialStore`/`ProjectStore`/`cache`, 그리고 자기가 내준 Experimenter/Trainer를 이름으로 들고 있음(같은 이름은 같은 객체). 별도 `save()`는 없다 — 각 컴포넌트가 이미 write-through
 - **PipelineBuilder / Pipeline** (`_pipeline.py`): 가변 빌더 + `build()`가 만드는 불변 **노드 전용** 그래프
 - **Trial / make_trials** (`_trial.py`): 평가할 구성 하나. Pipeline 밖에 있음
 - **TrialStore** (`_trial_store.py`): `trials`(정의) + `experiment_hist`(fold별 실행 이력). 저작은 `Project.set_trial`, 실행은 `Experimenter.exp`가 **이름으로** 꺼내 씀
@@ -88,7 +91,7 @@ Disk 칸은 **노드(와 Trainer의 Predictor)** 얘기다 — Trial은 아래 �
 PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   └─ .build() ──► Pipeline  — 불변 스냅샷. grp 상속 해소 완료, 순수 데이터
 ```
-- **Experimenter/Trainer/Inferencer는 `Pipeline`만 보유** — builder를 넘기면 `TypeError`(`_run_common.require_built_pipeline`). builder를 나중에 수정해도 진행 중인 실행에 새어 들어가지 않음
+- **Experimenter/Trainer/Inferencer는 `Pipeline`만 보유** — builder를 넘기면 `TypeError`(`_common.require_built_pipeline`). builder를 나중에 수정해도 진행 중인 실행에 새어 들어가지 않음
 - **Pipeline은 노드 전용** — `role` 개념이 코드 어디에도 없다. 노드와 Trial을 구분하는 필드 자체가 없고, 구분이 필요한 자리도 없음(Collector는 Trial job에만 붙는다)
 - grp는 build를 넘어가지 않음 — 원래 그룹명은 표시용 `label`로만 남음 (`_BuiltNode.label`에만 있고 `ProcessorSpec`엔 `grp`/`label` 둘 다 없음)
 - 노드에 `tag` 없음 (Trial 쪽에만 있음)
@@ -113,7 +116,7 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 #### Pipeline (빌드 결과)
 - `nodes`: `{name: _BuiltNode}` — `None` 키는 `_BuiltDataSource` (builder와 동일한 관례)
 - `_BuiltNode` 속성(`__slots__`): `name`, `label`, `processor`, `edges`, `method`, `adapter`, `params`, `desc`, `output_edges`
-- `pipeline_id`(builder 신원) / `build_id`(빌드 호출마다 새 UUID) / `version`(`int | None`) — **`Project.build_pipeline()`이 저장할 때만 세팅**. `builder.build()`를 직접 부르면 `None`(미저장 in-memory 빌드)
+- `pipeline_id`(builder 신원) / `build_id`(빌드 호출마다 새 UUID) / `version`(`int | None`) / `status`(`'open'`/`'published'`/`'archived'`) — **`build()`가 세팅**한다("Pipeline 버전" 섹션). db 없는 빌더의 빌드만 `version=None, status='open'`
 - `get_node(name)`, `get_node_spec(name)`(ProcessorSpec — 노드 전용, DataSource는 `pipeline.datasource`로), `get_node_names(query=None)`
 - `topo_order()`: DataSource에서 내려오는 깊이순 노드명 (DataSource 제외) — 빌드 시 1회 계산해 캐시
 - `descendants(name)`, `check_data_compatibility(data)`
@@ -173,24 +176,26 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   - `_validate_processor`/`_validate_adapter`/`_validate_params`로 spec 검증 (Pipeline과 동일 규칙)
 
 ### Project (`_project.py`)
-디렉토리 레이아웃 소유 + **프로젝트 전역인 것만** 소유. **모든 컴포넌트가 단독 동작 가능** —
-Project는 순수 "조각을 짜맞춰주는 팩토리"일 뿐 필수 의존성이 아니다. `experimenter()`/`trainer()`가 하는 일:
-1. 경로(`exp_path`/`trainer_path`)와 `cache` 제공
-2. `ProjectStore`에 이름 등록
-3. `pipeline_version`을 줬으면 `load_pipeline()`으로 `Pipeline` 객체로 바꿔 채택시킴
+디렉토리 레이아웃 + **데이터셋** + 프로젝트 전역인 것 소유, 그리고 **자기가 내준 것을 들고 있음**.
+`add_experimenter()`/`add_trainer()`가 하는 일:
+1. 경로(`exp_path`/`trainer_path`)와 `cache`, 데이터셋 제공
+2. `ProjectStore`에 이름 등록 + 자기 레지스트리에 객체 보관
+3. `pipeline_version`을 `load_pipeline()`으로 `Pipeline` 객체로 바꿔 채택시킴
 
-`load_experimenter()`/`load_trainer()`는 **Pipeline을 resolve하지 않고** 각 클래스의 복원 진입점에
-위임한다 — 각자 자기 디렉토리에서 다 읽어온다. 그래서 Project 없이 열 수 있고,
-ProjectStore는 이름 목록이라 동기화가 어긋날 두 번째 진실 원본이 되지 않는다.
+**모든 컴포넌트가 단독 동작 가능**한 건 그대로 — 단 데이터셋만은 Project에 있어야
+"프로젝트에 뭐가 있나"를 데이터 없이 물을 수 있다.
 
-- `Project(path, cache_maxsize=4GB)` — `DataCache`를 소유하고 모든 Experimenter/Trainer가 공유
-- 경로: `pipeline_path(name)`, `exp_path(name)`, `trainer_path(name)`, `inferencer_path(name)` — **collector 경로 없음**(레지스트리는 Experimenter 소유)
-- 팩토리: `pipeline_builder(name)`, `experimenter(name, data, pipeline_name=, pipeline_version=, **kw)`, `load_experimenter(name, data, data_key=, aug_data=)`, `trainer(name, data, pipeline_name=, pipeline_version=, **kw)`, `load_trainer(name, data, aug_data=)`
-- **Pipeline 버전**: `build_pipeline(builder)` → `builder.build()` 후 결과를 다음 버전(1부터, `max+1`)으로 저장하고 `pipeline.version`에 세팅해 반환. **content dedup 없음** — 내용이 같아도 호출할 때마다 새 버전(`builder`에 path가 없으면 `ValueError`)
-  - 카운터/버전 파일은 **각 pipeline 자신의 db**(`pipelines/{name}/{name}.db`)가 소유 — `build_pipeline`은 `builder._store.save_version()`에 위임할 뿐, 프로젝트 전역 색인이 없음
-  - `load_pipeline(name, version=None)`, `list_pipeline_versions(name)` — 둘 다 `PipelineStore(pipeline_path(name), name)`를 통해 조회
-  - 저장은 pkl (`v{n}.pkl`) — 형식은 `PipelineStore.save_version`/`load_version` 뒤에 숨어 있어 교체 가능
-- `trials`: `TrialStore`, `store`: `ProjectStore`, `list_experimenters()`, `list_trainers()`
+- `Project(path, data=None, aug_data=None, cache_maxsize=4GB)` — `DataCache`를 소유하고 모든 Experimenter/Trainer가 공유
+- **데이터셋**: `data`/`aug_data` property(첫 접근에 `data.pkl`/`aug_data.pkl`에서 읽음 — 이름·이력 조회는 데이터를 안 건드림), `set_data(data)`/`set_aug_data(aug_data)`로 저장. 형식은 pkl(pandas/polars/cudf/numpy 다 되고 프로젝트가 이미 pipeline/splitter를 피클로 저장). 없으면 `_resolve_data`가 `ValueError`로 안내
+- 경로: `pipeline_path`(property), `exp_path(name)`, `trainer_path(name)`, `inferencer_path(name)` — **collector 경로 없음**(레지스트리는 Experimenter 소유)
+- **레지스트리**: `experimenters`/`trainers` — `{name: 객체}`, **첫 접근에 디스크에서 복원**(그래서 데이터셋이 필요). `list_experimenters()`/`list_trainers()`는 이름만 답하는 싼 질문이라 별개로 남는다
+- **`add_experimenter(name, data=None, pipeline_version=None, aug_data=None, **kw)` / `add_trainer(...)`**: **추가 전용** — 이미 있는 이름이면 `ValueError`. 생성은 split을 다시 계산하고 provenance를 리셋하므로 기존 것 위에 하면 재개가 아니라 피해다(#128). 기존 것은 `project.experimenters[name]`으로
+  - **존재 판정이 두 질문이다**: `ProjectStore`가 "이 프로젝트가 무엇을 관리하나"(멤버십), `ExperimenterStore.stored_at`/`TrainerStore.stored_at`이 "그 디렉토리가 이미 찼나"(점유). 색인엔 없는데 디스크엔 있는 건 모순이 아니라 "우리 것은 아니지만 자리는 찼다"는 정확한 사실이고, `add_*`는 둘 다 거부한다
+  - `pipeline_version` 기본값이 **Experimenter는 working copy**(어떤 status든 받고, Pipeline 없는 Experimenter는 아무것도 못 하니까), **Trainer는 없음**(open은 거부당하고 어떤 frozen 버전인지를 대신 고르는 건 추측이라)
+- **`remove_experimenter(name)` / `remove_trainer(name)`**: 디렉토리 삭제 + 색인 해제 + 레지스트리에서 제거. **Experimenter는 `experiment_hist` 행까지** 지운다 — 이름이 그 이력의 키라서, 남겨두면 다음에 같은 이름으로 추가한 것이 물려받고 `exp()`가 돌린 적 없는 fold를 건너뛴다. Trial *정의*는 프로젝트 소유라 안 건드림. Trainer는 프로젝트 전역 이력이 없어 디렉토리뿐
+  - 디스크 밖에 남는 것: 그 Experimenter/Trainer의 `DataCache` 항목(scope가 랜덤 id라 도달 불가능한 채 LRU에서 밀릴 때까지 남음), 이미 손에 든 파이썬 객체
+- **Pipeline**: `pipeline` property(프로젝트당 하나인 `PipelineBuilder`, 두 번 물어도 같은 객체 — 한 db 위의 두 사본이 갈라지지 않게). `load_pipeline(version=None)`(없으면 working copy를 build), `list_pipeline_versions()`, `remove_pipeline_version(version)`. 버전 lifecycle은 아래 "Pipeline 버전" 섹션
+- `trials`: `TrialStore`, `store`: `ProjectStore`
 - **`set_trial(trial)` / `set_trials(trials)`**: Trial 저작 진입점. **실행과 분리된 이유** — Trial은 프로젝트 소유인데 등록이 `Experimenter.exp()`의 부수효과였다. 그래서 실행하지 않고는 프로젝트에 넣을 수 없었고, 한 Experimenter가 다른 Experimenter가 이미 쓴 이름을 조용히 덮을 수 있었다
   - 반환은 **추가·변경된 이름**(`set_trial`은 str 또는 `None`, `set_trials`는 list) — 그대로 다음 `exp()`의 작업 목록이 된다. 저장된 정의와 같으면 변경이 아님(`has()`)
   - **성공 이력이 있는 이름은 얼린다**: `experiment_hist`에 `'built'` fold가 있는데 정의가 다르면 `ValueError`. 이력은 이름으로 키잉되고 Trial은 아티팩트를 안 남기므로, 재정의하면 옛 결과가 그걸 만든 적 없는 정의를 설명하게 된다 — 한 Trial의 기록처럼 보이는 두 개가 됨. 바꾸려면 새 이름이거나 `remove_trial`(결과까지 포기). `'error'`뿐이면 지킬 결과가 없으니 허용
@@ -234,8 +239,8 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
   - 복원은 **`Experimenter.load_experimenter(path, data, data_key=None, aug_data=None, cache=None)`** staticmethod. `{path}/__exp.db`가 없으면 `KeyError` — store를 만들기 **전에** 검사한다(안 그러면 없는 Experimenter의 디렉토리와 빈 db를 만들어놓고 실패함)
   - `Project.experimenter(...)`가 하는 일은 경로 + `cache` + ProjectStore 이름 등록 + (버전을 줬으면) `set_pipeline` 뿐
 - **이름이 식별자**: 경로는 `{project}/exp/{name}`, `TrialStore` 이력의 키도 이 이름. UUID 없음
-- **Pipeline은 객체로 지정** — `set_pipeline(pipeline, pipeline_name=None)`이 이미 로드된 `Pipeline`을 받아 채택. 이 클래스는 이름/버전으로 파이프라인을 **로드할 방법 자체가 없다**(project 참조가 없음) — 버전 번호로 지정하려면 `Project.experimenter(..., pipeline_version=)`. `self.pipeline_version`은 별도로 안 들고 `pipeline.version`에서 읽음(단일 출처)
-  - 채택한 Pipeline은 **실험 디렉토리의 `pipeline.pkl`로 저장되고 `load_experimenter()`가 그걸 다시 읽는다**(`_experimenter.py:284`) — Project 없이도 마지막에 채택한 Pipeline이 복원됨. **생성자는 안 읽는다** — `self.pipeline = None`으로 두고 `_save()`가 meta의 `pipeline_name`/`pipeline_version`까지 기본값으로 덮어쓰므로, 기존 디렉토리에 대고 생성자를 부르면 provenance가 사라진다(GitHub #128)
+- **Pipeline은 객체로 지정** — `set_pipeline(pipeline)`이 이미 로드된 `Pipeline`을 받아 채택하며 **status를 안 따진다**(open이든 published든 archived든). 이 클래스는 버전으로 파이프라인을 **로드할 방법 자체가 없다**(project 참조가 없음) — 번호로 지정하려면 `Project.add_experimenter(..., pipeline_version=)`. `pipeline_version`/`pipeline_build_id`는 **property**로 `self.pipeline`에서 읽는다(복사본을 두지 않으므로 어긋날 값이 없음)
+  - 채택한 Pipeline은 **실험 디렉토리의 `pipeline.pkl`로 저장되고 `load_experimenter()`가 그걸 다시 읽는다** — Project 없이도 마지막에 채택한 Pipeline이 복원됨. **생성자는 안 읽는다** — `self.pipeline = None`으로 두고 `_save()`가 meta를 기본값으로 덮어쓰므로, 기존 디렉토리에 대고 생성자를 부르면 provenance가 사라진다. `Project.add_experimenter`가 이미 있는 이름을 거부하는 이유(#128)
   - 버전 전환 시 `pipeline.diff_from(self.pipeline)`으로 stale 판정 → `reset_nodes()`로 해당 노드 아티팩트만 제거. Trial은 건드리지 않음("Staleness" 섹션)
 - `cache`(`DataCache`, optional) — `None`이면 캐시 없이 동작. store는 optional이 아니라(자기가 만듦) standalone Experimenter도 meta/splitter/Pipeline이 전부 저장됨
 - **`collectors`**: `Collectors({path}/collectors)` — 생성자에서 만들고(생성자가 곧 복원) `node_store`와 같은 자리. Collector가 쓰는 건 전부 노드 이름만으로 키잉되므로 **경로가 두 Experimenter를 가르는 유일한 수단**이다 — 프로젝트 전역 레지스트리였다면 이름이 겹치는 Trial마다 서로의 결과를 덮어썼다(무증상, 그리고 하필 비교가 필요한 바로 그 경우에). 대가는 Experimenter 간 비교가 store N개에 대한 읽기가 되는 것(#130)
@@ -255,7 +260,7 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
   - `get_node_info()`: 노드 요약 Markdown
 - **pipeline 불필요** (디스크 상태만으로 동작): `get_status(node_name)`, `reset_nodes(nodes)`, `show_error_nodes(nodes=None, traceback=False)`, `get_objs(node_name, outer_idx=0, inner_idx=0)`
   - **넷 다 Pipeline 노드 전용.** Trial은 디스크에 아무것도 안 남기므로 `get_status`는 몇 번을 돌렸든 `None`, `reset_nodes`는 지울 게 없고, `get_objs`는 `FileNotFoundError`. Trial 쪽 대응물은 `trial_store.get_status(name, exp.name)` / `Project.show_error_trials(experimenter=)` / `remove_trial_result(name)` / (모델 대신) Collector가 모은 결과
-  - **에러 보고가 갈리는 기준은 이력의 주인이다** — 노드 이력은 Experimenter의 `node_hist`, Trial 이력은 프로젝트의 `experiment_hist`. 예전엔 `show_error_nodes` 하나가 둘을 합쳐 내놨는데, 출력 라벨이 `[이름] fold o_i` 하나뿐이라 노드인지 Trial인지 구분이 안 됐다. 포맷은 `_run_common.format_errors`가 공유(둘 다 실패를 같은 모양으로 설명하므로)
+  - **에러 보고가 갈리는 기준은 이력의 주인이다** — 노드 이력은 Experimenter의 `node_hist`, Trial 이력은 프로젝트의 `experiment_hist`. 예전엔 `show_error_nodes` 하나가 둘을 합쳐 내놨는데, 출력 라벨이 `[이름] fold o_i` 하나뿐이라 노드인지 Trial인지 구분이 안 됐다. 포맷은 `_common.format_errors`가 공유(둘 다 실패를 같은 모양으로 설명하므로)
 - **OS log capture** (`open_os_log`/`close_os_log`/`os_log`):
   - `open_os_log(log_path=None)`: 이 프로세스의 OS-level stdout/stderr(fd 1/2)를 `{path}/__worker_logs/master.log`(기본값)로 dup2 리다이렉트 — `self._os_log_state`에 원본 fd/`sys.stdout`·`stderr` 백업 보관. 이미 open이면 에러
   - `close_os_log()`: 리다이렉트 원복. open 안 된 상태에서 호출하면 no-op
@@ -265,7 +270,8 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
   - `get_worker_logs(worker=None)`: 캡처된 네이티브 출력 — `{worker_idx: text, 'master': text}`. 매 실행마다 덮어씀
 - `get_train_data(edges, o_idx=0, i_idx=0)` / `get_valid_data(...)` / `get_test_data(...)`: 출력 추출 헬퍼
 - `aug_data`: 외부 데이터를 DataSource 수준에서 inner train split에 append — 미퍼시스트
-- 저장/로드: meta/splitter는 **그 Experimenter의 `{exp_path}/__exp.db`**(`_experimenter_store.py`) — `experimenter(name PK, data_key, title, pipeline_name, pipeline_version, splitters BLOB)`. 프로젝트 전역 experimenter db는 없다
+- 저장/로드: meta/splitter는 **그 Experimenter의 `{exp_path}/__exp.db`**(`_experimenter_store.py`) — `experimenter(name PK, data_key, title, pipeline_version, splitters BLOB)`. 프로젝트 전역 experimenter db는 없다
+  - **draft(open)로 돌리면 `pipeline_version`이 NULL**이다. 어느 빌드였는지는 `pipeline.pkl` 안의 `build_id`에만 있어서 SQL로는 안 보임 — 다만 프로젝트 안에서는 `build()`가 언제나 버전을 발급하므로 이 경우는 db 없는 빌더를 직접 넘겼을 때뿐
   - splitter 객체(`sp, sp_v, splitter_params`)는 ref-직렬화 불가라 컬럼이 아니라 **BLOB**(pickle)
 
 ### DataCache (`_cache.py`)
@@ -314,7 +320,7 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
   - **생성자 = 신규 생성**, 복원은 **`Trainer.load_trainer(path, data, aug_data=None, cache=None)`** staticmethod. `{path}/__trainer.db`가 없으면 `KeyError`이고, Experimenter와 같은 이유로 **store를 만들기 전에** 검사
   - 복원 시 split은 **재계산이 아니라 저장된 `split_indices`를 그대로** 씀 — splitter가 아예 없는 Trainer(단일 full-data fold)도 있고, 학습된 fold와 정확히 같아야 하므로
 - 경로 `{project}/trainers/{name}`
-- **`set_pipeline(pipeline, pipeline_name=None)`**: 이미 로드된 `Pipeline` 객체를 받음 — `self.pipeline_version`은 `pipeline.version`에서 읽음. 버전 전환 시 `diff_from`으로 stale 제거
+- **`set_pipeline(pipeline)`**: 이미 로드된 `Pipeline` 객체를 받되 **`require_frozen_pipeline`으로 open을 거부**(published/archived만) — `pipeline_version`은 property로 `pipeline.version`에서 읽음. 버전 전환 시 `diff_from`으로 stale 제거
 - **저장소가 넷**:
   - `_store`: `TrainerStore({path})` — meta + splits BLOB + `pipeline.pkl`
   - `node_store`: `NodeStore({path})` — Pipeline 노드 아티팩트+이력
@@ -521,6 +527,27 @@ p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
 ```
 [[feedback_pipeline_direct_reference]]: `p`가 스코프에 있으면 `p.set_grp`/`p.set_node`를 직접 호출 (`e.pipeline.set_grp`처럼 우회하지 않음)
 
+## Pipeline 버전 — build가 곧 publish
+**프로젝트당 파이프라인은 하나**다 — 이름으로 여러 개를 두지 않는다. 실제로 필요한 것은
+"이전 정의를 참조한다"이고, 그건 이름이 아니라 버전이 답할 일이다.
+
+```
+open ──build()──► published ──build()──► archived
+(빌더 자신)        (고정, 현재)           (고정, 삭제 가능)
+삭제 불가          삭제 불가
+```
+
+- **open은 `PipelineBuilder` 자신**이다. 편집 가능한 상태는 그것뿐이라 따로 만들 게 없고, 그래서 언제나 하나다. 번호가 없다 — 초안은 채택한 쪽 밑에서 계속 변하므로 번호는 기록이 지킬 수 없는 주장이 된다
+- **`build()`가 버전을 발급한다.** 정의가 직전 published와 같으면 새로 찍지 않고 **그 번호를 그대로 준다**(`PipelineBuilder._version` → `diff_from`이 빈 집합인지). 그래서 **버전은 정의가 바뀔 때 정확히 한 번 생기고**, 별도 publish 행위가 없으며, 번호 없는 스냅샷으로 뭔가를 돌릴 방법 자체가 없어서 **모든 이력 행이 자기가 무엇으로 돌았는지 말할 수 있다**
+- **published는 항상 정확히 하나** — 새로 찍히면 이전 것은 archived로 내려간다
+- **archived만 삭제 가능**(`Project.remove_pipeline_version`). 지워도 그걸로 돌린 것은 안 깨진다(각자 `pipeline.pkl` 사본을 가짐) — 없어지는 건 provenance가 가리킬 대상뿐
+- **db 없는 빌더**(`PipelineBuilder()`)는 발급할 곳이 없어 `version=None, status='open'`으로 남는다. `Trainer.set_pipeline`이 거부하는 유일한 경우
+- **publish는 built Pipeline과 빌더를 둘 다 저장**한다(`v{n}.pkl` / `v{n}_builder.pkl`). `build()`가 grp 상속을 해소해버려서 built 스냅샷은 편집 가능한 정의로 되돌아올 수 없기 때문 — 되돌리기 기능 자체는 아직 없고, 빌더 스냅샷이 그 문을 열어둔 것
+
+**게이트**: `Experimenter.set_pipeline`은 status를 안 따진다(편집 중인 정의로 실험하는 게 실험의 목적).
+`Trainer.set_pipeline`은 `require_frozen_pipeline`으로 **open만 거부** — 학습 결과는 배포로 이어지니
+무엇으로 학습했는지 말할 수 있어야 하고, archived도 고정돼 있으니 그 질문엔 published만큼 잘 답한다.
+
 ## Staleness — 두 Pipeline 버전을 비교한다
 정의 변경 플래그(serial 류)가 아니라 **버전 간 구조 비교**로 판정한다. 판정 지점은 `set_pipeline()` **한 곳**이고, `build()`/`train()`은 "디스크에 있는 건 유효하다"를 전제할 수 있다. 이 방식의 부산물로 **자기가 읽지 않는 노드를 고쳐도 Trial이 유지된다**(전역 플래그로는 이 구분이 안 됨).
 
@@ -603,11 +630,11 @@ p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
   - `resolve_processor(x)`: `"module.ClassName"` str → 클래스, else passthrough
   - `resolve_instance(spec)`: str→인스턴스(기본값) / `{__ref__, __params__}`→`cls(**params)` / else passthrough. `resolve_adapter`가 위임
   - `resolve_ref_values(value)`: params 값 재귀 해석 — `{"__callable__": "mod.fn"}`→**호출 안 하고** 그 객체 참조(metric_func 등), `{"__ref__": ..., "__params__": {...}}`→인스턴스화, 문자열/스칼라는 그대로. `set_grp`/`set_node`/`set_collector`의 params에 적용
-- **_project_store.py**: `ProjectStore` — `{project}/project.db`, `experimenters(name PK)`/`trainers(name PK)` **이름 목록만**. 등록은 `Project` 팩토리가 함 — 직접 생성한 Experimenter/Trainer는 어느 색인에도 안 들어감
-- **_experimenter_store.py**: `ExperimenterStore(path)` — **Experimenter 하나 전용** `{path}/__exp.db`. meta 행 + splitter BLOB + `save_pipeline(pipeline)`/`load_pipeline()`(`_run_common`에 위임). `fetch`/`load_splitters`/`remove`는 행이 하나뿐이라 `name` 생략 가능
-- **_trainer_store.py**: `TrainerStore(path)` — Trainer판 동형. `{path}/__trainer.db`, `trainer(name PK, pipeline_name, pipeline_version, splits BLOB)`. Experimenter판과 다른 점 둘: splits 블롭에 **`split_indices`가 같이** 들어감(splitter가 없을 수도 있고, 학습된 fold와 정확히 같아야 해서), `data_key`/`title`이 **없음**(다른 Trainer와 비교할 일이 없어 라벨도 mismatch 가드도 불필요)
+- **_project_store.py**: `ProjectStore` — `{project}/project.db`, `experimenters(name PK)`/`trainers(name PK)` **이름 목록만**. 등록/해제는 `Project.add_*`/`remove_*`가 함 — 직접 생성한 Experimenter/Trainer는 어느 색인에도 안 들어간다. 그게 곧 "이 프로젝트 소속인가"라서, "그 경로가 찼는가"(`stored_at`)와는 **다른 질문**이다
+- **_experimenter_store.py**: `ExperimenterStore(path)` — **Experimenter 하나 전용** `{path}/__exp.db`. meta 행 + splitter BLOB + `save_pipeline(pipeline)`/`load_pipeline()`(`_common`에 위임). `fetch`/`load_splitters`/`remove`는 행이 하나뿐이라 `name` 생략 가능
+- **_trainer_store.py**: `TrainerStore(path)` — Trainer판 동형. `{path}/__trainer.db`, `trainer(name PK, pipeline_version, splits BLOB)`. Experimenter판과 다른 점 둘: splits 블롭에 **`split_indices`가 같이** 들어감(splitter가 없을 수도 있고, 학습된 fold와 정확히 같아야 해서), `data_key`/`title`이 **없음**(다른 Trainer와 비교할 일이 없어 라벨도 mismatch 가드도 불필요)
   - **`save(meta)`가 `INSERT OR IGNORE` + `UPDATE`인 이유**(양쪽 store 공통): meta 컬럼만 나열한 `INSERT OR REPLACE`는 같은 행의 BLOB(splitters/splits)을 NULL로 날려버린다
-- **_run_common.py**: Experimenter/Trainer 공용 — `require_built_pipeline`, `resolve_common_status`, `save_pipeline(path, pipeline)`/`load_pipeline(path)`(`{path}/pipeline.pkl`, 없으면 `None`)
+- **_common.py**: Experimenter/Trainer 공용 — `require_built_pipeline`, `require_frozen_pipeline`(Trainer 전용 게이트), `resolve_common_status`, `save_pipeline(path, pipeline)`/`load_pipeline(path)`(`{path}/pipeline.pkl`, 없으면 `None`), `format_errors`
 - **_describer.py**: desc_spec, desc_pipeline, desc_node, compare_nodes
 - **_logger.py**: BaseLogger, DefaultLogger (start/update/end_progress, adhoc_progress, rename_progress)
 - **col.py / _connector.py / collector/ / filter/ / adapter/ / processor/**: 해당 섹션 참조
@@ -675,17 +702,22 @@ p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
 ```
 {project.path}/
   project.db                        # ProjectStore — experimenters(name PK) / trainers(name PK).
-                                    # 이름 목록만. 나머지는 전부 각자 디렉토리에
+                                    # 이 프로젝트가 무엇을 관리하나(멤버십). 나머지는 각자 디렉토리에
   trials.db                         # trials + experiment_hist
+  data.pkl                          # 프로젝트 데이터셋 — 각자 디렉토리에서 복원 못 하는 유일한 것
+  aug_data.pkl                      # inner train split에 덧붙일 데이터 (있으면)
 
-  pipelines/{name}/
-    {name}.db                       # PipelineBuilder 노드/그룹 정의 + versions(version PK, path)
-    v{n}.pkl                        # 버전별 빌드 결과 Pipeline
+  pipeline/                         # 프로젝트당 하나
+    pipeline.db                     # PipelineBuilder 노드/그룹 정의(= open 버전)
+                                    #   + versions(version PK, status, path, builder_path)
+    v{n}.pkl                        # 버전별 빌드 결과 Pipeline — 채택용
+    v{n}_builder.pkl                # 그 버전을 낸 빌더 — built 스냅샷은 grp가 해소돼
+                                    #   편집 가능한 정의로 돌아올 수 없으므로 별도로 남긴다
 
   exp/{name}/                       # Experimenter — 이름이 곧 식별자, 디렉토리 하나로 자족
     __exp.db                        # ExperimenterStore — 이 Experimenter 전용.
                                     #   experimenter(name PK, data_key, title,
-                                    #                pipeline_name, pipeline_version, splitters BLOB)
+                                    #                pipeline_version, splitters BLOB)
     pipeline.pkl                    # 이 Experimenter가 채택한 Pipeline 사본
     collectors/                     # 이 Experimenter의 Collectors — 프로젝트 전역 레지스트리는 없다.
                                     #   Collector 데이터가 노드 이름만으로 키잉되므로
@@ -712,7 +744,7 @@ p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
 
   trainers/{name}/
     __trainer.db                    # TrainerStore — 이 Trainer 전용.
-                                    #   trainer(name PK, pipeline_name, pipeline_version,
+                                    #   trainer(name PK, pipeline_version,
                                     #           splits BLOB = splitter/splitter_params/split_indices)
     pipeline.pkl                    # 이 Trainer가 채택한 Pipeline 사본
     __node_hist.db                  # 노드용 NodeStore — exp/{name}과 별개 base path
@@ -725,9 +757,9 @@ p.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
   inferencers/{name}/
     __inferencer.pkl                # node_specs, selected_nodes/predictors, n_splits, node_objs, v
 ```
-- **Experimenter/Trainer는 각자 `pipeline.pkl` 사본을 소유한다** — 자기 디렉토리만으로 재개 가능한 것이 목적. `(pipeline_name, pipeline_version)`은 **provenance**로만 남는다(이 사본이 프로젝트의 어느 버전에서 왔는지)
-  - 실제 I/O는 `_run_common.save_pipeline`/`load_pipeline` 한 곳. Experimenter는 `ExperimenterStore`를 통해, Trainer는 직접 호출
-  - `Project.load_experimenter`/`load_trainer`는 **버전을 resolve하지 않는다** — 각자 자기 사본을 읽는다. 버전으로 지정하는 건 생성 팩토리(`experimenter()`/`trainer()`의 `pipeline_version=`)뿐
+- **Experimenter/Trainer는 각자 `pipeline.pkl` 사본을 소유한다** — 자기 디렉토리만으로 재개 가능한 것이 목적. `pipeline_version`은 **provenance**로만 남는다(이 사본이 어느 버전에서 왔는지)
+  - 실제 I/O는 `_common.save_pipeline`/`load_pipeline` 한 곳. Experimenter는 `ExperimenterStore`를 통해, Trainer는 직접 호출
+  - `Project.experimenters`/`trainers`가 복원할 때 **버전을 resolve하지 않는다** — 각자 자기 사본을 읽는다. 버전으로 지정하는 건 `add_experimenter()`/`add_trainer()`의 `pipeline_version=`뿐
 - **NodeStore는 project 전역이 아니라 Experimenter/Trainer 하나당 하나** — 프로젝트 전역 노드 이력 레지스트리는 없다. `Experimenter.node_store`/`Trainer.node_store`가 생성자에서 자기 base path로 만들어 모든 fold가 공유
 
 ## 패키지 정보
