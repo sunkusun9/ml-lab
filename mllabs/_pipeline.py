@@ -195,6 +195,21 @@ def _definition_of(spec):
     return {k: getattr(spec, k) for k in _DEFINITION_KEYS}
 
 
+def _same_definition(pipeline, other):
+    """True if *pipeline* and *other* say exactly the same thing.
+
+    Not the same question as :meth:`Pipeline.diff_from`, which answers "what
+    artifacts must be reset" and so returns *node* names only. A DataSource
+    change that no node reads stales nothing — deliberately — but it is still
+    a different definition, and a version has to appear for it. Without the
+    DataSource comparison here, a Pipeline of a schema and no nodes could
+    never leave the version it was first published as.
+    """
+    return (not pipeline.diff_from(other)
+            and pipeline.datasource.schema == other.datasource.schema
+            and pipeline.datasource.targets == other.datasource.targets)
+
+
 class _SchemaColumns:
     """Stand-in for ``eval_expr``'s ``data`` argument, backed by a DataSource
     ``schema`` mapping instead of real data — enough to resolve a bare
@@ -655,6 +670,34 @@ class Pipeline:
             for name, node in self.nodes.items() if name is not None
         }
 
+    @classmethod
+    def empty(cls, pipeline_id=None):
+        """A Pipeline with no nodes — "there is nothing to build", as an object.
+
+        Having no pipeline is a legitimate state, not a missing one: Trials
+        read the DataSource directly, so an Experimenter with no nodes at all
+        still runs. Saying that with an empty Pipeline rather than ``None``
+        means every consumer stays branch-free — ``build()`` finds no jobs,
+        ``topo_order()`` is empty, ``check_data_compatibility`` passes
+        vacuously — instead of each one guarding for absence.
+
+        Inside a Project this is version 0, published at creation, so the empty
+        state is a real row rather than a fabricated object. This constructor
+        is for the standalone case, where there is no store to mint from — the
+        same reason a db-less builder's build stays ``open`` and unnumbered.
+        """
+        return cls({}, _BuiltDataSource('Data_Source', {}, [], []), pipeline_id)
+
+    @property
+    def is_empty(self):
+        """No nodes at all — only the DataSource, which ``nodes`` always holds.
+
+        What it means depends on which side of an adoption you are on: as the
+        Pipeline being adopted, nothing to build; as the one being replaced,
+        nothing that was ever adopted, so nothing a switch could invalidate.
+        """
+        return len(self.nodes) == 1
+
     @property
     def datasource(self):
         return self.nodes[None]
@@ -1113,9 +1156,9 @@ class PipelineBuilder:
             current = self._store.load_version()
         except KeyError:
             current = None
-        if current is not None and not pipeline.diff_from(current):
+        if current is not None and _same_definition(pipeline, current):
             # Same definition, so the same version — a second row would be a
-            # duplicate of it, and every load_pipeline() call would make one.
+            # duplicate of it, and every build would make one.
             pipeline.version = current.version
             pipeline.status = PUBLISHED
             return

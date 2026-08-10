@@ -66,6 +66,7 @@ def _stop_native_redirect(state):
     sys.stderr = state['orig_stderr']
     state['log_f'].close()
 from ._common import resolve_common_status, require_built_pipeline, format_errors
+from ._pipeline import Pipeline
 
 
 
@@ -231,23 +232,18 @@ class Experimenter():
             )
             for i, (test_idx, inner_folds) in enumerate(raw_splits)
         ]
-        self.pipeline = None
+        self.pipeline = Pipeline.empty()
         self._os_log_state = None
         self._save()
 
     @property
     def pipeline_version(self):
-        """The adopted Pipeline's version — ``None`` for the working copy.
+        """The adopted Pipeline's version — ``None`` only for an in-memory build.
 
         Read off :attr:`pipeline` rather than kept beside it, so there is no
         second copy to fall out of step with it.
         """
-        return self.pipeline.version if self.pipeline is not None else None
-
-    @property
-    def pipeline_build_id(self):
-        """Which build of the Pipeline was adopted. Identifies a draft, which has no version."""
-        return self.pipeline.build_id if self.pipeline is not None else None
+        return self.pipeline.version
 
     @staticmethod
     def load_experimenter(path, data, data_key=None, aug_data=None, cache=None,
@@ -365,8 +361,7 @@ class Experimenter():
         docstring); ``Project.add_experimenter()`` resolves that before
         calling this. ``self.pipeline_version`` is read straight off
         *pipeline* (its ``.version``), so it's never tracked as a separate,
-        possibly-diverging value; a draft has none, and its ``build_id``
-        is what says which draft it was.
+        possibly-diverging value.
 
         Any status is accepted, unlike ``Trainer.set_pipeline``. Experimenting
         against a definition still being edited is the point of experimenting;
@@ -394,7 +389,11 @@ class Experimenter():
             Pipeline: *pipeline*, unchanged.
         """
         require_built_pipeline(pipeline)
-        if self.pipeline is not None:
+        # Only a *switch* invalidates. With nothing adopted yet the empty
+        # Pipeline is the absence of a prior definition, not a claim that
+        # nothing was built — reopening restores artifacts, and diffing
+        # against the placeholder would delete every one of them.
+        if not self.pipeline.is_empty:
             stale = pipeline.diff_from(self.pipeline)
             if stale:
                 self.reset_nodes(sorted(stale))
@@ -402,11 +401,6 @@ class Experimenter():
         self._store.save_pipeline(pipeline)
         self._store.set(self.name, 'pipeline_version', self.pipeline_version)
         return pipeline
-
-    def _require_pipeline(self):
-        if self.pipeline is None:
-            raise RuntimeError("No pipeline set. Call set_pipeline(pipeline) first.")
-        return self.pipeline
 
     def _require_trial_store(self):
         if self.trial_store is None:
@@ -539,7 +533,7 @@ class Experimenter():
         from ._executor import _execute_single, _execute_multi
         from ._tracker import LoggerExecuteTracker, NodeInfoTracker
         logger = resolve_logger(logger)
-        pipeline = self._require_pipeline()
+        pipeline = self.pipeline
         pipeline.check_data_compatibility(self.data)
         node_names = set(pipeline.get_node_names(nodes))
         target_nodes = [i for i in pipeline.topo_order() if i in node_names]
@@ -642,7 +636,7 @@ class Experimenter():
         from ._executor import _execute_single, _execute_multi
         from ._tracker import LoggerExecuteTracker, TrialHistTracker
         logger = resolve_logger(logger)
-        pipeline = self._require_pipeline()
+        pipeline = self.pipeline
         pipeline.check_data_compatibility(self.data)
         trial_store = self._require_trial_store()
 
@@ -768,7 +762,7 @@ class Experimenter():
         return self.outer_folds[o_idx].get_test_data(edges, i_idx)
 
     def get_node_info(self):
-        pipeline = self._require_pipeline()
+        pipeline = self.pipeline
         lines = [f"# Experiment Pipeline Summary\n"]
         lines.append(f"- **DataSource**\n")
 

@@ -540,15 +540,27 @@ class TestRebuild:
 
 
 class TestSetPipeline:
-    def test_no_pipeline_raises_on_build(self, tmp_path, sample_data):
+    def test_no_pipeline_is_nothing_to_build(self, tmp_path, sample_data):
+        """Having no Pipeline is a state, not a fault: the default is the empty
+        one, so there is simply nothing to build."""
         e = Experimenter(path=tmp_path / 'no_pipeline', name='e1', data=sample_data)
-        with pytest.raises(RuntimeError, match='set_pipeline'):
-            e.build()
+        assert e.pipeline.is_empty
+        assert e.pipeline_version is None
+        e.build()
 
-    def test_no_pipeline_raises_on_exp(self, tmp_path, sample_data):
-        e = Experimenter(path=tmp_path / 'no_pipeline', name='e1', data=sample_data)
-        with pytest.raises(RuntimeError, match='set_pipeline'):
-            e.exp([], None)
+    def test_no_pipeline_still_runs_trials(self, tmp_path, sample_data):
+        """A Trial reads the DataSource directly, so an Experimenter with no
+        nodes at all is still a working one — no preprocessing, raw columns."""
+        from mllabs import TrialStore, Trial
+        store = TrialStore(tmp_path)
+        e = Experimenter(path=tmp_path / 'no_pipeline', name='e1', data=sample_data,
+                         trial_store=store)
+        trial = Trial('dt', 'sklearn.tree.DecisionTreeClassifier',
+                      edges={'X': '{f1, f2}', 'y': '{target}'},
+                      params={'max_depth': 2, 'random_state': 0})
+        store.register(trial)
+        e.exp(['dt'])
+        assert e.trial_store.get_status('dt', 'e1') == {(0, 0): 'built'}
 
     def test_constructor_pipeline_sets_attribute(self, exp, pipeline):
         from mllabs._pipeline import Pipeline

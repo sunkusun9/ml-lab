@@ -173,7 +173,7 @@ class PipelineStore:
     # built Pipeline versions
     # ------------------------------------------------------------------
 
-    def publish(self, pipeline, builder):
+    def publish(self, pipeline, builder, version=None):
         """Freeze *pipeline* as the next version; return the version number.
 
         Two artifacts, because they answer different needs. ``v{n}.pkl`` is the
@@ -184,10 +184,21 @@ class PipelineStore:
 
         Whatever was published before becomes :data:`ARCHIVED`: only the newest
         is the current one.
+
+        Args:
+            pipeline (Pipeline): The built Pipeline to freeze.
+            builder (PipelineBuilder): The definition it was built from.
+            version (int, optional): Number to publish under. Defaults to the
+                next one. ``Project`` passes 0 to seed the empty baseline, so
+                that "there is always a published version" holds from the
+                moment a project exists.
         """
         with sqlite3.connect(str(self.db_path)) as conn:
-            row = conn.execute("SELECT COALESCE(MAX(version), 0) FROM versions").fetchone()
-            version = row[0] + 1
+            if version is None:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(version), 0) FROM versions"
+                ).fetchone()
+                version = row[0] + 1
             version_path = self.db_path.parent / f'v{version}.pkl'
             builder_path = self.db_path.parent / f'v{version}_builder.pkl'
             pipeline.version = version

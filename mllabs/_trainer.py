@@ -9,6 +9,7 @@ from ._trainer_store import TrainerStore
 from ._trial import Trial
 from ._edge_dsl import parse, eval_expr, referenced_nodes
 from ._logger import resolve_logger
+from ._pipeline import Pipeline
 from ._common import (resolve_common_status, require_built_pipeline,
                       require_frozen_pipeline)
 
@@ -107,7 +108,7 @@ class Trainer:
         self.predictor_defs = PredictorStore(self.predictor_path)
         self.aug_data = wrap(aug_data) if aug_data is not None else None
 
-        self.pipeline = None
+        self.pipeline = Pipeline.empty()
 
         split_indices = self._make_splits()
         self.train_folds = self._make_train_folds(split_indices)
@@ -157,7 +158,7 @@ class Trainer:
         trainer.predictor_store = NodeStore(trainer.predictor_path)
         trainer.predictor_defs = PredictorStore(trainer.predictor_path)
         trainer.aug_data = wrap(aug_data) if aug_data is not None else None
-        trainer.pipeline = None
+        trainer.pipeline = Pipeline.empty()
         trainer.train_folds = trainer._make_train_folds(splits.get('split_indices'))
 
         pipeline = store.load_pipeline()
@@ -172,7 +173,7 @@ class Trainer:
         Read off :attr:`pipeline` rather than kept beside it, so there is no
         second copy to fall out of step with it.
         """
-        return self.pipeline.version if self.pipeline is not None else None
+        return self.pipeline.version
 
     # ------------------------------------------------------------------
     # split / fold setup
@@ -250,7 +251,9 @@ class Trainer:
         require_built_pipeline(pipeline)
         require_frozen_pipeline(pipeline)
         pipeline.check_data_compatibility(self.data)
-        if self.pipeline is not None:
+        # See Experimenter.set_pipeline: the empty Pipeline means nothing has
+        # been adopted, so there is nothing to invalidate against.
+        if not self.pipeline.is_empty:
             stale = pipeline.diff_from(self.pipeline)
             if stale:
                 self.reset_nodes(sorted(stale))
@@ -287,8 +290,6 @@ class Trainer:
         With no Predictors at all, every node is selected — training the whole
         preprocessing graph is still meaningful on its own.
         """
-        if self.pipeline is None:
-            return []
         if not predictors:
             return list(self.pipeline.topo_order())
         needed = set()
@@ -299,11 +300,6 @@ class Trainer:
                         needed.add(name)
                         self._collect_upstream(self.pipeline, name, needed)
         return [n for n in self.pipeline.topo_order() if n in needed]
-
-    def _require_pipeline(self):
-        if self.pipeline is None:
-            raise RuntimeError("No pipeline set. Call set_pipeline(pipeline) first.")
-        return self.pipeline
 
     def _collect_upstream(self, pipeline, node_name, selected):
         spec = pipeline.get_node_spec(node_name)
@@ -347,7 +343,7 @@ class Trainer:
         return None
 
     def reset_nodes(self, nodes):
-        pipeline = self._require_pipeline()
+        pipeline = self.pipeline
         predictor_names = set(self.predictor_names())
         selected_set = set(self.selected_nodes) | predictor_names
         affected = set(n for n in nodes if n in selected_set)
@@ -481,7 +477,7 @@ class Trainer:
         from ._tracker import LoggerExecuteTracker, NodeInfoTracker
 
         logger = resolve_logger(logger)
-        pipeline = self._require_pipeline()
+        pipeline = self.pipeline
         pipeline.check_data_compatibility(self.data)
 
         if predictors is None:
@@ -623,7 +619,7 @@ class Trainer:
             RuntimeError: If any selected node is not built.
         """
         from ._inferencer import Inferencer
-        pipeline = self._require_pipeline()
+        pipeline = self.pipeline
 
         all_selected = self.selected_nodes + self.predictor_names()
         for name in all_selected:

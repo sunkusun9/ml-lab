@@ -77,6 +77,7 @@ class Project:
         self._pipeline = None
         self._experimenters = {}
         self._trainers = {}
+        self._seed_base_version()
         if data is not None:
             self.set_data(data)
         if aug_data is not None:
@@ -219,8 +220,9 @@ class Project:
             name (str): Experimenter name.
             data: Dataset for it. Defaults to the project's.
             pipeline_version (int, optional): Version for it to adopt.
-                Omitted, it adopts the working copy — an Experimenter accepts
-                any status, and one with no Pipeline at all cannot do anything.
+                Omitted, it adopts the published one — version 0, the empty
+                Pipeline, until something has been built. Adopting an
+                unpublished edit is a separate act: build it first.
             aug_data: Augmentation data. Defaults to the project's.
             **kwargs: Passed to :class:`~mllabs.Experimenter` (``sp``, ``sp_v``,
                 ``splitter_params``, ``title``, ``data_key``, ...).
@@ -247,11 +249,9 @@ class Project:
         """Add a new Trainer named *name*, under ``{project}/trainers/{name}``.
 
         Same shape as :meth:`add_experimenter`, and the same rule: a taken name
-        raises. *pipeline_version* is required to adopt one here, and unlike
-        there it has no default: a Trainer refuses the working copy, and picking
-        a frozen version on the caller's behalf would be a guess about which.
-        Omitted, the Trainer starts with no Pipeline and takes one later through
-        :meth:`Trainer.set_pipeline`.
+        raises. *pipeline_version* defaults the same way too — the published
+        version, which is frozen and so is exactly what a Trainer is allowed to
+        adopt. What it refuses is the working copy, and this never hands it one.
         """
         from ._trainer import Trainer
         from ._trainer_store import TrainerStore
@@ -262,8 +262,7 @@ class Project:
             aug_data=aug_data if aug_data is not None else self.aug_data,
             cache=self.cache, **kwargs,
         )
-        if pipeline_version is not None:
-            trainer.set_pipeline(self.load_pipeline(pipeline_version))
+        trainer.set_pipeline(self.load_pipeline(pipeline_version))
         self.store.register_trainer(name)
         self._trainers[name] = trainer
         return trainer
@@ -487,16 +486,37 @@ class Project:
     # ------------------------------------------------------------------
 
     def load_pipeline(self, version=None):
-        """A Pipeline by version number; without one, the working copy's own version.
+        """A frozen version by number; without one, the published (current) one.
 
-        The default builds :attr:`pipeline`, which publishes it — so what comes
-        back is the version the definition currently in the builder belongs to,
-        newly minted if those edits have not been built before. Asking for a
-        number is the deliberate act of reaching past that to an older one.
+        A read, and only a read. It used to build :attr:`pipeline` when given
+        no version, which publishes — so a call that reads like "load" minted a
+        version, and adding an Experimenter did too. Minting now happens in one
+        place, :meth:`PipelineBuilder.build`, where it is what you asked for.
+
+        There is always something to return: a project publishes the empty
+        Pipeline as version 0 when it is created.
         """
-        if version is None:
-            return self.pipeline.build()
         return self._pipeline_store().load_version(version)
+
+    def _seed_base_version(self):
+        """Publish the empty Pipeline as version 0, once, at creation.
+
+        Version 0 is what "this project has no pipeline yet" *is*, rather than
+        an absence every caller has to handle. It is a real published row, so
+        :meth:`load_pipeline` never comes up empty, a Trainer can adopt it
+        (published is frozen — an empty definition has nothing to change under
+        it), and "exactly one published version" is true from the start.
+
+        Building an untouched working copy returns version 0 rather than
+        minting: nothing was defined, so nothing was changed. Version 1 is the
+        first real definition.
+        """
+        from ._pipeline import Pipeline, PipelineBuilder
+        store = self._pipeline_store()
+        if store.list_versions():
+            return
+        store.publish(Pipeline.empty(self.pipeline.pipeline_id),
+                      PipelineBuilder(), version=0)
 
     def list_pipeline_versions(self):
         """Every frozen version: ``{version, status, path, builder_path}`` rows."""

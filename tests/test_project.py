@@ -117,7 +117,7 @@ class TestPipelineVersions:
         b = builder.build()
         assert b.version == a.version
         assert a.build_id != b.build_id      # a different build, the same definition
-        assert len(project.list_pipeline_versions()) == 1
+        assert len(project.list_pipeline_versions()) == 2   # v0 and it
 
     def test_an_edit_mints_the_next_version(self, project, builder):
         builder.build()
@@ -129,7 +129,7 @@ class TestPipelineVersions:
         builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
         builder.build()
         assert [(r['version'], r['status']) for r in project.list_pipeline_versions()] == \
-            [(1, 'archived'), (2, 'published')]
+            [(0, 'archived'), (1, 'archived'), (2, 'published')]
 
     def test_a_builder_with_no_db_stays_open(self):
         """Nowhere to mint from, so it is the one unnumbered case — and the
@@ -139,10 +139,41 @@ class TestPipelineVersions:
         built = bare.build()
         assert (built.version, built.status) == (None, 'open')
 
-    def test_load_without_a_version_is_the_working_copys_own(self, project, builder):
+    def test_a_new_project_starts_published_at_v0(self, project):
+        """The empty Pipeline is a real published row, not an absence — so
+        load_pipeline() always has something to return."""
+        assert [(r['version'], r['status']) for r in project.list_pipeline_versions()] == \
+            [(0, 'published')]
+        assert project.load_pipeline().is_empty
+
+    def test_building_an_untouched_working_copy_stays_at_v0(self, project):
+        """Nothing was defined, so nothing changed, so no version appears."""
+        assert project.pipeline.build().version == 0
+        assert len(project.list_pipeline_versions()) == 1
+
+    def test_load_without_a_version_is_the_published_one(self, project, builder):
         builder.build()
         builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
+        assert project.load_pipeline().version == 1   # the edit is not published yet
+        assert builder.build().version == 2
         assert project.load_pipeline().version == 2
+
+    def test_load_does_not_mint(self, project, builder):
+        builder.build()
+        builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
+        before = len(project.list_pipeline_versions())
+        project.load_pipeline()
+        assert len(project.list_pipeline_versions()) == before
+
+    def test_a_datasource_only_change_still_mints(self, project, builder):
+        """diff_from answers 'what artifacts to reset' and so returns node
+        names only; a schema change no node reads stales nothing but is still
+        a different definition."""
+        p = PipelineBuilder(path=project.pipeline_path, name='pipeline')
+        p.set_datasource({'f1': 'numerical'})
+        first = p.build().version
+        p.set_datasource({'f1': 'numerical', 'f2': 'numerical'})
+        assert p.build().version == first + 1
 
     def test_load_specific_version(self, project, builder):
         first = builder.build()
@@ -167,7 +198,7 @@ class TestPipelineVersions:
         builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
         builder.build()
         project.remove_pipeline_version(1)
-        assert [r['version'] for r in project.list_pipeline_versions()] == [2]
+        assert [r['version'] for r in project.list_pipeline_versions()] == [0, 2]
 
     def test_the_published_version_cannot_be_removed(self, project, builder):
         builder.build()
@@ -426,19 +457,29 @@ class TestExperimenterUnderProject:
         assert loaded.pipeline is not None
         assert loaded.get_status('scaler') == 'built'
 
-    def test_adding_without_a_version_adopts_the_working_copy(self, project, builder,
-                                                             sample_data):
-        """An Experimenter takes any status, and one with no Pipeline at all
-        cannot do anything — so the working copy is the sensible default."""
+    def test_adding_without_a_version_adopts_the_published_one(self, project, builder,
+                                                              sample_data):
+        """The published version, not the working copy — adding an
+        Experimenter is not an occasion to mint one."""
+        published = builder.build().version
         e = project.add_experimenter('bare', sample_data)
-        assert e.pipeline is not None
-        assert e.pipeline_version == builder.build().version
+        assert e.pipeline_version == published
+        assert len(project.list_pipeline_versions()) == 2   # v0 and this one
 
-    def test_a_trainer_gets_none_unless_asked(self, project, builder, sample_data):
-        """It refuses the working copy, and choosing a frozen version on the
-        caller's behalf would be a guess about which."""
+    def test_adding_before_anything_is_built_adopts_v0(self, project, sample_data):
+        """Version 0 is the empty Pipeline every project is created with, so
+        there is always something to adopt and nothing to special-case."""
+        e = project.add_experimenter('bare', sample_data)
+        assert e.pipeline_version == 0
+        assert e.pipeline.is_empty
+        e.build()                       # nothing to build, and that is not an error
+
+    def test_a_trainer_takes_the_published_one_too(self, project, builder, sample_data):
+        """Published is frozen, which is exactly what a Trainer is allowed to
+        adopt — the default never hands it the working copy."""
+        published = builder.build().version
         t = project.add_trainer('bare_t', sample_data)
-        assert t.pipeline is None
+        assert t.pipeline_version == published
 
     def test_switching_version_resets_stale_nodes(self, project, builder, sample_data):
         e = self._exp(project, builder, sample_data)

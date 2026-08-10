@@ -170,15 +170,18 @@ class TestSelection:
         with pytest.raises(TypeError, match='from_trial'):
             trainer.train([Trial('dt', DT, DT_EDGES)])
 
-    def test_no_pipeline_raises_on_train(self, pipeline, sample_data, sp_v):
+    def test_no_pipeline_is_nothing_to_train(self, pipeline, sample_data, sp_v):
+        """The default is the empty Pipeline, so no nodes are selected and
+        train() has nothing to do — not an error."""
         trainer = _make_trainer(pipeline, sample_data, sp_v)
-        with pytest.raises(RuntimeError, match='set_pipeline'):
-            trainer.train()
+        assert trainer.pipeline.is_empty
+        assert trainer.selected_nodes == []
+        trainer.train()
 
-    def test_no_pipeline_raises_on_to_inferencer(self, pipeline, sample_data, sp_v):
+    def test_no_pipeline_gives_an_empty_inferencer(self, pipeline, sample_data, sp_v):
         trainer = _make_trainer(pipeline, sample_data, sp_v)
-        with pytest.raises(RuntimeError, match='set_pipeline'):
-            trainer.to_inferencer()
+        inferencer = trainer.to_inferencer()
+        assert inferencer.selected_nodes == []
 
     def test_set_pipeline_keeps_a_copy_and_the_pointer(self, pipeline, sample_data, sp_v):
         """The Trainer owns the Pipeline it trains against; the pointer stays
