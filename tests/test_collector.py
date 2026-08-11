@@ -26,6 +26,10 @@ def dummy_metric(y, pred):
     return 0.5
 
 
+def boom_metric(y, pred):
+    raise ValueError('boom')
+
+
 @pytest.fixture
 def sample_data():
     np.random.seed(42)
@@ -1137,3 +1141,96 @@ class TestProcessCollector:
         result = pc.get_output()
         assert list(result.columns) == ['dt__target_1']
         assert result.shape == (20, 1)
+
+
+class TestCollectState:
+    """Reading what was collected — the one question that spans stores."""
+
+    def _acc(self, e, name='acc', connector=None, metric=accuracy_metric):
+        return e.collectors.set_collector(
+            name, MetricCollector, connector or Connector(),
+            params={'output_var': None, 'metric_func': metric})
+
+    def test_uncollected_empty_when_everything_collected(self, built_exp):
+        mc = self._acc(built_exp.e)
+        _run(built_exp, collectors=[mc.name])
+        assert built_exp.e.uncollected_trials() == {'acc': []}
+
+    def test_uncollected_reports_collector_attached_after_the_run(self, built_exp):
+        """The case the history is there to expose: folds already recorded
+        'built' are skipped, so a Collector attached afterwards never sees them
+        and exp() reports nothing wrong."""
+        _run(built_exp, collectors=[])
+        self._acc(built_exp.e)
+        assert built_exp.e.uncollected_trials() == {'acc': ['dt']}
+
+    def test_uncollected_ignores_a_trial_that_never_ran(self, built_exp):
+        """Not run is not a collection failure — that is pending_trials. Getting
+        this wrong invites remove_trial_result on history that was fine."""
+        self._acc(built_exp.e)
+        _register(built_exp.trial, built_exp.e)
+        assert built_exp.e.uncollected_trials() == {'acc': []}
+
+    def test_uncollected_ignores_a_trial_the_connector_skips(self, multi_head_exp):
+        mc = self._acc(multi_head_exp.e, connector=Connector(node_query='dt1'))
+        _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2,
+             collectors=[mc.name])
+        assert multi_head_exp.e.uncollected_trials() == {'acc': []}
+
+    def test_uncollected_counts_a_failed_collect(self, built_exp):
+        """An error row and a missing row mean the same thing here — nothing
+        was kept — so both land in the list."""
+        mc = self._acc(built_exp.e, name='boom', metric=boom_metric)
+        _run(built_exp, collectors=[mc.name])
+        assert built_exp.e.uncollected_trials() == {'boom': ['dt']}
+
+    def test_uncollected_selects_by_name(self, built_exp):
+        good = self._acc(built_exp.e)
+        bad = self._acc(built_exp.e, name='boom', metric=boom_metric)
+        _run(built_exp, collectors=[good.name, bad.name])
+        assert built_exp.e.uncollected_trials('boom') == {'boom': ['dt']}
+
+    def test_collect_errors_rows(self, built_exp):
+        """The failure is merged in flat — phase says which of the four points
+        broke, and nothing has to be dug out of a nested info."""
+        mc = self._acc(built_exp.e, name='boom', metric=boom_metric)
+        _run(built_exp, collectors=[mc.name])
+        rows = built_exp.e.collect_errors()
+        assert len(rows) == built_exp.e.get_n_splits()
+        assert {r['collector_name'] for r in rows} == {'boom'}
+        assert rows[0]['node_name'] == 'dt'
+        assert rows[0]['phase'] == 'collect'
+        assert rows[0]['type'] == 'ValueError'
+        assert rows[0]['message'] == 'boom'
+
+    def test_collect_errors_empty_when_clean(self, built_exp):
+        mc = self._acc(built_exp.e)
+        _run(built_exp, collectors=[mc.name])
+        assert built_exp.e.collect_errors() == []
+
+    def test_project_collect_errors_adds_the_experimenter(self, built_exp):
+        """collect_hist has no experimenter column on purpose — which one it is
+        gets answered by whose db it is, so the fan-out supplies the key."""
+        mc = self._acc(built_exp.e, name='boom', metric=boom_metric)
+        _run(built_exp, collectors=[mc.name])
+        rows = built_exp.project.collect_errors()
+        assert len(rows) == built_exp.e.get_n_splits()
+        assert rows[0]['experimenter'] == 'exp_built'
+        assert rows[0]['collector_name'] == 'boom'
+        assert rows[0]['phase'] == 'collect'
+
+    def test_project_collect_errors_empty_when_clean(self, built_exp):
+        mc = self._acc(built_exp.e)
+        _run(built_exp, collectors=[mc.name])
+        assert built_exp.project.collect_errors() == []
+
+    def test_project_collect_errors_by_experimenter(self, built_exp):
+        mc = self._acc(built_exp.e, name='boom', metric=boom_metric)
+        _run(built_exp, collectors=[mc.name])
+        assert built_exp.project.collect_errors('exp_built')
+        assert built_exp.project.collect_errors('exp_built', collectors='boom')
+
+    def test_project_uncollected_trials_is_nested_by_experimenter(self, built_exp):
+        _run(built_exp, collectors=[])
+        self._acc(built_exp.e)
+        assert built_exp.project.uncollected_trials() == {'exp_built': {'acc': ['dt']}}

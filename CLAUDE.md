@@ -204,9 +204,17 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   - **성공 이력이 있는 이름은 얼린다**: `experiment_hist`에 `'built'` fold가 있는데 정의가 다르면 `ValueError`. 이력은 이름으로 키잉되고 Trial은 아티팩트를 안 남기므로, 재정의하면 옛 결과가 그걸 만든 적 없는 정의를 설명하게 된다 — 한 Trial의 기록처럼 보이는 두 개가 됨. 바꾸려면 새 이름이거나 `remove_trial`(결과까지 포기). `'error'`뿐이면 지킬 결과가 없으니 허용
   - `set_trials`는 **전부 검사한 뒤에 쓴다** — 하나가 얼려 있으면 아무것도 안 바뀐다(절반만 등록되면 반환한 작업 목록이 거짓이 됨)
   - 문지기 없는 저수준 경로는 `trials.register()` — 테스트가 재정의 동작을 직접 확인할 때 씀
-- **`show_error_trials(experimenter=None, traceback=False)`**: Trial 실행 에러를 fold당 한 줄로. `Experimenter.show_error_nodes`의 Trial판이고 **여기 있는 이유는 이력의 주인이 여기라서**(노드 이력은 Experimenter, Trial 이력은 프로젝트). 실패가 없으면 `None`
+- **`error_trials(experimenter=None)`**: Trial 실행 실패를 fold당 dict 하나로 — `trial_name`/`experimenter`/`outer_idx`/`inner_idx`/`pipeline_version` + 평탄화된 `type`/`message`/`traceback`. `Experimenter.error_nodes`의 Trial판이고 **여기 있는 이유는 이력의 주인이 여기라서**(노드 이력은 Experimenter, Trial 이력은 프로젝트). 깨끗하면 `[]`
 - **`pending_trials(experimenter=None)`**: 등록된 Trial 중 **에러났거나 이력이 아예 없는** 이름 목록. 둘 다 "아직 돌려야 할 것"이라 한 목록으로 낸다 — 손으로 쓰면 후자만 잡아서 실패한 게 조용히 빠진다(#130이 노트북에서 지목한 실제 버그)
   - **일부러 거칠다**: fold 일부만 돌다 끊긴 건 안 잡는다 — 그걸 판정하려면 fold 그리드와 대조해야 하는데 이 store는 그걸 모른다. 반환된 이름을 그냥 돌려도 안전하다(`exp()`가 끝난 fold를 건너뜀)
+- **`collect_errors(experimenter=None, collectors=None)`**: 수집 실패를 fold당 dict 하나로. 세 번째 에러 읽기이고(노드는 `Experimenter.error_nodes`, Trial은 위 `error_trials`), **유일하게 Experimenter를 거쳐야 읽는다** — Collector 이력은 레지스트리 소유고 레지스트리는 Experimenter별이라, 자기 store가 없어 `Experimenter.collect_errors`에 묻는다
+  - 팬아웃하면서 **`experimenter` 키를 얹는다** — `collect_hist`엔 그 컬럼이 일부러 없고(어느 것이냐는 db가 어디 있느냐로 답한다), 여러 레지스트리를 가로지를 때만 필요해지는 값이라
+- **`stale_nodes(pipeline=None, experimenter=None)`**: 그 정의를 채택하면 어느 노드의 아티팩트가 날아가는지를 **채택 전에** 본다 → `{experimenter: [노드...]}`. `Experimenter.stale_nodes` 위임
+  - `pipeline=None`이면 **working copy**를 `self.pipeline.copy().build()`로 빌드해 쓴다 — copy는 db가 없어서(`PipelineBuilder(path=None)` → `_store=None`) `build()`가 버전을 안 찍는다. 조회가 publish하면 이전 published가 archived로 내려가고, `add_experimenter`/`add_trainer`의 기본값이 published라 **미리보기가 다음 채택 대상을 바꿔버린다**
+  - `load_pipeline()`을 넘기면 반대 방향 질문이 된다 — 각 Experimenter가 published보다 얼마나 뒤처졌나
+  - 노드 전용. Trial은 채택이 안 건드리므로 여기 안 나온다
+- **`uncollected_trials(experimenter=None, collectors=None)`**: 돌긴 했는데 매칭되는 Collector가 아무것도 못 남긴 Trial. `Experimenter.uncollected_trials`에 위임하고 **`{experimenter: {collector: [trial...]}}`로 중첩**해 돌려준다(같은 Trial 이름이 여러 Experimenter에 있어도 읽히게)
+  - 여기 있는 이유는 Collector가 답할 수 없어서다 — 노드 이름으로만 키잉돼 있고 프로젝트를 모른다. 반대로 `Experimenter`는 `trial_store`를 주입받고 레지스트리를 소유해서 세 조각이 거기서 만난다
 - **`remove_trial(name)`**: Trial 하나를 프로젝트에서 완전히 지운다 — 정의(`TrialStore.trials`) + 이력(`experiment_hist`, **모든 experimenter**) + 각 Experimenter가 수집한 데이터와 그 `CollectHist`. Trial은 아티팩트를 안 남기는 대신 흔적이 서로 모르는 store들에 흩어져 있고, **그걸 다 보는 건 Project뿐**이라 여기 있다(단일 store 위의 편의 래퍼가 아니라, 주인 없는 교차 연산에 주인을 준 것)
   - 프로젝트 전역 절반(정의 + 전 experimenter 이력)은 각각 SQL 한 문장이고, Experimenter별 절반은 **`experimenters` 순회** → `Experimenter.remove_trial_result(name)` 위임
   - **대상을 고르는 인자가 없다** — 하나 빼면 프로젝트가 더 이상 정의하지 않는 Trial의 결과가 남고, 그 뒤엔 어느 Experimenter가 아직 들고 있는지 아무도 못 답한다
@@ -250,6 +258,16 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
 - `cache`(`DataCache`, optional) — `None`이면 캐시 없이 동작. store는 optional이 아니라(자기가 만듦) standalone Experimenter도 meta/splitter/Pipeline이 전부 저장됨
 - **`collectors`**: `Collectors({path}/collectors)` — 생성자에서 만들고(생성자가 곧 복원) `node_store`와 같은 자리. Collector가 쓰는 건 전부 노드 이름만으로 키잉되므로 **경로가 두 Experimenter를 가르는 유일한 수단**이다 — 프로젝트 전역 레지스트리였다면 이름이 겹치는 Trial마다 서로의 결과를 덮어썼다(무증상, 그리고 하필 비교가 필요한 바로 그 경우에). 대가는 Experimenter 간 비교가 store N개에 대한 읽기가 되는 것(#130)
 - **`trial_store`**(`TrialStore`, optional): 실행할 Trial을 읽고 결과를 기록하는 곳. `cache`처럼 **생성자에서 한 번** 주입 — 프로젝트에 하나뿐이고 Experimenter 수명 동안 바뀌지 않는다. **영속화 안 함**: 프로젝트 레벨 객체라 자기 디렉토리만 아는 Experimenter가 찾아낼 방법이 없고, 상위 레이아웃을 추측하는 건 이 구조가 피해온 암묵 결합. 없으면 `_require_trial_store()`가 두 공급 경로를 안내하며 `RuntimeError`
+- **`stale_nodes(pipeline)`**: `set_pipeline(pipeline)`이 지울 노드 이름(정렬). **`set_pipeline`이 이걸 호출한다** — 미리보기와 실제가 한 구현이라 갈라질 수 없다
+  - **사후에 물을 수 없어서 사전에 묻는다**: staleness는 두 Pipeline 비교로 파생되자마자 삭제로 소비되고 어디에도 안 남는다. 채택이 끝난 디스크엔 stale한 아티팩트가 없다(지워졌으니까)
+  - 아직 아무것도 채택 안 했으면 `[]` — 빈 Pipeline은 "이전 정의 없음"이지 "빌드된 게 없음"이 아니라, 그것과 비교하면 전 노드가 나온다
+  - 이름일 뿐 아티팩트가 있다는 주장은 아니다 — 실제로 잃는 게 뭔지는 `get_status(name)`
+  - builder는 `TypeError`. 여기서 빌드하지 않으므로 묻는 행위가 publish하지 않는다
+- **`collect_errors(collectors=None)`**: 이 Experimenter의 레지스트리에 기록된 수집 실패 행(`status='error'`). `None`이면 **이력 전체** — 등록에서 이미 빠진 Collector가 남긴 것도 포함한다(실패는 실제로 일어났으므로). 이름을 주면 그것만. `Project.collect_errors`가 이걸로 읽는다
+- **`uncollected_trials(collectors=None)`**: 여기서 *돌아간* Trial 중 매칭되는 Collector가 아무것도 못 남긴 것 → `{collector: [trial...]}`. **어느 단일 store도 답할 수 없는 유일한 질문**이라 여기 있다 — `experiment_hist`(무엇이 돌았나, 프로젝트 소유지만 이 이름으로 키잉), `collect_hist`(무엇이 수집됐나, 레지스트리 소유), `Connector.match`(어느 Collector가 붙나)가 `trial_store` 주입 덕에 이 객체 안에서 만난다
+  - **`'built'`인 fold만 본다**: 안 돌아간 Trial은 수집 문제가 아니라 `Project.pending_trials`의 몫이고, 그걸 섞으면 `remove_trial_result`가 멀쩡한 이력을 지운다
+  - **행의 부재 / `'error'` / `'empty'`가 전부 같은 쪽**이다 — 셋 다 남은 게 없다는 뜻. 손으로 쓰면 부재만 잡혀서 실패가 조용히 빠진다(#130이 지목한 cell 51의 실제 버그)
+  - fold 하나라도 빠지면 보고한다 — `StackingCollector`처럼 outer 전체가 한 번에 차야 저장되는 Collector가 있어서 부분 수집도 실패다
 - **`remove_trial_result(name)`**: 이 Experimenter가 가진 Trial *결과*를 지운다 — `self.collectors.remove_results(name)`(수집 데이터 + `CollectHist` 행) + 이 Experimenter의 `experiment_hist` 행 → **다음 `exp()`가 그 Trial을 다시 돌린다**(fold 스킵의 유일한 근거가 이력이므로). 다른 Experimenter의 기록도, 정의(프로젝트 소유)도 안 건드림. `trial_store`가 없으면 이력 절반은 건너뜀
 - **pipeline을 쓰는 것들** (미채택이면 빈 Pipeline이라 에러가 아니라 무동작):
   - `build(nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None)` — 노드 빌드
@@ -263,9 +281,10 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
     - `TrialHistTracker`가 fold별 done/error를 이력에 기록(등록은 안 함)
   - `n_jobs`는 실제 작업 수로 상한 처리 (`min(n_jobs, len(jobs))`) — 유휴 워커/progress bar 방지
   - `get_node_info()`: 노드 요약 Markdown
-- **pipeline 불필요** (디스크 상태만으로 동작): `get_status(node_name)`, `reset_nodes(nodes)`, `show_error_nodes(nodes=None, traceback=False)`, `get_objs(node_name, outer_idx=0, inner_idx=0)`
-  - **넷 다 Pipeline 노드 전용.** Trial은 디스크에 아무것도 안 남기므로 `get_status`는 몇 번을 돌렸든 `None`, `reset_nodes`는 지울 게 없고, `get_objs`는 `FileNotFoundError`. Trial 쪽 대응물은 `trial_store.get_status(name, exp.name)` / `Project.show_error_trials(experimenter=)` / `remove_trial_result(name)` / (모델 대신) Collector가 모은 결과
-  - **에러 보고가 갈리는 기준은 이력의 주인이다** — 노드 이력은 Experimenter의 `node_hist`, Trial 이력은 프로젝트의 `experiment_hist`. 예전엔 `show_error_nodes` 하나가 둘을 합쳐 내놨는데, 출력 라벨이 `[이름] fold o_i` 하나뿐이라 노드인지 Trial인지 구분이 안 됐다. 포맷은 `_common.format_errors`가 공유(둘 다 실패를 같은 모양으로 설명하므로)
+- **pipeline 불필요** (디스크 상태만으로 동작): `get_status(node_name)`, `reset_nodes(nodes)`, `error_nodes(nodes=None)`, `get_objs(node_name, outer_idx=0, inner_idx=0)`
+  - **넷 다 Pipeline 노드 전용.** Trial은 디스크에 아무것도 안 남기므로 `get_status`는 몇 번을 돌렸든 `None`, `reset_nodes`는 지울 게 없고, `get_objs`는 `FileNotFoundError`. Trial 쪽 대응물은 `trial_store.get_status(name, exp.name)` / `Project.error_trials(experimenter=)` / `remove_trial_result(name)` / (모델 대신) Collector가 모은 결과
+  - **에러 보고가 갈리는 기준은 이력의 주인이다** — 노드 이력은 Experimenter의 `node_hist`, Trial 이력은 프로젝트의 `experiment_hist`. 예전엔 한 메소드가 둘을 합쳐 내놨는데 노드인지 Trial인지 구분이 안 됐다
+  - **셋 다 문자열이 아니라 dict 리스트를 낸다**(`error_nodes`/`error_trials`/`collect_errors`) — 사람이 볼 땐 호출부가 `pd.DataFrame(...)`으로 감싸고, 코드가 먹을 땐 파싱이 없다. 그래서 `show_` 접두사도 없다. 에러 페이로드를 파내는 건 `_common.error_payload`가 공유(노드·Trial은 `info['error']` 아래, 수집은 최상위 + `phase`라 병합)
 - **OS log capture** (`open_os_log`/`close_os_log`/`os_log`):
   - `open_os_log(log_path=None)`: 이 프로세스의 OS-level stdout/stderr(fd 1/2)를 `{path}/__worker_logs/master.log`(기본값)로 dup2 리다이렉트 — `self._os_log_state`에 원본 fd/`sys.stdout`·`stderr` 백업 보관. 이미 open이면 에러
   - `close_os_log()`: 리다이렉트 원복. open 안 된 상태에서 호출하면 no-op
@@ -299,7 +318,7 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
 - **history**: SQLite `node_hist(node_name, outer_idx, inner_idx, pipeline_version, status, info)` — PK는 `(node_name, outer_idx, inner_idx)`(Experimenter/Trainer 이름 컬럼 없음 — store 자체가 이미 거기에 스코프돼 있음)
   - `record(name, outer_idx, inner_idx, pipeline_version=, status=, info=)` — `info`는 `status` 제외 나머지 전부(`build_id`, `definition`, `fit_time`, `edges`, `train_shape`, `warnings`, 실패 시 `error`) JSON 인코딩. `NodeInfoTracker`(`_tracker.py`)가 기록
   - `get_hist(node_name=, outer_idx=, inner_idx=, pipeline_version=)`/`get_status(node_name)`/`get_info(node_name)`(`{(outer_idx, inner_idx): ...}`)/`get_fold_info(outer_idx, inner_idx)`(fold 하나의 `{node_name: info}` 전체 — `DataFlow`가 노드의 `edges`를 복원할 때 씀)/`remove_hist(node_name=)`
-  - `'error'`는 오직 여기서만 보임 — `Experimenter.show_error_nodes`/`Trainer.get_node_error`가 조회
+  - `'error'`는 오직 여기서만 보임 — `Experimenter.error_nodes`/`Trainer.get_node_error`가 조회
 
 ### DataFlow / TrainDataFlow (`_flow.py`)
 - **DataFlow**: 생성자가 `NodeStore` 인스턴스(`self.store`, Experimenter/Trainer 전체가 공유) + 이 fold의 `outer_idx`/`inner_idx`를 받음. `status`/`get_obj`/`get_objs`/`get_result`/`list_nodes`/`node_path`는 `self.store.X(name, self.outer_idx, self.inner_idx)`로 위임하는 얇은 메소드. `reset_node`만 위임 + `node_objs`/`_node_edges`에서도 같이 지우는 조합 동작
@@ -582,6 +601,7 @@ v0 (생성 시 자동, 빈 Pipeline)
 4. old에는 있는데 지금 없는 이름 → stale (아티팩트 청소용)
 5. DataSource schema/targets가 바뀌면 → 전부 stale
 
+- **판정 시점은 `set_pipeline` 하나지만, 그 답은 채택 전에 미리 볼 수 있다** — `Experimenter.stale_nodes(pipeline)` / `Project.stale_nodes()`. `set_pipeline`이 그 메소드를 호출해서 지우므로 미리보기가 실제와 어긋나지 않는다. 사후 조회가 없는 게 아니라 **사후엔 답할 대상이 없다**(판정 즉시 지워짐)
 - **Trial은 캐스케이드하지 않는다**: Trial은 Pipeline 밖이라 diff가 이름을 모르고, stale 노드를 읽은 Trial도 건드리지 않는다 — `Experimenter.set_pipeline`은 stale 노드만 `reset_nodes`로 지우고 끝. Trial의 결과가 어떤 pipeline 버전에 대한 것인지는 `TrialStore.experiment_hist`가 `pipeline_version`으로 기록하므로 그 버전에 대한 기록으로 남고(버전을 올릴 의도가 없으면 Pipeline이 바뀔 이유도 없다), 다시 돌리려면 `remove_hist`로 명시적으로 재실행해야 함
 - **Trial 자신의 재정의도 감지하지 않는다**: `Experimenter._make_jobs`는 오직 `experiment_hist`의 fold별 status만 본다 — 재정의된 trial이 이미 `'built'`면 조용히 스킵되므로, 다시 돌리려면 `reset_nodes([trial_name])`을 직접 호출
 - **Predictor는 반대로 캐스케이드한다**: Trainer엔 보존할 "과거 실행" 개념이 없으므로, 바뀐 노드를 읽는 Predictor는 그냥 stale이다. `Trainer.reset_nodes`가 `predictor.node_names() & 리셋된_노드` 교집합으로 같이 지운다. Trial/Predictor를 별도 클래스로 둔 판단이 실제로 갈라지는 지점
@@ -658,7 +678,7 @@ v0 (생성 시 자동, 빈 Pipeline)
 - **_experimenter_store.py**: `ExperimenterStore(path)` — **Experimenter 하나 전용** `{path}/__exp.db`. meta 행 + splitter BLOB + `save_pipeline(pipeline)`/`load_pipeline()`(`_common`에 위임). `fetch`/`load_splitters`/`remove`는 행이 하나뿐이라 `name` 생략 가능
 - **_trainer_store.py**: `TrainerStore(path)` — Trainer판 동형. `{path}/__trainer.db`, `trainer(name PK, pipeline_version, splits BLOB)`. Experimenter판과 다른 점 둘: splits 블롭에 **`split_indices`가 같이** 들어감(splitter가 없을 수도 있고, 학습된 fold와 정확히 같아야 해서), `data_key`/`title`이 **없음**(다른 Trainer와 비교할 일이 없어 라벨도 mismatch 가드도 불필요)
   - **`save(meta)`가 `INSERT OR IGNORE` + `UPDATE`인 이유**(양쪽 store 공통): meta 컬럼만 나열한 `INSERT OR REPLACE`는 같은 행의 BLOB(splitters/splits)을 NULL로 날려버린다
-- **_common.py**: Experimenter/Trainer 공용 — `require_built_pipeline`, `require_frozen_pipeline`(Trainer 전용 게이트), `resolve_common_status`, `save_pipeline(path, pipeline)`/`load_pipeline(path)`(`{path}/pipeline.pkl`, 없으면 `None`), `format_errors`
+- **_common.py**: Experimenter/Trainer 공용 — `require_built_pipeline`, `require_frozen_pipeline`(Trainer 전용 게이트), `resolve_common_status`, `save_pipeline(path, pipeline)`/`load_pipeline(path)`(`{path}/pipeline.pkl`, 없으면 `None`), `error_payload`
 - **_describer.py**: desc_spec, desc_pipeline, desc_node, compare_nodes
 - **_logger.py**: BaseLogger, DefaultLogger (start/update/end_progress, adhoc_progress, rename_progress)
 - **col.py / _connector.py / collector/ / filter/ / adapter/ / processor/**: 해당 섹션 참조

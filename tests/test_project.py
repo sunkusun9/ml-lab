@@ -704,43 +704,90 @@ class TestExperimenterUnderProject:
 
 
 class TestTrialErrorReporting:
-    """Who reports a failure follows who owns the history it sits in: node
-    history is the run's (Experimenter.show_error_nodes), Trial history is the
+    """Who answers for a failure follows who owns the history it sits in: node
+    history is the run's (Experimenter.error_nodes), Trial history is the
     project's, keyed by experimenter."""
 
-    def test_show_error_trials_reports_the_failed_fold(self, project):
+    def test_error_trials_reports_the_failed_fold(self, project):
         project.trials.record('bad', 'run_a', 0, 1, status='error',
                               info={'error': {'type': 'ValueError', 'message': 'boom',
                                               'traceback': 'TB'}})
-        lines = project.show_error_trials()
-        assert len(lines) == 1
-        assert '[bad] fold 0_1' in lines[0] and 'ValueError: boom' in lines[0]
-        assert 'TB' not in lines[0]
+        rows = project.error_trials()
+        assert rows == [{'trial_name': 'bad', 'experimenter': 'run_a',
+                         'outer_idx': 0, 'inner_idx': 1, 'pipeline_version': None,
+                         'type': 'ValueError', 'message': 'boom', 'traceback': 'TB'}]
 
-    def test_traceback_is_opt_in(self, project):
-        project.trials.record('bad', 'run_a', 0, 0, status='error',
-                              info={'error': {'type': 'ValueError', 'message': 'boom',
-                                              'traceback': 'TB'}})
-        assert 'TB' in project.show_error_trials(traceback=True)[0]
+    def test_a_row_without_a_payload_still_answers(self, project):
+        """The failure fields are always there, so a caller never has to check
+        whether info carried them."""
+        project.trials.record('bad', 'run_a', 0, 0, status='error')
+        assert project.error_trials()[0]['type'] is None
 
-    def test_nothing_failed_reads_as_none(self, project):
+    def test_nothing_failed_is_empty(self, project):
         project.trials.record('dt', 'run_a', 0, 0, status='built')
-        assert project.show_error_trials() is None
+        assert project.error_trials() == []
 
     def test_narrowed_to_one_run(self, project):
         project.trials.record('bad', 'run_a', 0, 0, status='error')
         project.trials.record('bad', 'run_b', 0, 0, status='built')
-        assert project.show_error_trials(experimenter='run_a')
-        assert project.show_error_trials(experimenter='run_b') is None
+        assert project.error_trials(experimenter='run_a')
+        assert project.error_trials(experimenter='run_b') == []
 
     def test_node_errors_stay_out_of_it(self, project, builder, sample_data):
-        """show_error_nodes is Pipeline nodes only — the two halves used to
-        come back from one call, indistinguishable in the output."""
+        """error_nodes is Pipeline nodes only — the two halves used to come back
+        from one call, indistinguishable in the output."""
         version = builder.build().version
         e = project.add_experimenter('run_a', sample_data,
                                  pipeline_version=version)
         project.trials.record('bad', 'run_a', 0, 0, status='error')
-        assert e.show_error_nodes() is None
+        assert e.error_nodes() == []
+
+
+class TestStaleNodes:
+    """What an edit would cost, asked before adopting it — the only moment the
+    answer exists, since set_pipeline turns it straight into deletions."""
+
+    @staticmethod
+    def _built_run(project, builder, sample_data, name='run_a'):
+        e = project.add_experimenter(name, sample_data, pipeline_version=builder.build().version)
+        e.build()
+        return e
+
+    def test_untouched_working_copy_costs_nothing(self, project, builder, sample_data):
+        e = self._built_run(project, builder, sample_data)
+        assert project.stale_nodes() == {'run_a': []}
+        assert e.get_status('scaler') == 'built'
+
+    def test_edit_names_the_node_it_would_drop(self, project, builder, sample_data):
+        self._built_run(project, builder, sample_data)
+        builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+        assert project.stale_nodes() == {'run_a': ['scaler']}
+
+    def test_asking_does_not_publish(self, project, builder, sample_data):
+        """The working copy is built through copy(), which has no db — a
+        preview that minted a version would demote the published one and
+        change what add_experimenter() adopts next."""
+        self._built_run(project, builder, sample_data)
+        before = project.list_pipeline_versions()
+        builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+        project.stale_nodes()
+        assert project.list_pipeline_versions() == before
+
+    def test_narrowed_to_one_run(self, project, builder, sample_data):
+        self._built_run(project, builder, sample_data, 'run_a')
+        self._built_run(project, builder, sample_data, 'run_b')
+        builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+        assert project.stale_nodes(experimenter='run_a') == {'run_a': ['scaler']}
+
+    def test_published_pipeline_asks_the_other_direction(self, project, builder, sample_data):
+        """How far behind a run is: it adopted v0, the project has since
+        published the node."""
+        e = project.add_experimenter('run_a', sample_data,
+                                     pipeline_version=builder.build().version)
+        e.build()
+        builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+        builder.build()
+        assert project.stale_nodes(project.load_pipeline()) == {'run_a': ['scaler']}
 
 
 class TestPendingTrials:

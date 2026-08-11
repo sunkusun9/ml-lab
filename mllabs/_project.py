@@ -17,7 +17,7 @@ from pathlib import Path
 from ._cache import DataCache
 from ._trial_store import TrialStore
 from ._project_store import ProjectStore
-from ._common import format_errors
+from ._common import error_payload
 
 DATA_FILE = 'data.pkl'
 AUG_DATA_FILE = 'aug_data.pkl'
@@ -391,27 +391,32 @@ class Project:
         self.trials.register_all(changed)
         return [t.name for t in changed]
 
-    def show_error_trials(self, experimenter=None, traceback=False):
-        """Errors from Trial execution, one line per failed fold.
+    def error_trials(self, experimenter=None):
+        """Failed folds of Trial execution, one dict each.
 
-        The Trial counterpart of ``Experimenter.show_error_nodes``, and it
-        lives here for the same reason that one lives there: a failure is
-        reported by whoever owns the history it is recorded in. Node history is
-        the Experimenter's; Trial history is the project's, keyed by experimenter.
+        The Trial counterpart of ``Experimenter.error_nodes``, and it lives
+        here for the same reason that one lives there: a failure is read from
+        whoever owns the history it is recorded in. Node history is the
+        Experimenter's; Trial history is the project's, keyed by experimenter.
 
         Args:
-            experimenter (str, optional): Report only this Experimenter's
-                failures. ``None`` reports every one's.
-            traceback (bool): Include full traceback in output.
+            experimenter (str, optional): Only this Experimenter's failures.
+                ``None`` reads every one's.
 
         Returns:
-            list[str] | None: One line per failed fold, or ``None`` if clean.
+            list[dict]: ``trial_name``, ``experimenter``, ``outer_idx``,
+            ``inner_idx``, ``pipeline_version`` and the flattened failure
+            (``type``, ``message``, ``traceback``). Empty when clean.
         """
-        rows = [
-            (r['trial_name'], r['outer_idx'], r['inner_idx'], r['info'])
+        return [
+            {'trial_name': r['trial_name'],
+             'experimenter': r['experimenter'],
+             'outer_idx': r['outer_idx'],
+             'inner_idx': r['inner_idx'],
+             'pipeline_version': r['pipeline_version'],
+             **error_payload(r['info'])}
             for r in self.trials.get_hist(experimenter=experimenter, status='error')
         ]
-        return format_errors(rows, traceback)
 
     def pending_trials(self, experimenter=None):
         """Registered Trials that errored or have not run.
@@ -442,6 +447,90 @@ class Project:
             if not rows or any(r['status'] == 'error' for r in rows):
                 pending.append(trial.name)
         return pending
+
+    def collect_errors(self, experimenter=None, collectors=None):
+        """Collection failures across the project, one dict each.
+
+        The third error read beside :meth:`error_trials` and
+        ``Experimenter.error_nodes``, and the only one that has to go through
+        an Experimenter: a Collector's history belongs to the registry that owns
+        it, and the registry is per-Experimenter. So this asks each one via
+        ``Experimenter.collect_errors`` rather than reading a store of its own,
+        and adds the ``experimenter`` key that ``collect_hist`` deliberately
+        has no column for — which one it was is answered by whose db it is.
+
+        Args:
+            experimenter (str, optional): Only this Experimenter's failures.
+                ``None`` reads every one's.
+            collectors (str | list[str], optional): Registered Collector names.
+                ``None`` reads every one of them.
+
+        Returns:
+            list[dict]: ``Experimenter.collect_errors`` rows with
+            ``experimenter`` added. Empty when clean.
+        """
+        return [{'experimenter': name, **row}
+                for name in self._experimenter_names(experimenter)
+                for row in self.experimenters[name].collect_errors(collectors)]
+
+    def uncollected_trials(self, experimenter=None, collectors=None):
+        """Trials that ran but left a matching Collector nothing.
+
+        A Collector cannot answer this alone — it is keyed by node name and
+        knows nothing of the project — so the question is asked here and
+        delegated to ``Experimenter.uncollected_trials``, which has the
+        project's ``trial_store`` injected and owns the registry.
+
+        Args:
+            experimenter (str, optional): Ask only this one. ``None`` asks every
+                Experimenter in the project.
+            collectors (str | list[str], optional): Registered Collector names.
+                ``None`` asks about every one of them.
+
+        Returns:
+            dict: ``{experimenter_name: {collector_name: [trial_name, ...]}}`` —
+            nested rather than flattened so the answer stays readable when a
+            Trial name appears under more than one Experimenter.
+        """
+        return {name: self.experimenters[name].uncollected_trials(collectors)
+                for name in self._experimenter_names(experimenter)}
+
+    def stale_nodes(self, pipeline=None, experimenter=None):
+        """What adopting a definition would cost each Experimenter, before adopting.
+
+        Delegates to ``Experimenter.stale_nodes``, the same code ``set_pipeline``
+        resets by — a preview of the real thing, not a second opinion about it.
+
+        Defaults to the working copy, built through ``pipeline.copy()`` so the
+        snapshot has no db and :meth:`PipelineBuilder.build` mints nothing.
+        Asking what an edit would cost must not be what commits the edit: a
+        published version demotes the previous one, and ``add_experimenter`` /
+        ``add_trainer`` take published by default, so a mere preview would
+        change what the next call adopts.
+
+        Pipeline nodes only. A Trial is never reset by adoption — its
+        ``experiment_hist`` row records the version it ran against and stays a
+        true record of it, so rerunning is a separate, explicit act.
+
+        Args:
+            pipeline (Pipeline, optional): The candidate. ``None`` uses the
+                working copy as it stands. Pass :meth:`load_pipeline` output
+                instead to ask the other direction — how far behind the
+                published definition each Experimenter is.
+            experimenter (str, optional): Ask only this one. ``None`` asks every
+                Experimenter in the project.
+
+        Returns:
+            dict: ``{experimenter_name: [node_name, ...]}``, empty list for an
+            Experimenter the change does not touch.
+        """
+        if pipeline is None:
+            pipeline = self.pipeline.copy().build()
+        return {name: self.experimenters[name].stale_nodes(pipeline)
+                for name in self._experimenter_names(experimenter)}
+
+    def _experimenter_names(self, experimenter=None):
+        return self.list_experimenters() if experimenter is None else [experimenter]
 
     def remove_trial(self, name):
         """Drop *name* from the project — definition, history and collected data.

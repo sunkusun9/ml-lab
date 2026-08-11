@@ -118,8 +118,9 @@ The store itself is not an argument: an Experimenter reached through a `Project`
 
 ```python
 e.get_status('scale')
-e.show_error_nodes()                              # this run's Pipeline nodes
-project.show_error_trials(experimenter=e.name)    # its Trials
+e.error_nodes()                                   # this run's Pipeline nodes
+project.error_trials(experimenter=e.name)         # its Trials
+project.collect_errors(experimenter=e.name)       # its Collectors
 
 from IPython.display import Markdown, display
 display(Markdown(e.get_node_info()))

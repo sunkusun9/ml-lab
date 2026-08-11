@@ -65,7 +65,7 @@ def _stop_native_redirect(state):
     sys.stdout = state['orig_stdout']
     sys.stderr = state['orig_stderr']
     state['log_f'].close()
-from ._common import resolve_common_status, require_built_pipeline, format_errors
+from ._common import resolve_common_status, require_built_pipeline, error_payload
 from ._pipeline import Pipeline
 
 
@@ -388,19 +388,46 @@ class Experimenter():
         Returns:
             Pipeline: *pipeline*, unchanged.
         """
-        require_built_pipeline(pipeline)
-        # Only a *switch* invalidates. With nothing adopted yet the empty
-        # Pipeline is the absence of a prior definition, not a claim that
-        # nothing was built — reopening restores artifacts, and diffing
-        # against the placeholder would delete every one of them.
-        if not self.pipeline.is_empty:
-            stale = pipeline.diff_from(self.pipeline)
-            if stale:
-                self.reset_nodes(sorted(stale))
+        stale = self.stale_nodes(pipeline)
+        if stale:
+            self.reset_nodes(stale)
         self.pipeline = pipeline
         self._store.save_pipeline(pipeline)
         self._store.set(self.name, 'pipeline_version', self.pipeline_version)
         return pipeline
+
+    def stale_nodes(self, pipeline):
+        """Nodes whose artifacts adopting *pipeline* would drop.
+
+        The answer :meth:`set_pipeline` acts on, available before acting — that
+        call resets exactly this list, because it is this method's caller. One
+        implementation, so a preview cannot drift from the act it previews.
+
+        Asked before rather than after because adoption *spends* the answer:
+        staleness is derived by comparing two Pipelines
+        (:meth:`Pipeline.diff_from`) and immediately turned into deletions, so
+        afterwards there is no stale artifact left to find. Pass the published
+        Pipeline instead of a draft and the same call answers whether this
+        Experimenter is behind, and what catching up would cost.
+
+        Nothing is stale while nothing is adopted: the empty Pipeline is the
+        absence of a prior definition, not a claim that nothing was built, and
+        diffing against it would name every node here.
+
+        Args:
+            pipeline (Pipeline): The candidate, already built. Building is what
+                mints a version, so build first and then ask — this never
+                builds, and so never publishes.
+
+        Returns:
+            list[str]: Node names, sorted. Names, not a claim that each has an
+            artifact here — ``get_status(name)`` says which ones actually cost
+            something to drop.
+        """
+        require_built_pipeline(pipeline)
+        if self.pipeline.is_empty:
+            return []
+        return sorted(pipeline.diff_from(self.pipeline))
 
     def _require_trial_store(self):
         if self.trial_store is None:
@@ -489,32 +516,133 @@ class Experimenter():
         if self.trial_store is not None:
             self.trial_store.remove_hist(trial_name=name, experimenter=self.name)
 
-    def show_error_nodes(self, nodes=None, traceback=False):
-        """Errors from this Experimenter's Pipeline nodes, one line per failed fold.
+    def collect_errors(self, collectors=None):
+        """Collection failures recorded in this Experimenter's registry.
+
+        The read half of what :meth:`remove_trial_result` writes: a Collector's
+        history is this Experimenter's, so asking the project about it means
+        coming through here (``Project.collect_errors``).
+
+        Args:
+            collectors (str | list[str], optional): Registered Collector names.
+                ``None`` reads every row in the history, including any left by a
+                Collector that has since been removed from the registry — the
+                failure still happened.
+
+        Returns:
+            list[dict]: ``collector_name``, ``node_name``, ``outer_idx``,
+            ``inner_idx``, ``pipeline_version``, and the failure merged in flat
+            — ``phase`` (``'output'``/``'ext'``/``'collect'``/``'push'``, which
+            of the four points broke), ``type``, ``message``, ``traceback``.
+            Empty when nothing failed. ``collect_date``/``elapsed`` are not
+            here — that is ``collectors.hist.get_errors()``.
+        """
+        hist = self.collectors.hist
+        if collectors is None:
+            rows = hist.get_errors()
+        else:
+            rows = [row for c in self._collectors_named(collectors)
+                    for row in hist.get_errors(collector_name=c.name)]
+        return [{'collector_name': r['collector_name'],
+                 'node_name': r['node_name'],
+                 'outer_idx': r['outer_idx'],
+                 'inner_idx': r['inner_idx'],
+                 'pipeline_version': r['pipeline_version'],
+                 **(r['info'] or {})}
+                for r in rows]
+
+    def _collectors_named(self, collectors):
+        """Registered Collectors for a name or a list of them.
+
+        A bare string is wrapped rather than iterated — ``resolve`` takes a
+        list, so passing one name straight through would ask for its letters.
+        """
+        if isinstance(collectors, str):
+            collectors = [collectors]
+        return self.collectors.resolve(collectors)
+
+    def uncollected_trials(self, collectors=None):
+        """Trials a Collector matches but has no result for, per Collector.
+
+        Answers the one question about this Experimenter that no single store
+        can: whether a Trial that *ran* here left the Collector anything.
+        `experiment_hist` knows what ran (project-wide, so this Experimenter's
+        rows are keyed by its name), `collect_hist` knows what was collected
+        (registry-local), and which Collectors even apply comes from matching
+        their Connectors against the Trial spec. All three meet here because
+        ``trial_store`` is injected and the registry is ours.
+
+        Written by hand the join tends to lose two things. A Trial that has no
+        history row at all reads as "collected" unless absence is checked for
+        separately, and a Trial that never ran reads as a collection failure —
+        which then invites ``remove_trial_result`` on history that was fine.
+        So only folds recorded ``'built'`` here are considered, and a Trial is
+        reported when any of them lacks a ``'collected'`` row: an ``'error'``, an
+        ``'empty'`` (usually a misconfigured ``output_var``) and a missing row
+        all fall on the same side, since all three mean nothing was kept.
+
+        A Trial that has not run is not a collection problem — that is
+        ``Project.pending_trials``.
+
+        Args:
+            collectors (str | list[str], optional): Registered Collector names.
+                ``None`` asks about every one of them.
+
+        Returns:
+            dict: ``{collector_name: [trial_name, ...]}``, one key per asked-for
+            Collector, empty list when it has everything.
+        """
+        trial_store = self._require_trial_store()
+        hist = self.collectors.hist
+
+        collected = {(r['collector_name'], r['node_name'], r['outer_idx'], r['inner_idx'])
+                     for r in hist.get_hist(status='collected')}
+        built = {}
+        for r in trial_store.get_hist(experimenter=self.name, status='built'):
+            built.setdefault(r['trial_name'], []).append((r['outer_idx'], r['inner_idx']))
+
+        targets = {c.name for c in self._collectors_named(collectors)}
+        result = {name: [] for name in targets}
+        for trial in trial_store.list_trials():
+            folds = built.get(trial.name)
+            if not folds:
+                continue
+            for c in self.collectors.match(trial.get_spec()):
+                if c.name in targets and any(
+                        (c.name, trial.name, o, i) not in collected for o, i in folds):
+                    result[c.name].append(trial.name)
+        return result
+
+    def error_nodes(self, nodes=None):
+        """Failed folds of this Experimenter's Pipeline nodes, one dict each.
 
         Pipeline nodes only, as the name says. Error detail does not live on
         the artifact (see ``NodeStore``) — it is in this Experimenter's own
         ``node_hist`` — so this reads history rather than walking fold
         directories. Trial errors are the project's to report, since that is
-        where their history lives: ``Project.show_error_trials(experimenter=)``.
+        where their history lives: ``Project.error_trials(experimenter=)``.
 
         Args:
             nodes (list[str], optional): Node names to check. ``None`` checks
                 every node recorded here.
-            traceback (bool): Include full traceback in output.
 
         Returns:
-            list[str] | None: One line per failed fold, or ``None`` if clean.
+            list[dict]: ``node_name``, ``outer_idx``, ``inner_idx``,
+            ``pipeline_version`` and the flattened failure (``type``,
+            ``message``, ``traceback``). Empty when nothing failed. The rest of
+            a node's ``info`` (definition, edges, fit_time…) is not here — that
+            is ``node_store.get_hist()``.
         """
-        rows = [
-            (r['node_name'], r['outer_idx'], r['inner_idx'], r['info'])
+        node_set = None if nodes is None else set(nodes)
+        return [
+            {'node_name': r['node_name'],
+             'outer_idx': r['outer_idx'],
+             'inner_idx': r['inner_idx'],
+             'pipeline_version': r['pipeline_version'],
+             **error_payload(r['info'])}
             for r in self.node_store.get_hist()
-            if r['status'] == 'error'
+            if r['status'] == 'error' and (node_set is None or r['node_name'] in node_set)
         ]
-        if nodes is not None:
-            node_set = set(nodes)
-            rows = [r for r in rows if r[0] in node_set]
-        return format_errors(rows, traceback)
 
     def build(self, nodes=None, rebuild=False, n_jobs=1, gpu_id_list=None, logger=None):
         """Build Stage nodes.
