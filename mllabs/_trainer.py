@@ -10,6 +10,7 @@ from ._trial import Trial
 from ._edge_dsl import parse, eval_expr, referenced_nodes
 from ._logger import resolve_logger
 from ._pipeline import Pipeline
+from ._serialize import _obj_to_ref, serialize_value
 from ._common import (resolve_common_status, require_built_pipeline,
                       require_frozen_pipeline)
 
@@ -604,10 +605,21 @@ class Trainer:
     # to_inferencer
     # ------------------------------------------------------------------
 
+    def _trainer_spec(self):
+        return {
+            'name': self.name,
+            'pipeline_version': self.pipeline_version,
+            'n_splits': self.get_n_splits(),
+            'splitter': None if self.splitter is None else _obj_to_ref(type(self.splitter)),
+            'splitter_params': serialize_value(self.splitter_params),
+        }
+
     def to_inferencer(self, v=None):
         """Export trained processors to a standalone :class:`~mllabs.Inferencer`.
 
-        All selected nodes must be in ``built`` state.
+        All selected nodes must be in ``built`` state. The Inferencer is stamped
+        with :meth:`_trainer_spec` so the deployed pickle can say where it came
+        from without holding a Trainer.
 
         Args:
             v: Output column filter passed to the Inferencer.
@@ -636,7 +648,8 @@ class Trainer:
         node_specs = {n: pipeline.get_node_spec(n) for n in self.selected_nodes}
         node_specs.update(self.predictor_specs())
         return Inferencer(node_specs, list(self.selected_nodes), self.predictor_names(),
-                          self.get_n_splits(), node_objs, v=v)
+                          self.get_n_splits(), node_objs, v=v,
+                          trainer_spec=self._trainer_spec())
 
     # ------------------------------------------------------------------
     # save / load

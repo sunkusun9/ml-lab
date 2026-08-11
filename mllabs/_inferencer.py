@@ -22,15 +22,20 @@ class Inferencer:
         n_splits (int): Number of cross-validation splits.
         node_objs (dict): ``{name: [processor_split0, ...]}``.
         v: Output column filter applied to Predictor outputs.
+        trainer_spec (dict | None): Where this came from — strings and
+            primitives only, so a deployed pickle can say which Trainer and
+            which pipeline version produced it without carrying either.
     """
 
-    def __init__(self, node_specs, selected_nodes, selected_predictors, n_splits, node_objs, v=None):
+    def __init__(self, node_specs, selected_nodes, selected_predictors, n_splits, node_objs, v=None,
+                 trainer_spec=None):
         self.node_specs = node_specs
         self.selected_nodes = selected_nodes
         self.selected_predictors = selected_predictors
         self.n_splits = n_splits
         self.node_objs = node_objs
         self.v = v
+        self.trainer_spec = trainer_spec
 
     def _make_flow(self, split_idx):
         flow = InferenceDataFlow()
@@ -120,6 +125,7 @@ class Inferencer:
             'n_splits': self.n_splits,
             'node_objs': self.node_objs,
             'v': self.v,
+            'trainer_spec': self.trainer_spec,
         }
         with open(path / '__inferencer.pkl', 'wb') as f:
             pkl.dump(save_data, f)
@@ -144,4 +150,5 @@ class Inferencer:
             save_data['n_splits'],
             save_data['node_objs'],
             save_data.get('v'),
+            save_data.get('trainer_spec'),
         )
