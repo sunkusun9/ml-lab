@@ -19,7 +19,7 @@ e = project.add_experimenter(
 - `sp` — the outer splitter. Its held-out part is the *test* fold of each outer split.
 - `sp_v` — the inner splitter, giving each outer fold a train/validation pair for things like early stopping. `None` means one inner fold with no validation set.
 - `splitter_params` — maps a splitter keyword to a column, so `{'y': 'target'}` makes the split stratified on that column.
-- `data=` defaults to the project's; `pipeline_version=` defaults to the published one.
+- `data=` defaults to the project's; `pipeline_version=` defaults to the latest published one. Any published version is adoptable; only a draft is refused.
 
 The name is the identity: it is the directory under `exp/` and the key under which every fold outcome is filed in the `TrialStore`.
 
@@ -91,6 +91,23 @@ project.set_trial(trial)               # 'lgb1', or None if unchanged
 Both return only what was **added or changed**, so the return value is the work list for the next run. A definition identical to the stored one is not a change and comes back as `None` / omitted.
 
 A name that already ran successfully somewhere is frozen — `set_trial` raises rather than redefine it. The history is keyed by name and a Trial leaves no artifact, so a redefinition would silently leave the old results describing a definition that never produced them. Change one by giving it a new name, or `project.remove_trial(name)` to give up the results with it.
+
+### The Pipeline version is part of the definition
+
+`set_trial` stamps the latest published version onto a Trial that carries none, and a Trial runs only where that version is adopted:
+
+```python
+project.set_trial(trial)
+trial.pipeline_version                 # 2 — filled in, on the object you still hold
+
+project.set_trial(Trial(..., pipeline_version=1))   # author against an older one
+```
+
+An `exp()` whose Experimenter adopted a different version raises rather than run. Collected results are keyed by node name and fold with no version in them, so one name meaning two definitions would overwrite its own metrics with nothing to say which won. Adopt the version the Trial names, or give the new definition a new name.
+
+The check applies only where a job would be created. A Trial whose folds are all already built passes quietly however far the pipeline has moved on — there is nothing left to file, and handing back a finished round has to stay a no-op. One with folds still to run is refused, since that is where new results would land beside old ones.
+
+That also puts teeth on the freeze above: after the pipeline moves on, re-registering a name that already succeeded is a *changed* definition, so it raises instead of quietly re-pointing old results at a version that did not produce them.
 
 ## Running
 

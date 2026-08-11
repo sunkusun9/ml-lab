@@ -56,7 +56,13 @@ def _pipeline_version(project):
 
 def _register(trial, e):
     """Register *trial* and return the name — exp() takes names, reads the
-    definition out of the store, and covers every fold of *e* itself."""
+    definition out of the store, and covers every fold of *e* itself.
+
+    Stamped with the run's own pipeline version, which Project.set_trial would
+    otherwise do: exp() refuses a Trial defined against another version, and
+    these tests are about Collectors."""
+    if trial.pipeline_version is None:
+        trial.pipeline_version = e.pipeline_version
     e.trial_store.register(trial)
     return trial.name
 

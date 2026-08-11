@@ -41,19 +41,18 @@ _SCHEMA_SQL = """
     );
     CREATE TABLE IF NOT EXISTS versions (
         version INTEGER PRIMARY KEY,
-        status TEXT NOT NULL,
         path TEXT NOT NULL,
         builder_path TEXT NOT NULL
     );
 """
 
-#: A version that has been frozen and is the current one. Always exactly one.
+#: A version in ``versions``. Every row is one: being stored is what publishing
+#: *is*, so the table needs no column to say so.
 PUBLISHED = 'published'
-#: A version that was published and has since been succeeded by a newer one.
-#: Frozen and still referenceable, and the only status that can be deleted.
-ARCHIVED = 'archived'
-#: The builder's working copy. Editable, unnumbered, never a row in ``versions``.
-OPEN = 'open'
+#: A built snapshot that was never registered — :meth:`PipelineBuilder.draft`.
+#: Unnumbered, and refused by ``set_pipeline`` on both Experimenter and Trainer.
+#: Exists at runtime only: reaching the store is what would make it published.
+DRAFT = 'draft'
 
 
 class PipelineStore:
@@ -182,8 +181,10 @@ class PipelineStore:
         resolves group inheritance away — a built snapshot has no groups left to
         edit, so it could never come back as a working definition.
 
-        Whatever was published before becomes :data:`ARCHIVED`: only the newest
-        is the current one.
+        Nothing is demoted. Every stored version stays :data:`PUBLISHED` and
+        stays adoptable; the newest is merely the one an omitted version number
+        resolves to. That is also what keeps the pickled ``status`` honest — it
+        is written here, once, and no later call can make it wrong.
 
         Args:
             pipeline (Pipeline): The built Pipeline to freeze.
@@ -208,16 +209,13 @@ class PipelineStore:
             with open(builder_path, 'wb') as f:
                 pkl.dump(builder, f)
             conn.execute(
-                "UPDATE versions SET status = ? WHERE status = ?", (ARCHIVED, PUBLISHED)
-            )
-            conn.execute(
-                "INSERT INTO versions (version, status, path, builder_path) VALUES (?, ?, ?, ?)",
-                (version, PUBLISHED, str(version_path), str(builder_path)),
+                "INSERT INTO versions (version, path, builder_path) VALUES (?, ?, ?)",
+                (version, str(version_path), str(builder_path)),
             )
         return version
 
     def load_version(self, version=None):
-        """A frozen Pipeline by number, or the published one if *version* is omitted."""
+        """A stored Pipeline by number, or the latest one if *version* is omitted."""
         row = self._version_row(version)
         with open(row['path'], 'rb') as f:
             return pkl.load(f)
@@ -229,33 +227,39 @@ class PipelineStore:
             return pkl.load(f)
 
     def get_status(self, version):
-        """:data:`PUBLISHED` or :data:`ARCHIVED`, or ``None`` if there is no such version."""
+        """:data:`PUBLISHED` if *version* is stored, ``None`` if there is no such version.
+
+        Two answers rather than three: a stored version is published, and a
+        draft was never stored, so there is nothing else a row could report.
+        """
         if not self.exists():
             return None
         with sqlite3.connect(str(self.db_path)) as conn:
             row = conn.execute(
-                "SELECT status FROM versions WHERE version = ?", (version,)
+                "SELECT version FROM versions WHERE version = ?", (version,)
             ).fetchone()
-        return row[0] if row else None
+        return PUBLISHED if row else None
 
     def remove_version(self, version):
-        """Delete an archived version and both its pickles.
+        """Delete a stored version and both its pickles. Not the latest one.
 
-        Archived only. ``published`` is the current definition and ``open`` is
-        the working copy — neither is disposable. Removing an archived version
-        breaks nothing that ran against it, since every Experimenter and Trainer
-        keeps its own Pipeline copy; what goes is what a provenance pointer
-        refers to.
+        The latest is what an omitted version number resolves to, so deleting
+        it would silently move that pointer: the next ``add_experimenter`` would
+        adopt a different definition than the one before it did, with nothing
+        in the call to say so. Any older version goes freely — every
+        Experimenter and Trainer keeps its own Pipeline copy, so what is lost is
+        what a provenance pointer refers to, not anything that ran.
 
         Raises:
             KeyError: If there is no such version.
-            ValueError: If it is not archived.
+            ValueError: If it is the latest one.
         """
         row = self._version_row(version)
-        if row['status'] != ARCHIVED:
+        if row['version'] == self._version_row()['version']:
             raise ValueError(
-                f"Pipeline version {version} is {row['status']}, and only "
-                f"{ARCHIVED} versions can be removed."
+                f"Pipeline version {version} is the latest one, which is what "
+                f"an omitted version resolves to. Publish a newer definition "
+                f"first, or remove an older version."
             )
         for key in ('path', 'builder_path'):
             Path(row[key]).unlink(missing_ok=True)
@@ -277,7 +281,7 @@ class PipelineStore:
             conn.row_factory = sqlite3.Row
             if version is None:
                 row = conn.execute(
-                    "SELECT * FROM versions WHERE status = ?", (PUBLISHED,)
+                    "SELECT * FROM versions ORDER BY version DESC LIMIT 1"
                 ).fetchone()
             else:
                 row = conn.execute(
@@ -285,7 +289,7 @@ class PipelineStore:
                 ).fetchone()
         if not row:
             raise KeyError(
-                f"No published pipeline in {self.db_path}" if version is None
+                f"No pipeline version in {self.db_path}" if version is None
                 else f"No pipeline version {version!r} in {self.db_path}"
             )
         return row

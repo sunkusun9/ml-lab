@@ -1202,6 +1202,37 @@ class TestCheckDataCompatibility:
             t.set_pipeline(pl.build())
 
 
+class TestDraft:
+    """A Pipeline is draft or published, and nothing else. build() publishes;
+    draft() is how you look at a definition without committing it."""
+
+    def test_a_draft_is_unnumbered(self, sp):
+        drafted = sp.draft()
+        assert (drafted.version, drafted.status) == (None, 'draft')
+
+    def test_a_build_is_published_and_numbered(self, tmp_path):
+        p = PipelineBuilder(path=tmp_path / 'pl')
+        p.set_grp('g1', processor=DummyStage, method='transform', edges={'X': '{x1}'})
+        p.set_node('s1', grp='g1')
+        built = p.build()
+        assert (built.version, built.status) == (1, 'published')
+
+    def test_the_same_graph_either_way(self, tmp_path):
+        p = PipelineBuilder(path=tmp_path / 'pl')
+        p.set_grp('g1', processor=DummyStage, method='transform', edges={'X': '{x1}'})
+        p.set_node('s1', grp='g1')
+        assert p.draft().get_node_spec('s1') == p.build().get_node_spec('s1')
+
+    def test_drafting_does_not_publish(self, tmp_path):
+        """Asking what the working copy says must not be what commits it —
+        Project.stale_nodes leans on exactly this."""
+        p = PipelineBuilder(path=tmp_path / 'pl')
+        p.set_grp('g1', processor=DummyStage, method='transform', edges={'X': '{x1}'})
+        p.set_node('s1', grp='g1')
+        p.draft()
+        assert p._store.list_versions() == []
+
+
 class TestPipelineSQLite:
     def test_init_creates_db(self, tmp_path):
         p = PipelineBuilder(path=tmp_path, name='test')
@@ -1481,14 +1512,18 @@ class TestPipelineSync:
         assert 'n2' in p.grps['g1'].nodes
 
 class TestBuild:
-    """PipelineBuilder.build() -> immutable Pipeline structure."""
+    """The snapshot ``build()``/``draft()`` share -> immutable Pipeline structure.
+
+    Asked through ``draft()``, since these builders have no db: the graph is
+    the same either way, and publishing is not what is under test here.
+    """
 
     def test_returns_pipeline(self, sp):
         from mllabs._pipeline import Pipeline
-        assert isinstance(sp.build(), Pipeline)
+        assert isinstance(sp.draft(), Pipeline)
 
     def test_carries_pipeline_id_and_new_build_id(self, sp):
-        b1, b2 = sp.build(), sp.build()
+        b1, b2 = sp.draft(), sp.draft()
         assert b1.pipeline_id == b2.pipeline_id == sp.pipeline_id
         assert b1.build_id != b2.build_id
 
@@ -1496,58 +1531,58 @@ class TestBuild:
         p.set_grp('g1', processor=DummyStage, method='transform',
                   edges={'X': '{a}'}, params={'a': 1, 'b': 2})
         p.set_node('n1', grp='g1', edges={'X': '+ {b}'}, params={'b': 3, 'c': 4})
-        node = p.build().nodes['n1']
+        node = p.draft().nodes['n1']
         assert node.processor == DummyStage
         assert node.method == 'transform'
         assert node.edges['X'] == '{a} + {b}'
         assert node.params == {'a': 1, 'b': 3, 'c': 4}
 
     def test_group_name_kept_as_label_only(self, sp):
-        node = sp.build().get_node('s1')
+        node = sp.draft().get_node('s1')
         assert node.label == 'stage1'
 
     def test_node_attrs_shape_matches_builder(self, sp):
-        built = sp.build().get_node_spec('h1')
+        built = sp.draft().get_node_spec('h1')
         from_builder = sp.get_node_spec('h1')
         assert built == from_builder
 
     def test_datasource_snapshot(self, p):
         p.set_datasource({'a': 'numerical', 'b': 'binary'}, targets=['b'])
-        ds = p.build().datasource
+        ds = p.draft().datasource
         assert ds.schema == {'a': 'numerical', 'b': 'binary'}
         assert ds.targets == ['b']
 
     def test_datasource_is_none_key(self, sp):
-        built = sp.build()
+        built = sp.draft()
         assert built.nodes[None] is built.datasource
 
 class TestBuildIsolation:
     """A built Pipeline is a snapshot — later builder edits must not reach it."""
 
     def test_node_edit_does_not_affect_built(self, sp):
-        built = sp.build()
+        built = sp.draft()
         sp.set_node('s1', grp='stage1', edges={'X': '{x9}'})
         assert built.nodes['s1'].edges['X'] == '{x1}'
 
     def test_group_edit_does_not_affect_built(self, sp):
-        built = sp.build()
+        built = sp.draft()
         sp.set_grp('stage1', processor=AnotherProcessor,
                    method='transform', edges={'X': '{x1}'})
         assert built.nodes['s1'].processor == DummyStage
 
     def test_new_node_does_not_appear_in_built(self, sp):
-        built = sp.build()
+        built = sp.draft()
         sp.set_node('s2', grp='stage1')
         assert 's2' not in built.nodes
 
     def test_removed_node_stays_in_built(self, sp):
-        built = sp.build()
+        built = sp.draft()
         sp.remove_node('s1')
         assert 's1' in built.nodes
 
     def test_datasource_edit_does_not_affect_built(self, p):
         p.set_datasource({'a': 'numerical'}, targets=['a'])
-        built = p.build()
+        built = p.draft()
         p.set_datasource({'a': 'numerical', 'b': 'numerical'}, targets=['b'])
         assert built.datasource.schema == {'a': 'numerical'}
         assert built.datasource.targets == ['a']
@@ -1565,7 +1600,7 @@ class TestBuiltPipelineQueries:
         p.set_grp('g_head', processor=DummyHead, method='predict',
                   edges={'X': 's2:(*)', 'y': '{target}'})
         p.set_node('h1', grp='g_head')
-        return p.build()
+        return p.draft()
 
     def test_topo_order(self, chain):
         order = chain.topo_order()
@@ -1630,7 +1665,7 @@ class TestDiffFromDataSourceChange:
         p.set_datasource(schema, targets=targets)
         p.set_grp('g_stage', processor=DummyStage, method='transform', edges={'X': x_edge})
         p.set_node('s1', grp='g_stage')
-        return p.build()
+        return p.draft()
 
     def test_unrelated_column_added_does_not_stale(self):
         old = self._pipeline({'x1': 'numerical', 'target': 'binary'})
@@ -1668,7 +1703,7 @@ class TestDiffFromDataSourceChange:
             p.set_node('s1', grp='g_stage')
             p.set_grp('g_stage2', processor=DummyStage, method='transform', edges={'X': 's1:(*)'})
             p.set_node('s2', grp='g_stage2')
-            return p.build()
+            return p.draft()
 
         old = build({'x1': 'numerical', 'x2': 'numerical', 'target': 'binary'})
         new = build({'x1': 'numerical', 'target': 'binary'})

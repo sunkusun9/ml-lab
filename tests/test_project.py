@@ -40,8 +40,9 @@ def store(tmp_path):
     return TrialStore(tmp_path / 'ts')
 
 
-def _trial(name='dt', params=None):
-    return Trial(name, TREE, EDGES, params=params or {'max_depth': 3})
+def _trial(name='dt', params=None, pipeline_version=None):
+    return Trial(name, TREE, EDGES, params=params or {'max_depth': 3},
+                 pipeline_version=pipeline_version)
 
 
 def dummy_metric(y, pred):
@@ -129,26 +130,30 @@ class TestPipelineVersions:
         builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
         assert builder.build().version == 2
 
-    def test_publishing_archives_the_previous(self, project, builder):
+    def test_publishing_demotes_nothing(self, project, builder):
+        """Every stored version stays published and stays adoptable; the newest
+        is only what an omitted version number resolves to."""
         builder.build()
         builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
         builder.build()
-        assert [(r['version'], r['status']) for r in project.list_pipeline_versions()] == \
-            [(0, 'archived'), (1, 'archived'), (2, 'published')]
+        assert [r['version'] for r in project.list_pipeline_versions()] == [0, 1, 2]
+        assert all(project.pipeline._store.get_status(v) == 'published'
+                   for v in (0, 1, 2))
 
-    def test_a_builder_with_no_db_stays_open(self):
-        """Nowhere to mint from, so it is the one unnumbered case — and the
-        one Trainer.set_pipeline refuses."""
+    def test_a_builder_with_no_db_cannot_build(self):
+        """Nowhere to publish, so build() says so rather than quietly handing
+        back something unnumbered. draft() is how you get the snapshot."""
         bare = PipelineBuilder()
         bare.set_datasource({'f1': 'numerical'})
-        built = bare.build()
-        assert (built.version, built.status) == (None, 'open')
+        with pytest.raises(ValueError, match='no db'):
+            bare.build()
+        drafted = bare.draft()
+        assert (drafted.version, drafted.status) == (None, 'draft')
 
     def test_a_new_project_starts_published_at_v0(self, project):
         """The empty Pipeline is a real published row, not an absence — so
         load_pipeline() always has something to return."""
-        assert [(r['version'], r['status']) for r in project.list_pipeline_versions()] == \
-            [(0, 'published')]
+        assert [r['version'] for r in project.list_pipeline_versions()] == [0]
         assert project.load_pipeline().is_empty
 
     def test_building_an_untouched_working_copy_stays_at_v0(self, project):
@@ -198,16 +203,18 @@ class TestPipelineVersions:
         with pytest.raises(KeyError):
             project.load_pipeline(99)
 
-    def test_archived_versions_can_be_removed(self, project, builder):
+    def test_an_older_version_can_be_removed(self, project, builder):
         builder.build()
         builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
         builder.build()
         project.remove_pipeline_version(1)
         assert [r['version'] for r in project.list_pipeline_versions()] == [0, 2]
 
-    def test_the_published_version_cannot_be_removed(self, project, builder):
+    def test_the_latest_version_cannot_be_removed(self, project, builder):
+        """It is what an omitted version resolves to, so removing it would move
+        that pointer with nothing in the call to say so."""
         builder.build()
-        with pytest.raises(ValueError, match='published'):
+        with pytest.raises(ValueError, match='latest'):
             project.remove_pipeline_version(1)
 
 
@@ -274,6 +281,64 @@ class TestSetTrial:
             project.set_trials(trials)
         assert project.trials.get_by_name('dt_1') is None
         assert project.trials.get_by_name('dt_0').params == {'max_depth': 3}
+
+
+class TestSetTrialStampsTheVersion:
+    """A Trial is defined against a Pipeline version, and this is where it is
+    filled in — the only place that both knows the registry and owns the
+    definition."""
+
+    def test_an_unstamped_trial_gets_the_latest_published(self, project, builder):
+        assert builder.build().version == 1
+        assert project.set_trial(_trial()) == 'dt'
+        assert project.trials.get_by_name('dt').pipeline_version == 1
+
+    def test_a_new_project_stamps_v0(self, project):
+        """Nothing built yet, so the empty Pipeline is what a Trial is against."""
+        project.set_trial(_trial())
+        assert project.trials.get_by_name('dt').pipeline_version == 0
+
+    def test_the_caller_s_object_is_stamped_too(self, project, builder):
+        """Mutated rather than copied, so the Trial still in hand says the same
+        thing the row does."""
+        builder.build()
+        trial = _trial()
+        project.set_trial(trial)
+        assert trial.pipeline_version == 1
+
+    def test_an_explicit_older_version_is_kept(self, project, builder):
+        builder.build()
+        builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
+        assert builder.build().version == 2
+        project.set_trial(_trial(pipeline_version=1))
+        assert project.trials.get_by_name('dt').pipeline_version == 1
+
+    def test_an_unpublished_version_is_refused(self, project, builder):
+        builder.build()
+        with pytest.raises(ValueError, match='has not.*published'):
+            project.set_trial(_trial(pipeline_version=7))
+        assert project.trials.get_by_name('dt') is None
+
+    def test_a_bumped_version_makes_a_succeeded_name_a_redefinition(self, project, builder):
+        """The stamp is part of the definition, so after the pipeline moves on
+        the freeze catches a re-registration instead of quietly re-pointing
+        results at a version that did not produce them."""
+        builder.build()
+        project.set_trial(_trial())
+        project.trials.record('dt', 'run_a', 0, 0, status='built')
+
+        builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
+        builder.build()
+        with pytest.raises(ValueError, match='run_a'):
+            project.set_trial(_trial())
+        assert project.trials.get_by_name('dt').pipeline_version == 1
+
+    def test_a_sweep_can_be_authored_against_one_version(self, project, builder):
+        builder.build()
+        trials = make_trials('dt', processor=TREE, edges=EDGES,
+                             param_grid={'max_depth': [3, 5]}, pipeline_version=0)
+        project.set_trials(trials)
+        assert [t.pipeline_version for t in project.trials.list_trials()] == [0, 0]
 
 
 class TestTrialRegistration:
@@ -665,7 +730,8 @@ class TestExperimenterUnderProject:
         e.exp(['dt'])
         build_id_1 = project.trials.get_info('dt', 'run_a')[(0, 0)]['build_id']
 
-        project.trials.register(Trial('dt', TREE, EDGES, params={'max_depth': 5, 'random_state': 0}))
+        project.trials.register(Trial('dt', TREE, EDGES, params={'max_depth': 5, 'random_state': 0},
+                                      pipeline_version=e.pipeline_version))
         e.exp(['dt'])
         build_id_2 = project.trials.get_info('dt', 'run_a')[(0, 0)]['build_id']
         assert build_id_2 == build_id_1
@@ -701,6 +767,84 @@ class TestExperimenterUnderProject:
         e.exp(['dt', 'bad'], n_jobs=2)
         assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built', (1, 0): 'built'}
         assert project.trials.get_status('bad', 'run_a')[(0, 0)] == 'error'
+
+
+class TestExpChecksTheVersion:
+    """A Trial runs only where it was authored. Collected results are keyed by
+    node name and fold with no version in them, so two versions of one name
+    would overwrite each other's metrics with nothing to say which won."""
+
+    def _exp(self, project, builder, sample_data, name='run_a', version=None):
+        return project.add_experimenter(
+            name, sample_data,
+            sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=0),
+            pipeline_version=version,
+        )
+
+    def test_a_matching_version_runs(self, project, builder, sample_data):
+        builder.build()
+        e = self._exp(project, builder, sample_data)
+        e.build()
+        project.set_trial(_trial())
+        e.exp(['dt'])
+        assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built'}
+
+    def test_a_trial_from_an_older_version_is_refused(self, project, builder, sample_data):
+        builder.build()
+        project.set_trial(_trial())                      # stamped v1
+        builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
+        assert builder.build().version == 2
+
+        e = self._exp(project, builder, sample_data)     # adopts the latest, v2
+        e.build()
+        with pytest.raises(ValueError, match='version 1'):
+            e.exp(['dt'])
+        assert project.trials.get_status('dt', 'run_a') == {}
+
+    def test_a_finished_trial_passes_after_a_version_bump(self, project, builder, sample_data):
+        """Nothing left to file, so nothing to refuse — re-handing a finished
+        round stays a no-op rather than becoming an error."""
+        builder.build()
+        e = self._exp(project, builder, sample_data)
+        e.build()
+        project.set_trial(_trial())
+        e.exp(['dt'])
+
+        builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
+        e.set_pipeline(project.load_pipeline(builder.build().version))
+        e.build()
+        e.exp(['dt'])                                    # no jobs, no complaint
+        assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built'}
+
+    def test_a_half_run_trial_is_still_refused_after_a_bump(self, project, builder, sample_data):
+        """Some folds left means new results would land beside the old ones."""
+        builder.build()
+        e = project.add_experimenter(
+            'run_b', sample_data,
+            sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=0))
+        e.build()
+        project.set_trial(_trial())
+        e.exp(['dt'])
+        project.trials.remove_hist(trial_name='dt')      # as if one fold never ran
+        project.trials.record('dt', 'run_b', 0, 0, status='built')
+
+        builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
+        e.set_pipeline(project.load_pipeline(builder.build().version))
+        with pytest.raises(ValueError, match='version 1'):
+            e.exp(['dt'])
+
+    def test_adopting_that_version_lets_it_run(self, project, builder, sample_data):
+        """Nothing is demoted, so the older version is still adoptable — which
+        is the way out of the refusal above."""
+        builder.build()
+        project.set_trial(_trial())
+        builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
+        builder.build()
+
+        e = self._exp(project, builder, sample_data, version=1)
+        e.build()
+        e.exp(['dt'])
+        assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built'}
 
 
 class TestTrialErrorReporting:

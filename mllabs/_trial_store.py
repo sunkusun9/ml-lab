@@ -50,14 +50,15 @@ from ._trial import Trial
 
 _SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS trials (
-        name        TEXT PRIMARY KEY,
-        desc        TEXT,
-        processor   TEXT NOT NULL,
-        method      TEXT,
-        adapter     TEXT,
-        params      TEXT,
-        edges       TEXT,
-        tag         TEXT
+        name             TEXT PRIMARY KEY,
+        desc             TEXT,
+        processor        TEXT NOT NULL,
+        method           TEXT,
+        adapter          TEXT,
+        params           TEXT,
+        edges            TEXT,
+        tag              TEXT,
+        pipeline_version INTEGER
     );
     CREATE TABLE IF NOT EXISTS experiment_hist (
         trial_name       TEXT NOT NULL,
@@ -110,11 +111,12 @@ class TrialStore(ArtifactStore):
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO trials "
-                "(name, desc, processor, method, adapter, params, edges, tag) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(name, desc, processor, method, adapter, params, edges, tag, "
+                "pipeline_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (trial.name, trial.desc, trial.processor,
                  trial.method, json.dumps(trial.adapter), json.dumps(trial.params),
-                 json.dumps(trial.edges), json.dumps(trial.tag)),
+                 json.dumps(trial.edges), json.dumps(trial.tag),
+                 trial.pipeline_version),
             )
 
     def register_all(self, trials):
@@ -141,6 +143,12 @@ class TrialStore(ArtifactStore):
         guarding a redefinition does not have to check for absence separately.
         Compares what execution depends on; ``desc``/``tag`` are display and
         selection metadata and do not make a definition a different one.
+
+        ``pipeline_version`` *is* compared. It decides where the Trial is
+        allowed to run, so the same fields against a different version are a
+        different definition — which is what makes ``Project.set_trial`` refuse
+        to re-point a name that has already succeeded, rather than leaving the
+        rule to convention.
         """
         stored = self.get_by_name(trial.name)
         return (stored is not None
@@ -148,7 +156,8 @@ class TrialStore(ArtifactStore):
                 and stored.method == trial.method
                 and stored.adapter == trial.adapter
                 and stored.params == trial.params
-                and stored.edges == trial.edges)
+                and stored.edges == trial.edges
+                and stored.pipeline_version == trial.pipeline_version)
 
     def get_by_name(self, name):
         """Stored definition for *name* as a :class:`~mllabs.Trial`, or ``None``."""
@@ -183,6 +192,7 @@ class TrialStore(ArtifactStore):
             params=json.loads(row['params']) if row['params'] else {},
             desc=row['desc'],
             tag=json.loads(row['tag']) if row['tag'] else [],
+            pipeline_version=row['pipeline_version'],
         )
 
     # ------------------------------------------------------------------

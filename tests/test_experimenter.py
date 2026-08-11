@@ -86,7 +86,12 @@ def _folds(trial, exp):
     exp() takes names and reads the definition out of the store, so a test
     Trial has to be in there first. Registering through the store rather than
     Project.set_trial deliberately skips the redefinition guard — several
-    tests below redefine a name on purpose to check what a rerun does."""
+    tests below redefine a name on purpose to check what a rerun does. It also
+    skips the version stamp, so that is done here: exp() refuses a Trial
+    defined against another version, and these tests are about everything
+    except that."""
+    if trial.pipeline_version is None:
+        trial.pipeline_version = exp.pipeline_version
     exp.trial_store.register(trial)
     return [trial.name]
 
@@ -571,6 +576,15 @@ class TestSetPipeline:
         e = Experimenter(path=tmp_path / 'reject', name='e1', data=sample_data)
         with pytest.raises(TypeError, match='built Pipeline'):
             e.set_pipeline(pipeline)
+
+    def test_a_draft_is_rejected(self, tmp_path, sample_data, pipeline):
+        """The same gate the Trainer has. Experimenting against a definition
+        under edit used to be allowed, but a Trial names the version it was
+        authored against and an adopted draft has no number to check it
+        against."""
+        e = Experimenter(path=tmp_path / 'draft', name='e1', data=sample_data)
+        with pytest.raises(ValueError, match='draft'):
+            e.set_pipeline(pipeline.draft())
 
     def test_set_pipeline_keeps_a_copy_in_the_run(self, exp, pipeline):
         """The run owns the Pipeline it works against, so reopening it needs

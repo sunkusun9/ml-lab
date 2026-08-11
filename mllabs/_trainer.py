@@ -12,7 +12,7 @@ from ._logger import resolve_logger
 from ._pipeline import Pipeline
 from ._serialize import _obj_to_ref, serialize_value
 from ._common import (resolve_common_status, require_built_pipeline,
-                      require_frozen_pipeline)
+                      require_published_pipeline)
 
 
 class TrainFold:
@@ -214,7 +214,7 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def set_pipeline(self, pipeline):
-        """Adopt an already-loaded Pipeline. It must be a frozen version.
+        """Adopt an already-loaded Pipeline. It must be a published version.
 
         Takes the Pipeline object directly rather than a version number —
         this class has no way to load one by version itself (see the class
@@ -222,12 +222,12 @@ class Trainer:
         this. ``self.pipeline_version`` is read straight off *pipeline* (its
         ``.version``), never tracked separately.
 
-        The working copy is refused. What a Trainer produces is what gets
-        deployed, so it has to be able to say what it was trained against, and
-        a draft changes under it. An *archived* version is fine — it is frozen,
-        so it answers that question as well as the published one does. What is
-        ruled out is training against something still being edited, not
-        training against something old.
+        A draft is refused, and only a draft. What a Trainer produces is what
+        gets deployed, so it has to be able to say what it was trained against,
+        and a draft carries no number to say it with. *Which* published version
+        is not this call's business: an older one answers that question as well
+        as the newest, and training a Predictor evaluated against an older
+        definition is exactly what adopting that version is for.
 
         The Pipeline is written to this Trainer's own ``pipeline.pkl``, which
         :meth:`load` reads back — reopening needs only this directory, never
@@ -243,14 +243,19 @@ class Trainer:
         past execution to preserve, so a Predictor trained against a
         since-changed node is simply stale.
 
+        The Predictors already registered here move onto the adopted version
+        with it (see ``_restamp_predictors``): adopting is what says which
+        definition this Trainer trains against, and stranding them behind would
+        leave their artifacts deleted and unrebuildable.
+
         Args:
             pipeline (Pipeline): Already-built, already-published Pipeline.
 
         Raises:
-            ValueError: If *pipeline* is the unpublished working copy.
+            ValueError: If *pipeline* is a draft.
         """
         require_built_pipeline(pipeline)
-        require_frozen_pipeline(pipeline)
+        require_published_pipeline(pipeline)
         pipeline.check_data_compatibility(self.data)
         # See Experimenter.set_pipeline: the empty Pipeline means nothing has
         # been adopted, so there is nothing to invalidate against.
@@ -261,7 +266,27 @@ class Trainer:
         self.pipeline = pipeline
         self._store.save_pipeline(pipeline)
         self.save()
+        self._restamp_predictors()
         return pipeline
+
+    def _restamp_predictors(self):
+        """Move the registered Predictors onto the version just adopted.
+
+        Adopting a version here *is* the decision to train against it, so the
+        Predictors this Trainer already holds follow it rather than being
+        stranded: without this the reset above would delete their artifacts and
+        :meth:`train` would then refuse to rebuild them, leaving the whole
+        version-switch path unreachable.
+
+        The gate in :meth:`train` is not weakened by this, because it guards a
+        different motion — a Predictor arriving from elsewhere, promoted from a
+        Trial evaluated against some other version. That one is still refused,
+        which is the case where training would ship something unmeasured.
+        """
+        for predictor in self.predictor_defs.list_predictors():
+            if predictor.pipeline_version != self.pipeline_version:
+                predictor.pipeline_version = self.pipeline_version
+                self.predictor_defs.register(predictor)
 
     @property
     def predictors(self):
@@ -463,6 +488,14 @@ class Trainer:
         Predictor trained by an earlier call keeps its definition and its
         artifacts.
 
+        **Each one has to be defined against the version this Trainer
+        adopted.** One promoted from a Trial carries the version its candidate
+        was evaluated on, so training it elsewhere would ship something that
+        was never measured; adopt that version instead, since every published
+        version is adoptable. One authored here with no version gets this
+        Trainer's — the version it is being defined against is the one in
+        front of it, and this Trainer knows that without a registry to ask.
+
         Args:
             predictors (list[Predictor], optional): What to train. A
                 :class:`~mllabs.Trial` is rejected — promote it explicitly with
@@ -473,6 +506,11 @@ class Trainer:
             n_jobs (int): Number of parallel workers. Default 1 (sequential).
             gpu_id_list (list, optional): GPU IDs for GPU-enabled nodes.
             logger: Logger instance. Default: shared ``DefaultLogger.get_instance()``.
+
+        Raises:
+            TypeError: If *predictors* holds a :class:`~mllabs.Trial`.
+            ValueError: If a Predictor is defined against a different Pipeline
+                version than the adopted one.
         """
         from ._executor import _execute_single, _execute_multi
         from ._tracker import LoggerExecuteTracker, NodeInfoTracker
@@ -491,7 +529,19 @@ class Trainer:
                         f"train() got a Trial ({p.name!r}); promote it with "
                         f"Predictor.from_trial(trial, experimenter=...) first"
                     )
+                if p.pipeline_version is None:
+                    p.pipeline_version = self.pipeline_version
             self.predictor_defs.register_all(predictors)
+        for p in predictors:
+            if p.pipeline_version != self.pipeline_version:
+                raise ValueError(
+                    f"Predictor '{p.name}' is defined against pipeline version "
+                    f"{p.pipeline_version}, and this Trainer has adopted "
+                    f"version {self.pipeline_version}. Training it here would "
+                    f"ship a definition that was never evaluated — adopt that "
+                    f"version with set_pipeline(project.load_pipeline("
+                    f"{p.pipeline_version!r}))."
+                )
 
         # Node staleness is settled when a Pipeline is adopted
         # (set_pipeline); Predictor staleness is checked per job below.

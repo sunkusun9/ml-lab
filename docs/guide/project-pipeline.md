@@ -167,20 +167,33 @@ A project is created with **version 0**: the empty Pipeline, published. That is 
 
 | status | |
 |---|---|
-| `open` | the builder itself — editable, unnumbered, never a row |
-| `published` | the current version. Always exactly one |
-| `archived` | superseded by a later publish. Frozen, still referenceable, and the only status that can be deleted |
+| `published` | stored under a number. Every version is one, and nothing is ever demoted |
+| `draft` | a snapshot that was never stored — `version = None`. Cannot be adopted |
+
+Being stored *is* what publishing means, so the `versions` table has no status column and a draft can never appear in it. The distinction exists at runtime only.
 
 ```python
 project.list_pipeline_versions()
-project.load_pipeline()          # the published one — a read, never a write
+project.load_pipeline()          # the latest — a read, never a write
 project.load_pipeline(2)         # a specific version
-project.remove_pipeline_version(1)   # archived only
+project.remove_pipeline_version(1)   # any but the latest
 ```
 
-Removing an archived version breaks nothing that ran against it: every Experimenter and Trainer keeps its own Pipeline copy. What is lost is what a provenance pointer refers to.
+The latest is what an omitted version number resolves to, so it cannot be removed — deleting it would silently change what the next `add_experimenter` adopts. Removing an older one breaks nothing that ran against it: every Experimenter and Trainer keeps its own Pipeline copy. What is lost is what a provenance pointer refers to.
 
-`PipelineBuilder()` constructed without a path has nowhere to mint from, so its build stays `open` with `version = None` — useful in tests, and the one thing `Trainer.set_pipeline` refuses.
+### Looking without publishing
+
+`draft()` returns the same snapshot `build()` does, unregistered:
+
+```python
+snapshot = project.pipeline.draft()
+snapshot.version, snapshot.status    # (None, 'draft')
+project.stale_nodes()                # what adopting the current edits would cost
+```
+
+This is how a question stays a question — `stale_nodes()` leans on it so that asking what an edit would cost is not what commits the edit. A draft cannot be adopted: without a number, nothing that ran against it could say what that was.
+
+`PipelineBuilder()` constructed without a path has nowhere to publish, so `build()` raises there; `draft()` is how you get the snapshot.
 
 ## Inspecting
 
