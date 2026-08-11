@@ -134,7 +134,7 @@ class TestTrialSpec:
     def test_spec_shape_matches_a_node_spec(self, pipeline, swept):
         """A Trial must look like a node to Connector/executor/Collector."""
         trial_spec = swept[0].get_spec()
-        node_spec = pipeline.build().get_node_spec('scaler')
+        node_spec = pipeline.draft().get_node_spec('scaler')
         assert type(trial_spec) is type(node_spec)
         assert trial_spec.__slots__ == node_spec.__slots__
 

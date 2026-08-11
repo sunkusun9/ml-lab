@@ -2,7 +2,7 @@ import re
 import uuid
 from pathlib import Path
 from ._describer import desc_pipeline, desc_node, compare_nodes
-from ._pipeline_store import PipelineStore, OPEN, PUBLISHED, ARCHIVED
+from ._pipeline_store import PipelineStore, DRAFT, PUBLISHED
 from ._edge_dsl import referenced_nodes, validate_edges, iter_segments, eval_expr
 
 
@@ -647,14 +647,15 @@ class Pipeline:
             the DataSource (a :class:`_BuiltDataSource`).
         pipeline_id (str): Identity of the builder this was built from.
         build_id (str): Identity of this particular build.
-        version (int | None): Set by :meth:`Project.publish_pipeline` when this
-            Pipeline is frozen as a version. ``None`` while it is an
-            unpublished build of the working copy, which is deliberate: a draft
+        version (int | None): The number this Pipeline is stored under, set by
+            :meth:`PipelineBuilder.build`. ``None`` for a
+            :meth:`PipelineBuilder.draft`, which was never stored: a draft
             changes under anyone who adopted it, so a number here would be a
             claim the record could not keep. ``build_id`` says which draft.
-        status (str): ``'open'`` until published, then ``'published'``. A
-            version demoted by a later publish is ``'archived'`` — read from
-            the store, since the copies already handed out cannot be updated.
+        status (str): ``'draft'`` or ``'published'``, and nothing else. Being
+            stored is what publishing *is*, so this is set once, when the
+            store writes it, and no later call can make it wrong — copies
+            already handed out never go out of date.
     """
 
     def __init__(self, nodes, datasource, pipeline_id, build_id=None):
@@ -663,7 +664,7 @@ class Pipeline:
         self.pipeline_id = pipeline_id
         self.build_id = build_id if build_id is not None else str(uuid.uuid4())
         self.version = None
-        self.status = OPEN
+        self.status = DRAFT
         self._topo_order = _affected_nodes(self.nodes, [None])
         self._specs = {
             name: node.get_spec()
@@ -683,8 +684,11 @@ class Pipeline:
 
         Inside a Project this is version 0, published at creation, so the empty
         state is a real row rather than a fabricated object. This constructor
-        is for the standalone case, where there is no store to mint from — the
-        same reason a db-less builder's build stays ``open`` and unnumbered.
+        is for the standalone case, where there is no store to mint from, and
+        what it returns is a draft for exactly that reason: it never came from
+        one. It is the only Pipeline an Experimenter or Trainer holds without
+        having adopted it, and ``set_pipeline`` replaces it before anything
+        runs.
         """
         return cls({}, _BuiltDataSource('Data_Source', {}, [], []), pipeline_id)
 
@@ -1106,21 +1110,53 @@ class PipelineBuilder:
         the built Pipeline, never the builder, so later ``set_grp``/``set_node``
         calls do not reach into work already in progress.
 
-        **Building publishes.** A builder with a db mints a version here, which
-        makes a version appear exactly when the definition changes — an
-        unchanged builder returns the version it already has rather than a
-        duplicate of it. There is no separate publish step and no such thing as
-        an unnumbered snapshot to run against, so every history row can name the
-        definition it ran on.
-
-        A builder with no db (constructed without a path) has nowhere to mint
-        from, so its build stays ``open`` and unnumbered. That is the one
-        in-memory case ``Trainer.set_pipeline`` refuses.
+        **Building publishes.** A version appears here, and exactly when the
+        definition changes — an unchanged builder returns the version it
+        already has rather than a duplicate of it. There is no separate publish
+        step, and :meth:`draft` is the only way to get an unnumbered snapshot,
+        so anything that can be *adopted* can name itself and every history row
+        can name the definition it ran on.
 
         Returns:
             Pipeline: Snapshot with every node's inherited values resolved,
-            carrying ``version`` and ``status`` unless this builder has no db.
+            carrying ``version`` and ``status = 'published'``.
+
+        Raises:
+            ValueError: If this builder has no db to publish into. Such a
+                builder can still produce a snapshot — that is :meth:`draft`.
         """
+        if self._store is None:
+            raise ValueError(
+                "This PipelineBuilder has no db, so build() has nowhere to "
+                "publish. Construct it with PipelineBuilder(path=...) to "
+                "version it, or call draft() for an unnumbered snapshot."
+            )
+        pipeline = self._snapshot()
+        self._version(pipeline)
+        return pipeline
+
+    def draft(self):
+        """The same snapshot :meth:`build` makes, unregistered.
+
+        ``version`` is ``None`` and ``status`` is ``'draft'``, because being
+        stored is what publishing is and this was not. Use it to *look* at what
+        the working copy currently says — ``Project.stale_nodes`` asks what
+        adopting the current edits would cost — without that question being
+        what commits them.
+
+        A draft cannot be adopted: ``set_pipeline`` refuses it on both
+        Experimenter and Trainer. An unnumbered definition would leave runs
+        unable to say what they ran against, which is the whole reason
+        ``build()`` publishes.
+
+        Returns:
+            Pipeline: Snapshot with every node's inherited values resolved,
+            unnumbered.
+        """
+        return self._snapshot()
+
+    def _snapshot(self):
+        """The built graph itself, before anything decides whether to store it."""
         nodes = {}
         for name, node in self.nodes.items():
             if name is None:
@@ -1145,10 +1181,7 @@ class PipelineBuilder:
             targets=list(ds.targets),
             output_edges=list(ds.output_edges),
         )
-        pipeline = Pipeline(nodes, datasource, self.pipeline_id)
-        if self._store is not None:
-            self._version(pipeline)
-        return pipeline
+        return Pipeline(nodes, datasource, self.pipeline_id)
 
     def _version(self, pipeline):
         """Give *pipeline* the version its definition belongs to, minting one if new."""

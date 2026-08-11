@@ -34,7 +34,8 @@ _SCHEMA_SQL = """
         edges            TEXT,
         tag              TEXT,
         src_trial        TEXT,
-        src_experimenter TEXT
+        src_experimenter TEXT,
+        pipeline_version INTEGER
     );
 """
 
@@ -60,13 +61,13 @@ class PredictorStore:
             conn.execute(
                 "INSERT OR REPLACE INTO predictors "
                 "(name, desc, processor, method, adapter, params, edges, tag, "
-                "src_trial, src_experimenter) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "src_trial, src_experimenter, pipeline_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (predictor.name, predictor.desc, predictor.processor,
                  predictor.method, json.dumps(predictor.adapter),
                  json.dumps(predictor.params), json.dumps(predictor.edges),
                  json.dumps(predictor.tag), predictor.src_trial,
-                 predictor.src_experimenter),
+                 predictor.src_experimenter, predictor.pipeline_version),
             )
 
     def register_all(self, predictors):
@@ -90,14 +91,21 @@ class PredictorStore:
             conn.execute("DELETE FROM predictors WHERE name = ?", (name,))
 
     def has(self, predictor):
-        """Whether *predictor*'s exact definition is the one stored under its name."""
+        """Whether *predictor*'s exact definition is the one stored under its name.
+
+        ``pipeline_version`` counts, for the same reason it does in
+        ``TrialStore.has``: it decides which Trainer state the definition may
+        be trained under, so the same fields against another version are
+        another definition.
+        """
         stored = self.get_by_name(predictor.name)
         return (stored is not None
                 and stored.processor == predictor.processor
                 and stored.method == predictor.method
                 and stored.adapter == predictor.adapter
                 and stored.params == predictor.params
-                and stored.edges == predictor.edges)
+                and stored.edges == predictor.edges
+                and stored.pipeline_version == predictor.pipeline_version)
 
     def get_by_name(self, name):
         """Stored :class:`~mllabs.Predictor` for *name*, or ``None``."""
@@ -133,6 +141,7 @@ class PredictorStore:
             tag=json.loads(row['tag']) if row['tag'] else [],
             src_trial=row['src_trial'],
             src_experimenter=row['src_experimenter'],
+            pipeline_version=row['pipeline_version'],
         )
 
     def __repr__(self):

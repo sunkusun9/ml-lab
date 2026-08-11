@@ -17,7 +17,7 @@ t = project.add_trainer('cv5',
 
 No splitter means one fold over the whole dataset — the usual choice for a final model. With a splitter you get one fold per split, and `Inferencer` will average across them at serve time.
 
-`pipeline_version=` defaults to the published version, which is frozen and therefore exactly what a Trainer may adopt — what it refuses is the working copy, and the default never hands it one.
+`pipeline_version=` defaults to the latest published version. Any published version is adoptable — an older one answers "what was this trained against" as well as the newest, and adopting one is how you train a Predictor promoted from a candidate evaluated on it. What `set_pipeline` refuses is a draft, and the default never hands it one.
 
 Like an Experimenter, a Trainer owns its directory and reopens from it:
 
@@ -43,6 +43,8 @@ pred.src_experimenter   # 'cv5'
 ```
 
 `from_trial` copies the definition verbatim and keeps the Trial's name unless you override it — and even then `src_trial` records the original. Keeping the name matters more than it looks: output columns are named after the node, so a Predictor named like its Trial produces columns that line up with what the experiment collected.
+
+Verbatim includes `pipeline_version`, so a promoted Predictor requires the version its candidate was actually evaluated on, and `train()` refuses any other — training a newer pipeline against it would ship something that was never measured. Adopt that version in the Trainer, or re-run the experiment against the newer one. A Predictor declared directly carries no version and takes the Trainer's own, since the definition in front of it is what it is being written against.
 
 Passing a bare `Trial` to `train()` raises `TypeError`. The promotion is deliberate, so the provenance is recorded rather than guessed.
 

@@ -18,13 +18,19 @@ class Trial:
     the Head node name played. Redefining a name overwrites both the artifact
     and its ``TrialStore`` row.
 
-    A Trial's own definition says nothing about the preprocessing it read, and
-    it does not live in the pipeline, so a node change cannot cascade into it
-    through the Pipeline graph automatically. ``Experimenter.set_pipeline``
-    deliberately does not cascade either — a Trial's artifact and its
-    ``TrialStore.experiment_hist`` row document the pipeline version it
-    actually ran against, which stays valid even after a newer version is
-    adopted. Rerunning it is a separate, explicit action.
+    ``pipeline_version`` is part of the definition, not a note about it. A
+    Trial's own fields say nothing about the preprocessing it reads, and it
+    does not live in the pipeline, so the graph cannot tell it that its inputs
+    changed; naming the version it was authored against is how it says which
+    definition it means. ``Experimenter.exp`` refuses to run it against any
+    other version, so the same name can never accumulate results from two
+    different pipelines. ``Experimenter.set_pipeline`` still does not cascade
+    into Trials — adopting a new version leaves their history alone, and what
+    the version stamp adds is that they simply stop running there.
+
+    ``Project.set_trial`` fills it in with the latest published version when it
+    is left unset, so authoring one by hand does not mean tracking versions by
+    hand.
 
     The Trainer side makes the opposite call, which is why it has its own
     :class:`~mllabs.Predictor` rather than reusing this class: a Trainer keeps
@@ -42,13 +48,16 @@ class Trial:
             ``PipelineBuilder``'s ``desc`` — never affects matching, diffing,
             or storage identity.
         tag (list[str]): Selection tags.
+        pipeline_version (int | None): The Pipeline version this was authored
+            against. ``None`` means unstamped, which ``Project.set_trial``
+            resolves to the latest published version on registration.
     """
 
     __slots__ = ('name', 'processor', 'method', 'adapter', 'params', 'edges',
-                 'desc', 'tag')
+                 'desc', 'tag', 'pipeline_version')
 
     def __init__(self, name, processor, edges, method='predict', adapter=None,
-                 params=None, desc=None, tag=None):
+                 params=None, desc=None, tag=None, pipeline_version=None):
         self.name = name
         self.processor = processor
         self.edges = dict(edges or {})
@@ -57,6 +66,7 @@ class Trial:
         self.params = dict(params or {})
         self.desc = desc
         self.tag = list(tag or [])
+        self.pipeline_version = pipeline_version
 
     def get_spec(self):
         """This Trial's :class:`~mllabs._pipeline.ProcessorSpec`.
@@ -96,7 +106,7 @@ class Trial:
 
 
 def make_trials(name, processor, edges, method='predict', adapter=None,
-                params=None, param_grid=None, tags=None):
+                params=None, param_grid=None, tags=None, pipeline_version=None):
     """Build a list of Trials sweeping *param_grid* over one fixed processor.
 
     Every Trial shares processor/method/adapter/edges; ``params`` holds the
@@ -125,6 +135,10 @@ def make_trials(name, processor, edges, method='predict', adapter=None,
         param_grid (dict, optional): ``{param: [values]}``. Omitted yields a
             single Trial from *params* alone.
         tags (list[str], optional): Tags applied to every Trial.
+        pipeline_version (int, optional): Pipeline version every Trial in the
+            sweep is authored against. Left unset, ``Project.set_trial`` fills
+            in the latest published one — pass it only to sweep against an
+            older version.
 
     Returns:
         list[Trial]
@@ -173,5 +187,6 @@ def make_trials(name, processor, edges, method='predict', adapter=None,
             adapter=adapter,
             params=merged,
             tag=list(tags or []),
+            pipeline_version=pipeline_version,
         ))
     return trials

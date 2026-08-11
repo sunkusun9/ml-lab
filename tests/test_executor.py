@@ -110,7 +110,12 @@ def _wp():
 def _names(trials, exp):
     """Register a bare Trial list and return the names Experimenter.exp takes.
 
-    Each name covers every fold of *exp* — exp() expands the grid itself."""
+    Each name covers every fold of *exp* — exp() expands the grid itself.
+    Stamped with the run's own pipeline version, which Project.set_trial would
+    otherwise do: exp() refuses a Trial defined against another version."""
+    for t in trials:
+        if t.pipeline_version is None:
+            t.pipeline_version = exp.pipeline_version
     exp.trial_store.register_all(trials)
     return [t.name for t in trials]
 

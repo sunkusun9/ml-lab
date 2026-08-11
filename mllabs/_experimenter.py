@@ -65,7 +65,8 @@ def _stop_native_redirect(state):
     sys.stdout = state['orig_stdout']
     sys.stderr = state['orig_stderr']
     state['log_f'].close()
-from ._common import resolve_common_status, require_built_pipeline, error_payload
+from ._common import (resolve_common_status, require_built_pipeline,
+                      require_published_pipeline, error_payload)
 from ._pipeline import Pipeline
 
 
@@ -354,7 +355,7 @@ class Experimenter():
             self.close_os_log()
 
     def set_pipeline(self, pipeline):
-        """Adopt an already-loaded Pipeline, published or still a draft.
+        """Adopt an already-loaded Pipeline. It must be a published version.
 
         Takes the Pipeline object directly rather than a version number —
         this class has no way to load one by version itself (see the class
@@ -363,9 +364,13 @@ class Experimenter():
         *pipeline* (its ``.version``), so it's never tracked as a separate,
         possibly-diverging value.
 
-        Any status is accepted, unlike ``Trainer.set_pipeline``. Experimenting
-        against a definition still being edited is the point of experimenting;
-        it is training that has to be able to say what it trained on.
+        The same gate as ``Trainer.set_pipeline``, and any published version
+        passes. This used to accept a draft too, on the grounds that
+        experimenting against a definition under edit is the point of
+        experimenting — but a Trial carries the version it was authored
+        against and is refused unless this Experimenter holds it, and an
+        adopted draft holds nothing to compare with. Publishing costs nothing
+        anyway: an unchanged definition builds to the number it already has.
 
         The Pipeline is written to this Experimenter's own ``pipeline.pkl``,
         which is what the constructor reads back — reopening needs only this
@@ -383,11 +388,16 @@ class Experimenter():
         explicit action.
 
         Args:
-            pipeline (Pipeline): Already-built, already-loaded Pipeline.
+            pipeline (Pipeline): Already-built, already-published Pipeline.
 
         Returns:
             Pipeline: *pipeline*, unchanged.
+
+        Raises:
+            ValueError: If *pipeline* is a draft.
         """
+        require_built_pipeline(pipeline)
+        require_published_pipeline(pipeline)
         stale = self.stale_nodes(pipeline)
         if stale:
             self.reset_nodes(stale)
@@ -841,8 +851,23 @@ class Experimenter():
         name that has succeeded before. Rerunning one is
         :meth:`remove_trial_result` and nothing else.
 
+        A Trial defined against another Pipeline version is then refused rather
+        than run. Its outcome would be filed under a definition it never ran
+        on, and collected results are keyed by node name and fold with no
+        version in them at all, so two versions of one name would overwrite
+        each other's metrics with nothing to say which won.
+
+        **The version is checked only where a job would be created.** A name
+        with every fold already built produces nothing to file, so it passes
+        quietly however far the pipeline has moved on — which is what keeps
+        "hand back the same names and an interrupted pass continues" true.
+        Refusing there would make re-running a finished round an error instead
+        of a no-op. A name with *some* folds left is still refused: that is
+        exactly where new results would land beside old ones.
+
         The definition, its spec and its GPU verdict are resolved once per
-        name, not once per fold.
+        name, not once per fold — and not at all for a name with nothing left
+        to run.
         """
         from ._executor import Job
         from .adapter import resolve_node_adapter
@@ -867,14 +892,24 @@ class Experimenter():
                     f"Trial '{name}' is not registered. Add it with "
                     f"project.set_trial(trial) before running it."
                 )
+            status = trial_store.get_status(name, self.name)
+            pending = [f for f in folds if status.get(f) != 'built']
+            if not pending:
+                continue
+            if trial.pipeline_version != self.pipeline_version:
+                raise ValueError(
+                    f"Trial '{name}' is defined against pipeline version "
+                    f"{trial.pipeline_version}, and this Experimenter has "
+                    f"adopted version {self.pipeline_version}. Its results "
+                    f"would describe a definition it did not run on. Adopt "
+                    f"that version here, or author the Trial under a new name "
+                    f"against this one."
+                )
             spec = trial.get_spec()
             adapter = resolve_node_adapter(spec.processor, spec.adapter)
             need_gpu = adapter.get_gpu_usage(spec.params) != GPU_NO
-            status = trial_store.get_status(name, self.name)
 
-            for outer_idx, inner_idx in folds:
-                if status.get((outer_idx, inner_idx)) == 'built':
-                    continue
+            for outer_idx, inner_idx in pending:
                 flow = self.outer_folds[outer_idx].train_data_flows[inner_idx]
                 jobs.append(Job(name, spec, outer_idx, inner_idx, flow,
                                 need_gpu=need_gpu))

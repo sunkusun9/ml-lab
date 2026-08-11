@@ -39,14 +39,20 @@ class Predictor:
         src_trial (str): Name of the Trial this was promoted from, if any.
         src_experimenter (str): Name of the Experimenter that evaluated
             ``src_trial``, if known.
+        pipeline_version (int | None): The Pipeline version this is defined
+            against — copied from the Trial by :meth:`from_trial`, so a
+            promoted Predictor requires the version its candidate was actually
+            evaluated on. ``None`` means unstamped, which ``Trainer.train``
+            resolves to the version that Trainer has adopted.
     """
 
     __slots__ = ('name', 'processor', 'method', 'adapter', 'params', 'edges',
-                 'desc', 'tag', 'src_trial', 'src_experimenter')
+                 'desc', 'tag', 'src_trial', 'src_experimenter',
+                 'pipeline_version')
 
     def __init__(self, name, processor, edges, method='predict', adapter=None,
                  params=None, desc=None, tag=None, src_trial=None,
-                 src_experimenter=None):
+                 src_experimenter=None, pipeline_version=None):
         self.name = name
         self.processor = processor
         self.edges = dict(edges or {})
@@ -57,6 +63,7 @@ class Predictor:
         self.tag = list(tag or [])
         self.src_trial = src_trial
         self.src_experimenter = src_experimenter
+        self.pipeline_version = pipeline_version
 
     @classmethod
     def from_trial(cls, trial, name=None, experimenter=None):
@@ -65,6 +72,13 @@ class Predictor:
         The execution definition is copied verbatim — the promoted Predictor
         trains exactly what was evaluated — and the Trial's name is recorded
         as ``src_trial`` even when *name* overrides the Predictor's own.
+
+        ``pipeline_version`` is part of that verbatim copy, so the Predictor
+        requires the version its candidate was evaluated against and
+        ``Trainer.train`` refuses to train it under any other. Adopt that
+        version in the Trainer — every published version is adoptable, and
+        nothing else would be training what was actually measured. No separate
+        provenance field records it, because this one already does.
 
         Args:
             trial (Trial): The evaluated candidate to promote.
@@ -87,6 +101,7 @@ class Predictor:
             tag=list(trial.tag),
             src_trial=trial.name,
             src_experimenter=experimenter,
+            pipeline_version=trial.pipeline_version,
         )
 
     def get_spec(self):

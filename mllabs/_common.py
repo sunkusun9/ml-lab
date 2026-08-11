@@ -47,21 +47,26 @@ def require_built_pipeline(pipeline):
         raise TypeError(f"Expected a Pipeline, got {type(pipeline).__name__}")
 
 
-def require_frozen_pipeline(pipeline):
-    """Raise unless *pipeline* is a published or archived version.
+def require_published_pipeline(pipeline):
+    """Raise unless *pipeline* is a stored version.
 
-    The Trainer-side gate. Both frozen statuses pass: what matters is that the
-    definition cannot change under what was trained against it, and an archived
-    version is as fixed as the published one. Only the working copy is refused.
+    The adoption gate, shared by Experimenter and Trainer. Any published
+    version passes — the newest and the oldest answer "what did this run
+    against" equally well, and nothing demotes one.
+
+    What is refused is a draft. It carries no number, so a run that adopted it
+    could not say what it ran against, and a Trial or Predictor could not be
+    checked against it at all. A draft is for looking at a definition, not for
+    running one.
     """
-    from ._pipeline_store import OPEN
+    from ._pipeline_store import PUBLISHED
 
-    if pipeline.status == OPEN:
+    if pipeline.status != PUBLISHED:
         raise ValueError(
-            "This Pipeline is the working copy, which is still editable, so "
-            "nothing could later name what was trained against it. It has no "
-            "version because its builder has no db to mint one from — build it "
-            "from a builder that has one (project.pipeline)."
+            "This Pipeline is a draft, so it carries no version and nothing "
+            "that ran against it could name what that was. Publish it with "
+            "build() on a builder that has a db (project.pipeline), or adopt "
+            "a stored version with project.load_pipeline(version)."
         )
 
 

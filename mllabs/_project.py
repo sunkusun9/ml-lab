@@ -33,9 +33,9 @@ class Project:
           trials.db           TrialStore (definitions + execution history)
           data.pkl            the dataset everything here is built against
           aug_data.pkl        data appended to inner train splits, if any
-          pipeline/           pipeline.db — the working copy, i.e. the open
-                               version — plus v{n}.pkl and v{n}_builder.pkl
-                               per published version
+          pipeline/           pipeline.db — the working copy, which is the
+                               builder itself and never a version — plus
+                               v{n}.pkl and v{n}_builder.pkl per published one
           exp/{name}/         Experimenter — its own store, Pipeline copy,
                                NodeStore and Collectors, all self-contained
           trainers/{name}/    Trainer (same, own NodeStore)
@@ -246,9 +246,9 @@ class Project:
         """Add a new Trainer named *name*, under ``{project}/trainers/{name}``.
 
         Same shape as :meth:`add_experimenter`, and the same rule: a taken name
-        raises. *pipeline_version* defaults the same way too — the published
-        version, which is frozen and so is exactly what a Trainer is allowed to
-        adopt. What it refuses is the working copy, and this never hands it one.
+        raises. *pipeline_version* defaults the same way too — the latest
+        published version. Any published version is adoptable, and this never
+        hands over a draft, which is the one thing ``set_pipeline`` refuses.
         """
         from ._trainer import Trainer
         from ._trainer_store import TrainerStore
@@ -354,6 +354,18 @@ class Project:
         and be two. Changing such a Trial means either a new name, or
         :meth:`remove_trial` to give up the results with it.
 
+        **The version is stamped here.** A Trial with no ``pipeline_version``
+        gets the latest published one, this being the only place that both
+        knows the registry and owns the definition. Pass one explicitly to
+        author against an older version; it has to exist, since a number no
+        version answers to would be refused by every Experimenter with nothing
+        to say why.
+
+        Stamping interacts with the freeze on purpose: after the pipeline moves
+        on, re-registering a name that already succeeded is a changed
+        definition, so it raises instead of quietly re-pointing results at a
+        version that did not produce them. Give it a new name.
+
         Args:
             trial (Trial): Definition to store.
 
@@ -365,7 +377,8 @@ class Project:
         Raises:
             ValueError: If the name has a ``'built'`` fold in
                 ``experiment_hist`` and the definition differs from the
-                stored one.
+                stored one, or if *trial* names a version this project has
+                never published.
         """
         changed = self.set_trials([trial])
         return changed[0] if changed else None
@@ -375,8 +388,12 @@ class Project:
 
         Nothing is written until every Trial has been checked, so a batch
         holding one frozen name changes nothing at all rather than leaving
-        half of itself registered.
+        half of itself registered. Stamping comes first for the same reason —
+        an unstamped Trial and the stored one differ in a field, so comparing
+        before stamping would call every Trial changed.
         """
+        for trial in trials:
+            self._stamp_version(trial)
         changed = [t for t in trials if not self.trials.has(t)]
         for trial in changed:
             built = self.trials.get_hist(trial_name=trial.name, status='built')
@@ -390,6 +407,24 @@ class Project:
                 )
         self.trials.register_all(changed)
         return [t.name for t in changed]
+
+    def _stamp_version(self, trial):
+        """Fill in *trial*'s ``pipeline_version``, or check the one it brought.
+
+        Mutates the Trial rather than storing a resolved copy, so the object
+        the caller still holds says the same thing the row does — the two would
+        otherwise disagree about which version the Trial runs on.
+        """
+        if trial.pipeline_version is None:
+            trial.pipeline_version = self.load_pipeline().version
+            return
+        known = {r['version'] for r in self.list_pipeline_versions()}
+        if trial.pipeline_version not in known:
+            raise ValueError(
+                f"Trial '{trial.name}' names pipeline version "
+                f"{trial.pipeline_version}, which this project has not "
+                f"published. Published versions: {sorted(known)}."
+            )
 
     def error_trials(self, experimenter=None):
         """Failed folds of Trial execution, one dict each.
@@ -501,12 +536,11 @@ class Project:
         Delegates to ``Experimenter.stale_nodes``, the same code ``set_pipeline``
         resets by — a preview of the real thing, not a second opinion about it.
 
-        Defaults to the working copy, built through ``pipeline.copy()`` so the
-        snapshot has no db and :meth:`PipelineBuilder.build` mints nothing.
-        Asking what an edit would cost must not be what commits the edit: a
-        published version demotes the previous one, and ``add_experimenter`` /
-        ``add_trainer`` take published by default, so a mere preview would
-        change what the next call adopts.
+        Defaults to the working copy as a :meth:`PipelineBuilder.draft`, which
+        is a snapshot and not a publication. Asking what an edit would cost must
+        not be what commits the edit: ``add_experimenter`` / ``add_trainer``
+        adopt the latest version by default, so a mere preview would change what
+        the next call adopts.
 
         Pipeline nodes only. A Trial is never reset by adoption — its
         ``experiment_hist`` row records the version it ran against and stays a
@@ -525,7 +559,7 @@ class Project:
             Experimenter the change does not touch.
         """
         if pipeline is None:
-            pipeline = self.pipeline.copy().build()
+            pipeline = self.pipeline.draft()
         return {name: self.experimenters[name].stale_nodes(pipeline)
                 for name in self._experimenter_names(experimenter)}
 
@@ -572,7 +606,7 @@ class Project:
     # ------------------------------------------------------------------
 
     def load_pipeline(self, version=None):
-        """A frozen version by number; without one, the published (current) one.
+        """A published version by number; without one, the latest.
 
         A read, and only a read. It used to build :attr:`pipeline` when given
         no version, which publishes — so a call that reads like "load" minted a
@@ -589,9 +623,10 @@ class Project:
 
         Version 0 is what "this project has no pipeline yet" *is*, rather than
         an absence every caller has to handle. It is a real published row, so
-        :meth:`load_pipeline` never comes up empty, a Trainer can adopt it
-        (published is frozen — an empty definition has nothing to change under
-        it), and "exactly one published version" is true from the start.
+        :meth:`load_pipeline` never comes up empty and both an Experimenter and
+        a Trainer can adopt it — which they must, since only a published
+        version can be adopted and this is the one that exists before anything
+        is defined.
 
         Building an untouched working copy returns version 0 rather than
         minting: nothing was defined, so nothing was changed. Version 1 is the
@@ -605,16 +640,21 @@ class Project:
                       PipelineBuilder(), version=0)
 
     def list_pipeline_versions(self):
-        """Every frozen version: ``{version, status, path, builder_path}`` rows."""
+        """Every published version: ``{version, path, builder_path}`` rows.
+
+        No status among them: being listed here is what published means, and a
+        draft never reaches the store.
+        """
         return self._pipeline_store().list_versions()
 
     def remove_pipeline_version(self, version):
-        """Delete an archived version.
+        """Delete a published version. Not the latest one.
 
-        Archived only — the published version is the current definition and the
-        working copy is not a version at all. Nothing that ran against it
-        breaks: every Experimenter and Trainer holds its own Pipeline copy. What
-        is lost is what their provenance points at.
+        The latest is what :meth:`load_pipeline` and ``add_experimenter`` /
+        ``add_trainer`` resolve to when given no number, so removing it would
+        move that pointer silently. Any older one goes freely: nothing that ran
+        against it breaks, since every Experimenter and Trainer holds its own
+        Pipeline copy. What is lost is what their provenance points at.
         """
         self._pipeline_store().remove_version(version)
 

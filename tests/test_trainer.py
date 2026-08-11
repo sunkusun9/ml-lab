@@ -192,24 +192,25 @@ class TestSelection:
         assert (trainer.path / 'pipeline.pkl').exists()
         assert trainer._store.fetch()['pipeline_version'] == built.version
 
-    def test_it_refuses_the_working_copy(self, pipeline, sample_data, sp_v):
+    def test_it_refuses_a_draft(self, pipeline, sample_data, sp_v):
         """What a Trainer produces is what gets deployed, so it has to be able
-        to say what it trained against — and a builder with no db mints no
-        version, so its build stays editable and unnamed."""
+        to say what it trained against — and a draft carries no number to say
+        it with."""
         bare = PipelineBuilder()
         bare.set_datasource({'f1': 'numerical', 'f2': 'numerical',
                              'f3': 'numerical', 'target': 'binary'})
         trainer = _make_trainer(pipeline, sample_data, sp_v)
-        with pytest.raises(ValueError, match='working copy'):
-            trainer.set_pipeline(bare.build())
+        with pytest.raises(ValueError, match='draft'):
+            trainer.set_pipeline(bare.draft())
 
-    def test_an_archived_version_is_fine(self, pipeline, sample_data, sp_v):
-        """Frozen is what matters, not current — an older version answers
-        "what was this trained against" as well as the published one does."""
+    def test_an_older_version_is_fine(self, pipeline, sample_data, sp_v):
+        """Nothing is demoted, so an older version is as adoptable as the
+        newest — which is what training a Predictor evaluated against it needs."""
         first = pipeline.build()
         pipeline.set_node('scaler', grp='scale', edges={'X': '{f1}'}, exist='replace')
-        pipeline.build()
-        assert pipeline._store.get_status(first.version) == 'archived'
+        latest = pipeline.build()
+        assert latest.version != first.version
+        assert pipeline._store.get_status(first.version) == 'published'
 
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline._store.load_version(first.version))
@@ -400,6 +401,57 @@ class TestTrain:
         trainer.set_pipeline(pipeline.build())
         trainer.train()
         assert _build_ids(trainer, 'dt') == before
+
+
+class TestPredictorVersion:
+    """A Predictor is defined against a Pipeline version, like a Trial. What
+    differs is where the stamp comes from: a Trainer knows what it adopted, so
+    it fills its own in rather than asking a registry it cannot reach."""
+
+    def test_an_unstamped_predictor_takes_the_adopted_version(
+            self, pipeline, sample_data, sp_v):
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        version = pipeline.build().version
+        trainer.set_pipeline(pipeline.build())
+        trainer.train(_predictors())
+        assert trainer.predictor_defs.get_by_name('dt').pipeline_version == version
+
+    def test_from_trial_carries_the_trial_s_version(self):
+        """The version rides along with the rest of the definition, so a
+        promoted candidate requires what it was actually evaluated on."""
+        trial = Trial('dt', DT, DT_EDGES, params={'max_depth': 3},
+                      pipeline_version=1)
+        predictor = Predictor.from_trial(trial, experimenter='run_a')
+        assert predictor.pipeline_version == 1
+        assert (predictor.src_trial, predictor.src_experimenter) == ('dt', 'run_a')
+
+    def test_a_predictor_from_another_version_is_refused(
+            self, pipeline, sample_data, sp_v):
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        latest = pipeline.build()
+        trainer.set_pipeline(latest)
+        stale = _dt()
+        stale.pipeline_version = latest.version + 1
+        with pytest.raises(ValueError, match='never evaluated'):
+            trainer.train([stale])
+
+    def test_adopting_a_new_version_brings_the_predictors_along(
+            self, pipeline, sample_data, sp_v):
+        """Adopting is what says which definition this Trainer trains against.
+        Stranding them behind would leave the reset artifacts unrebuildable."""
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        trainer.train(_predictors())
+        assert trainer.predictor_defs.get_by_name('dt').pipeline_version == 1
+
+        pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+                         method='transform', edges={'X': '{f1, f2, f3}'},
+                         params={'with_std': False})
+        trainer.set_pipeline(pipeline.build())
+        assert trainer.pipeline_version == 2
+        assert trainer.predictor_defs.get_by_name('dt').pipeline_version == 2
+        trainer.train()
+        assert trainer.get_status('dt') == 'built'
 
 
 class TestPredictorStorage:
