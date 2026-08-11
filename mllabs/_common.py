@@ -77,22 +77,19 @@ def resolve_common_status(statuses):
     return statuses.pop() if len(statuses) == 1 else 'inconsistent'
 
 
-def format_errors(rows, traceback=False):
-    """``(name, outer_idx, inner_idx, info)`` rows as printable error lines.
+def error_payload(info):
+    """A history row's failure, flattened to ``type``/``message``/``traceback``.
 
-    Shared by the node-side and Trial-side reporters, which read different
-    stores but describe a failure the same way.
+    Shared by the node-side and Trial-side readers, which read different stores
+    but record a failure the same way — under ``info['error']``. A row with no
+    payload still answers, with ``None`` in every field, so the caller never has
+    to check whether the key was there.
 
-    Returns:
-        list[str] | None: One line per row, or ``None`` if there were none —
-        so an empty result reads as "nothing failed" at a glance.
+    Collection history is not one of these: ``CollectHist`` writes ``phase``
+    beside the same three fields and writes them at the top level, so it is
+    merged rather than dug out.
     """
-    errors = []
-    for name, outer_idx, inner_idx, info in rows:
-        err = (info or {}).get('error', {})
-        label = f"[{name}] fold {outer_idx}_{inner_idx}"
-        line = f"{label} {err.get('type')}: {err.get('message')}"
-        if traceback:
-            line += f"\n{err.get('traceback')}"
-        errors.append(line)
-    return errors or None
+    err = (info or {}).get('error', {})
+    return {'type': err.get('type'),
+            'message': err.get('message'),
+            'traceback': err.get('traceback')}

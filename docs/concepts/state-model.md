@@ -17,7 +17,7 @@ error ──► (reset_nodes) ──► init
 
 State is per node **per fold**. `get_status(name)` reports the state across all folds of a run.
 
-`built` is decided by the artifact on disk — the store simply checks whether `obj.pkl` exists. `error` never appears there, only in the run's history table, which is where `show_error_nodes()` and `get_node_error()` look.
+`built` is decided by the artifact on disk — the store simply checks whether `obj.pkl` exists. `error` never appears there, only in the run's history table, which is where `error_nodes()` and `get_node_error()` look.
 
 If an upstream node is in `error`, everything downstream fails without any explicit propagation logic — its inputs are simply missing.
 

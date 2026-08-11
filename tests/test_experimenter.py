@@ -612,6 +612,55 @@ class TestSetPipeline:
         assert flow.status('scaler') is None
 
 
+class TestStaleNodes:
+    """Adoption spends the answer — it derives staleness and turns it straight
+    into deletions — so before adopting is the only moment it can be read."""
+
+    def test_nothing_adopted_is_nothing_stale(self, tmp_path, sample_data, pipeline):
+        """The empty Pipeline means 'no prior definition', not 'nothing was
+        built'; diffing against it would name every node."""
+        e = Experimenter(path=tmp_path / 'fresh', name='e1', data=sample_data)
+        assert e.stale_nodes(pipeline.build()) == []
+
+    def test_unchanged_definition_is_nothing_stale(self, exp, pipeline):
+        _setup_stage(pipeline, exp)
+        exp.build()
+        assert exp.stale_nodes(pipeline.build()) == []
+
+    def test_changed_node_is_named(self, exp, pipeline):
+        _setup_stage(pipeline, exp)
+        exp.build()
+        pipeline.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+        assert exp.stale_nodes(pipeline.build()) == ['scaler']
+
+    def test_preview_is_exactly_what_adoption_resets(self, exp, pipeline):
+        """Why the two share one implementation: what the preview names is what
+        loses its artifact, with nothing else touched."""
+        _setup_stage(pipeline, exp)
+        exp.build()
+        flow = _flow(exp)
+        pipeline.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+        candidate = pipeline.build()
+
+        predicted = exp.stale_nodes(candidate)
+        assert predicted and all(flow.status(n) == 'built' for n in predicted)
+        exp.set_pipeline(candidate)
+        assert all(flow.status(n) is None for n in predicted)
+
+    def test_asking_changes_nothing(self, exp, pipeline):
+        _setup_stage(pipeline, exp)
+        exp.build()
+        adopted = exp.pipeline_version
+        pipeline.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+        exp.stale_nodes(pipeline.build())
+        assert exp.pipeline_version == adopted
+        assert _flow(exp).status('scaler') == 'built'
+
+    def test_builder_is_rejected(self, exp, pipeline):
+        with pytest.raises(TypeError, match='built Pipeline'):
+            exp.stale_nodes(pipeline)
+
+
 class TestSaveLoad:
     def test_load_restores(self, project, exp, pipeline, sample_data):
         _setup_stage(pipeline, exp)
