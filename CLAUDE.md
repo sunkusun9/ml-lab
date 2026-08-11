@@ -187,7 +187,7 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 
 - `Project(path, data=None, aug_data=None, cache_maxsize=4GB)` — `DataCache`를 소유하고 모든 Experimenter/Trainer가 공유
 - **데이터셋**: `data`/`aug_data` property(첫 접근에 `data.pkl`/`aug_data.pkl`에서 읽음 — 이름·이력 조회는 데이터를 안 건드림), `set_data(data)`/`set_aug_data(aug_data)`로 저장. 형식은 pkl(pandas/polars/cudf/numpy 다 되고 프로젝트가 이미 pipeline/splitter를 피클로 저장). 없으면 `_resolve_data`가 `ValueError`로 안내
-- 경로: `pipeline_path`(property), `exp_path(name)`, `trainer_path(name)`, `inferencer_path(name)` — **collector 경로 없음**(레지스트리는 Experimenter 소유)
+- 경로: `pipeline_path`(property), `exp_path(name)`, `trainer_path(name)` — **collector 경로 없음**(레지스트리는 Experimenter 소유), **inferencer 경로도 없음**(아래 "Inferencer는 프로젝트 밖")
 - **레지스트리**: `experimenters`/`trainers` — `{name: 객체}`. 접근할 때마다 `list_*()`를 훑어 **아직 안 들고 있는 이름만** 연다(그래서 데이터셋이 필요). `list_experimenters()`/`list_trainers()`는 이름만 답하는 싼 질문이라 별개로 남는다
   - **`add_*`가 만든 객체가 곧 레지스트리가 돌려주는 객체다** — "안 들고 있는 것만 연다"의 요점이 이것. 한 디렉토리에 살아있는 인스턴스가 둘이면 각자 자기 Collectors와 노드 캐시를 들고 있어서, 한쪽으로 가한 변경이 다른 쪽엔 안 보인다(`Project.pipeline`이 builder 하나를 고수하는 것과 같은 이유)
   - 그래서 "다 훑었나" 플래그가 없다 — dict는 **내가 든 것** 하나만 뜻하고, 접근당 비용은 sqlite 쿼리 하나
@@ -345,7 +345,7 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
   - `Job.flow`는 Predictor에도 **노드 flow**가 들어감(입력을 만드는 건 노드 그래프) — 아티팩트는 `predictor_store`로 간다. 노드 flow의 lazy 로드는 자기 store만 보므로 Predictor 모델은 거기 닿지 않고, 필요한 쪽(`process()`/`to_inferencer()`)이 `predictor_store`에서 직접 꺼낸다
 - `get_status(node_name)` / `get_node_error(node_name)`: `_store_for(name)`으로 두 store 중 하나를 골라 조회 — Predictor 에러도 기록됨
 - `process(data, v=None)`: generator, split마다 Predictor output을 `v`(DSL 문자열)로 필터 후 concat하여 yield. Predictor 모델은 노드 flow의 lazy 로드가 닿지 않는 store에 있으므로(그게 메모리에 안 딸려오게 하는 장치) `predictor_store`에서 꺼내 `flow.node_objs`에 직접 넣고, **edges는 정의에서 채운다** — 아티팩트에도 이 flow의 이력에도 없기 때문
-- `to_inferencer(v=None)`: 학습된 Processor를 추출하여 Inferencer 생성
+- `to_inferencer(v=None)`: 학습된 Processor를 추출하여 Inferencer 생성. `_trainer_spec()`(문자열/원시값 dict)을 출처로 찍어 넣음
 - `reset_nodes(nodes)`: 하위 종속 노드 포함 초기화. Predictor는 leaf라 그래프 캐스케이드 대상이 아니지만, 리셋된 노드를 읽는 Predictor는 `node_names()` 교집합으로 같이 리셋됨
 - 저장/로드: `save()`(meta + splits를 `_store`에 기록), 복원은 `Trainer.load_trainer()`. Pipeline은 `{path}/pipeline.pkl`, splitter/split_indices는 `__trainer.db`의 splits BLOB, **Predictor는 `predictor_defs`에서** 복원
 
@@ -368,13 +368,28 @@ predictors(name PK, desc, processor, method, adapter, params, edges, tag,
 - `ArtifactStore`를 상속하지 않음 — 아티팩트도 이력도 안 갖는 순수 정의 레지스트리
 
 ### Inferencer (`_inferencer.py`)
-- 생성자: `(node_specs, selected_nodes, selected_predictors, n_splits, node_objs, v=None)`
+- 생성자: `(node_specs, selected_nodes, selected_predictors, n_splits, node_objs, v=None, trainer_spec=None)`
 - **Pipeline 의존성 없음** — `node_specs`(`{name: ProcessorSpec}`)만 보유. 실제로 필요한 건 `spec.edges`뿐이라 배포 아티팩트가 가볍다
 - `node_objs`: `{name: [processor_split0, processor_split1, ...]}` — Processor 리스트 (Trainer 독립)
+- **`trainer_spec`**: 출처 — `{name, pipeline_version, n_splits, splitter, splitter_params}`. `Trainer.to_inferencer()`가 `_trainer_spec()`으로 찍어 넣고, 없으면 `None`
+  - **문자열과 원시값만** 담는다(`splitter`는 `_obj_to_ref`로 ref 문자열, `splitter_params`는 `serialize_value`). 프로젝트를 떠나는 유일한 아티팩트라 "어느 Trainer가 어느 pipeline 버전으로 냈나"를 자기가 말할 수 있어야 하는데, 그러자고 Trainer나 splitter 객체를 싣고 다니면 배포 쪽이 프로젝트를 끌고 들어온다
+  - `node_specs`가 **무엇을 하는가**를 말하고 이건 **어디서 왔는가**를 말한다 — 스펙만으로는 되짚을 수 없는 절반
+  - `split_indices`는 안 담는다 — 원시값이지만 행 수만큼의 배열이라 스펙이 아니라 데이터다
 - `process(data, agg='mean', nodes=None)`: split 결과 자동 집계 (`nodes`는 Predictor 이름 필터)
   - `agg`: `'mean'`/`'mode'`/callable/`None`(list 반환). 단일 split이면 집계 없이 반환
   - `nodes`: str/list — 출력할 노드 선택 (None=전체). 미등록 노드 지정 시 ValueError
-- 저장/로드: `save(path)`, `load(cls, path)` — 단일 `__inferencer.pkl`에 node_objs 포함
+- 저장/로드: `save(path)`, `load(cls, path)` — 단일 `__inferencer.pkl`에 node_objs 포함. `load`는 `trainer_spec`을 `.get()`으로 읽어 provenance 이전에 쓴 피클도 그대로 열린다
+
+#### Inferencer는 프로젝트 밖
+**Project엔 Inferencer의 경로도, 팩토리도, 로더도, 색인도 없다.** Experimenter/Trainer가 전부 갖는 쌍을
+여기만 안 갖는 건 누락이 아니라 판단이다 — 무엇을 저장할지는 이 코드베이스에서 **재구성 비용**으로 갈린다
+(노드는 다시 fit하는 게 비싸서 `obj.pkl`을 남기고, Trial은 남길 가치가 있는 게 모델이 아니라 결과라 아무것도 안 남긴다).
+`to_inferencer()`는 fit이 없다 — `predictor_store`/`node_store`에서 obj를 읽고 스펙을 모으는 재조립일 뿐이라,
+프로젝트가 이걸 또 저장하면 이미 durable한 데이터의 두 번째 사본이 생기고 그 둘이 어긋날 수 있는 상태만 새로 생긴다.
+
+- 필요할 때 Trainer에서 뽑고, 피클을 어디 둘지는 **사용자의 몫**이다(`inf.save(path)` / `Inferencer.load(path)`)
+- 그래서 provenance가 색인이 아니라 `trainer_spec`으로 아티팩트 **안에** 있다 — 저장을 관리하지 않으니 매달 행이 없고,
+  배포된 파일이 프로젝트에서 떨어져 나간 뒤에도 자기 출처를 말할 수 있어야 하는 건 그쪽이다
 
 ### Connector (`_connector.py`)
 - `__init__(node_query=None, edges=None, processor=None)` — 3요소 선택적 매칭. `role` 같은 노드/Trial 구분 파라미터는 없다(Collector가 Trial job에만 붙으므로 걸러야 할 대상 자체가 없음)
@@ -763,8 +778,7 @@ v0 (생성 시 자동, 빈 Pipeline)
       __predictors.db               #   PredictorStore (정의만)
       {split_idx}/0/{name}/         #   Predictor obj.pkl / result.pkl
 
-  inferencers/{name}/
-    __inferencer.pkl                # node_specs, selected_nodes/predictors, n_splits, node_objs, v
+  # Inferencer는 여기 없다 — 프로젝트가 저장을 관리하지 않는다("Inferencer는 프로젝트 밖" 참조)
 ```
 - **Experimenter/Trainer는 각자 `pipeline.pkl` 사본을 소유한다** — 자기 디렉토리만으로 재개 가능한 것이 목적. `pipeline_version`은 **provenance**로만 남는다(이 사본이 어느 버전에서 왔는지)
   - 실제 I/O는 `_common.save_pipeline`/`load_pipeline` 한 곳. Experimenter는 `ExperimenterStore`를 통해, Trainer는 직접 호출

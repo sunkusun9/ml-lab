@@ -148,9 +148,6 @@ class Project:
     def trainer_path(self, name):
         return self._sub('trainers', name)
 
-    def inferencer_path(self, name):
-        return self._sub('inferencers', name)
-
     def _sub(self, kind, name):
         p = self.path / kind / name
         p.mkdir(parents=True, exist_ok=True)

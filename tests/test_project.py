@@ -60,8 +60,13 @@ class TestProjectLayout:
 
     def test_paths_are_under_root(self, project):
         for path in (project.pipeline_path, project.exp_path('b'),
-                     project.trainer_path('c'), project.inferencer_path('d')):
+                     project.trainer_path('c')):
             assert project.path in path.parents or path.parent == project.path
+
+    def test_no_inferencer_path(self, project):
+        """An Inferencer is reassembled from the Trainer on demand, so the
+        project neither stores one nor owns a path for it."""
+        assert not hasattr(project, 'inferencer_path')
 
     def test_paths_are_created(self, project):
         assert project.exp_path('r1').is_dir()
