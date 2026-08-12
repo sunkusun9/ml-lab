@@ -37,7 +37,7 @@ Project(path, data, aug_data, cache_maxsize)   경로·데이터·캐시 소유 
   │         └─ CollectHist          수집 이력 (이 Experimenter만)
   └─ trainers{name: Trainer}        전체 데이터 학습 (trainers/{name}/) — Predictor를 학습
        ├─ TrainerStore              meta + splits + pipeline.pkl (이 Trainer만)
-       ├─ PredictorStore            Predictor 정의 (이 Trainer만 — 비교할 일이 없어서)
+       ├─ PredictorStore            Predictor 정의 + 상태 (이 Trainer만 — 비교할 일이 없어서)
        └─ to_inferencer() ──► Inferencer
 ```
 **경계**: Experimenter/Trainer 하나에 대한 것(splitter, 채택한 Pipeline, 아티팩트/이력, Collector,
@@ -52,7 +52,7 @@ Project(path, data, aug_data, cache_maxsize)   경로·데이터·캐시 소유 
 - **Trial / make_trials** (`_trial.py`): 평가할 구성 하나. Pipeline 밖에 있음
 - **TrialStore** (`_trial_store.py`): `trials`(정의) + `experiment_hist`(fold별 실행 이력). 저작은 `Project.set_trial`, 실행은 `Experimenter.exp`가 **이름으로** 꺼내 씀
 - **Predictor** (`_predictor.py`): Trainer가 학습하는 끝지점 출력 노드. Trial과 같은 실행 정의 + 출처(`src_trial`/`src_experimenter`)
-- **PredictorStore** (`_predictor_store.py`): `predictors`(정의) 하나뿐 — 이력은 Trainer의 두 번째 `NodeStore`가 가짐
+- **PredictorStore** (`_predictor_store.py`): `predictors`(정의 + `status`) 하나뿐 — fold별 이력은 Trainer의 두 번째 `NodeStore`가 가짐
 - **ProjectStore** (`_project_store.py`): `experimenters`/`trainers` **이름 목록만**
 - **ExperimenterStore / TrainerStore** (`_experimenter_store.py`, `_trainer_store.py`): Experimenter/Trainer 하나 전용 상태(meta + splitter BLOB + `pipeline.pkl`)
 - **Experimenter** (`_experimenter.py`): CV 실험 실행/관리. 생성자=신규, 복원=`load_experimenter()`
@@ -73,7 +73,9 @@ Project(path, data, aug_data, cache_maxsize)   경로·데이터·캐시 소유 
 | **built** | O | 빌드 완료, 결과 추출 가능 |
 | **error** | info only | 실행 중 에러 발생, 내역 보존 |
 
-Disk 칸은 **노드(와 Trainer의 Predictor)** 얘기다 — Trial은 아래 참조
+Disk 칸은 **노드** 얘기다 — Trial은 아래 참조, Predictor는 상태가 하나 더 있다
+
+**Predictor는 4-state**: `init`(등록됐고 아직 안 끝난 split이 있음) / `trained`(전 split built — `to_inferencer()`가 실을 수 있는 것) / `retired`(버전 스위치가 끝냄, terminal) / `error`(한 fold라도 실패면 에러). `predictors` 테이블의 `status` 컬럼에 있고, 셋은 디스크에서 복원되지만 **`retired`는 안 된다** — 폐기가 남기는 모양(아티팩트 없음 + 이력 행 있음)이 reset이 남기는 것과 같아서
 
 - 중간 상태(finalize)는 없다. 아티팩트를 없애는 방법은 `reset_nodes()`(완전 삭제, `init`으로 복귀) 하나뿐
 - **Experimenter엔 상태 게이트가 없다** — `open`/`close`/`status` 개념 자체가 없고 `build()`/`exp()`는 언제나 호출 가능
@@ -201,6 +203,11 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 - **`remove_experimenter(name)` / `remove_trainer(name)`**: 디렉토리 삭제 + 색인 해제 + 레지스트리에서 제거. **Experimenter는 `experiment_hist` 행까지** 지운다 — 이름이 그 이력의 키라서, 남겨두면 다음에 같은 이름으로 추가한 것이 물려받고 `exp()`가 돌린 적 없는 fold를 건너뛴다. Trial *정의*는 프로젝트 소유라 안 건드림. Trainer는 프로젝트 전역 이력이 없어 디렉토리뿐
   - 디스크 밖에 남는 것: 그 Experimenter/Trainer의 `DataCache` 항목(scope가 랜덤 id라 도달 불가능한 채 LRU에서 밀릴 때까지 남음), 이미 손에 든 파이썬 객체
 - **Pipeline**: `pipeline` property(프로젝트당 하나인 `PipelineBuilder`, 두 번 물어도 같은 객체 — 한 db 위의 두 사본이 갈라지지 않게). `load_pipeline(version=None)`, `list_pipeline_versions()`, `remove_pipeline_version(version)`. 버전 lifecycle은 아래 "Pipeline 버전" 섹션
+- **`publish_pipeline(experimenters=True, trainers=False, dry_run=False)`**: 빌드 + 채택 전파 + 비용 보고. **순서가 존재 이유다** — `set_trial`은 최신 published를 찍고, 채택이 Experimenter에게 대조할 버전을 주고, `exp()`는 스탬프≠채택버전을 거절한다. 빌드만 하고 전파를 안 하면 다음에 저작한 Trial이 아무도 안 든 버전을 달게 되고, 그게 `exp()`에서 거절로 튀어나온다(원인에서 멀리 떨어진 자리). 이 순서는 여러 Experimenter/Trainer에 걸쳐서 **여기 말고 살 데가 없다**
+  - **Trainer가 기본 제외인 이유**: 값이 다르다. Experimenter는 다음 `build()`가 다시 만드는 노드 아티팩트를 잃지만, Trainer 채택은 입력이 바뀐 Predictor를 **폐기**(terminal)한다. 작업 흐름도 실험 → 결과 확인 → Trainer 승격 순이라, 실험 중의 publish가 이미 학습된 것에 손댈 이유가 없다
+  - 뒤처진 Trainer가 방치되는 게 아니다 — 자기 `pipeline.pkl` 사본과 Predictor의 버전 스탬프를 들고 자기 버전에서 계속 돌고, 어긋나면 `train()`이 거절한다
+  - 반환이 버전 번호가 아닌 이유: 채택 후엔 물어볼 대상이 없다(아티팩트가 없고 staleness는 삭제에 소비됨). 노드 리셋과 Predictor 폐기를 **따로** 보고한다 — 같은 손실이 아니므로
+  - `dry_run`은 `build()`가 아니라 `draft()`를 쓴다 — 가격을 묻는 행위가 결제가 되면 안 되므로(`stale_nodes`와 같은 이유)
   - **`load_pipeline`은 읽기만 한다** — 버전을 주면 그 번호, 안 주면 최신(`MAX(version)`). 예전엔 인자가 없으면 working copy를 build했는데, 그건 publish라서 "load"라는 이름이 버전을 찍었고 Experimenter 추가도 덩달아 찍었다. 발급은 `build()` 한 곳에만 있다
 - `trials`: `TrialStore`, `store`: `ProjectStore`
 - **`set_trial(trial)` / `set_trials(trials)`**: Trial 저작 진입점. **실행과 분리된 이유** — Trial은 프로젝트 소유인데 등록이 `Experimenter.exp()`의 부수효과였다. 그래서 실행하지 않고는 프로젝트에 넣을 수 없었고, 한 Experimenter가 다른 Experimenter가 이미 쓴 이름을 조용히 덮을 수 있었다
@@ -215,7 +222,9 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   - **일부러 거칠다**: fold 일부만 돌다 끊긴 건 안 잡는다 — 그걸 판정하려면 fold 그리드와 대조해야 하는데 이 store는 그걸 모른다. 반환된 이름을 그냥 돌려도 안전하다(`exp()`가 끝난 fold를 건너뜀)
 - **`collect_errors(experimenter=None, collectors=None)`**: 수집 실패를 fold당 dict 하나로. 세 번째 에러 읽기이고(노드는 `Experimenter.error_nodes`, Trial은 위 `error_trials`), **유일하게 Experimenter를 거쳐야 읽는다** — Collector 이력은 레지스트리 소유고 레지스트리는 Experimenter별이라, 자기 store가 없어 `Experimenter.collect_errors`에 묻는다
   - 팬아웃하면서 **`experimenter` 키를 얹는다** — `collect_hist`엔 그 컬럼이 일부러 없고(어느 것이냐는 db가 어디 있느냐로 답한다), 여러 레지스트리를 가로지를 때만 필요해지는 값이라
-- **`stale_nodes(pipeline=None, experimenter=None)`**: 그 정의를 채택하면 어느 노드의 아티팩트가 날아가는지를 **채택 전에** 본다 → `{experimenter: [노드...]}`. `Experimenter.stale_nodes` 위임
+- **`stale_nodes(pipeline=None, experimenter=None, trainer=None)`**: 그 정의를 채택하면 어느 노드의 아티팩트가 날아가는지를 **채택 전에** 본다 → `{'experimenters': {name: [노드...]}, 'trainers': {name: [노드...]}}`. `Experimenter.stale_nodes`/`Trainer.stale_nodes` 위임
+  - **키가 나뉜 이유**: `exp/{name}`과 `trainers/{name}`은 별개 네임스페이스라 한 이름이 양쪽에 있을 수 있고, 평평한 dict면 둘 중 하나가 말없이 사라진다. 이름을 주면 준 것만 답하고 반대쪽은 빈 dict
+  - **양쪽 다 노드만 답한다 — Trainer에겐 과소평가다**: 채택은 Predictor 폐기도 일으키는데 그건 terminal이다. 전체 가격은 `publish_pipeline(dry_run=True, trainers=True)`
   - `pipeline=None`이면 **working copy**를 `self.pipeline.draft()`로 스냅샷 떠서 쓴다 — draft는 등록을 안 하므로 조회가 버전을 찍지 않는다. 찍으면 `add_experimenter`/`add_trainer`의 기본값이 최신이라 **미리보기가 다음 채택 대상을 바꿔버린다**
   - `load_pipeline()`을 넘기면 반대 방향 질문이 된다 — 각 Experimenter가 최신보다 얼마나 뒤처졌나
   - 노드 전용. Trial은 채택이 안 건드리므로 여기 안 나온다
@@ -367,7 +376,7 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
 - **`predictors`/`selected_nodes`는 property** — `predictors`는 `predictor_defs.list_predictors()`(상태로 안 들고 있음 → 리로드가 공짜), `selected_nodes`는 `_nodes_for(self.predictors)`로 매번 계산(Predictor가 없으면 전 노드)
 - `predictor_names()`, `predictor_specs()`
 - `train_folds`: `[TrainFold]` — split당 `TrainDataFlow` 하나
-- **`train(predictors=None, n_jobs=1, gpu_id_list=None, logger=None)`**: 넘긴 Predictor 중 `pipeline_version`이 `None`인 것은 **채택 버전으로 찍고**, 채택 버전과 다른 것은 `ValueError`. Trainer는 프로젝트를 몰라 "최신 published"를 못 구하지만 자기가 채택한 버전은 알고, 직접 저작한 Predictor는 곧 눈앞의 정의에 대한 것이라 그게 맞는 값이다. 그 다음 노드 먼저(위상 순서), 그 다음 Predictor `Job` 실행. 두 실행은 별개 executor 호출이라 각자 자기 store와 자기 `NodeInfoTracker`를 받음. skip 판정은 양쪽 다 디스크 기반(`store.status(name, split_idx, 0) == 'built'`) — **재정의는 그 자체로 재학습을 유발하지 않는다**(강제하려면 `reset_nodes([name])`)
+- **`train(predictors=None, n_jobs=1, gpu_id_list=None, logger=None)`**: 넘긴 Predictor 중 `pipeline_version`이 `None`인 것은 **채택 버전으로 찍고**, 채택 버전과 다른 것은 `ValueError` — **단 Job이 생기는 것에만** 걸린다(전 split이 built면 그 스탬프는 앞으로 돌릴 것에 대한 주장이 아니라 무엇이 그걸 만들었는지의 기록). `retired`인 것은 `predictors=None`이면 조용히 빠지고, 이름으로 지정하면 `ValueError`. Trainer는 프로젝트를 몰라 "최신 published"를 못 구하지만 자기가 채택한 버전은 알고, 직접 저작한 Predictor는 곧 눈앞의 정의에 대한 것이라 그게 맞는 값이다. 그 다음 노드 먼저(위상 순서), 그 다음 Predictor `Job` 실행. 두 실행은 별개 executor 호출이라 각자 자기 store와 자기 `NodeInfoTracker`를 받음. skip 판정은 양쪽 다 디스크 기반(`store.status(name, split_idx, 0) == 'built'`) — **재정의는 그 자체로 재학습을 유발하지 않는다**(강제하려면 `reset_nodes([name])`)
   - `predictors`는 `predictor_defs.register_all()`로 **upsert 등록**(replace 아님) — 이전 호출에서 학습한 Predictor의 정의와 아티팩트가 살아남는다. replace로 지우면 아티팩트만 남고 정의가 사라져 읽을 수 없게 됨
   - `predictors=None`이면 이미 등록된 것들을 그대로 이어서 학습(중단된 학습 재개)
   - `Trial`을 넘기면 `TypeError` — `Predictor.from_trial(trial, experimenter=)`로 명시 승격해야 출처가 기록됨
@@ -376,7 +385,14 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
 - `get_status(node_name)` / `get_node_error(node_name)`: `_store_for(name)`으로 두 store 중 하나를 골라 조회 — Predictor 에러도 기록됨
 - `process(data, v=None)`: generator, split마다 Predictor output을 `v`(DSL 문자열)로 필터 후 concat하여 yield. Predictor 모델은 노드 flow의 lazy 로드가 닿지 않는 store에 있으므로(그게 메모리에 안 딸려오게 하는 장치) `predictor_store`에서 꺼내 `flow.node_objs`에 직접 넣고, **edges는 정의에서 채운다** — 아티팩트에도 이 flow의 이력에도 없기 때문
 - `to_inferencer(v=None)`: 학습된 Processor를 추출하여 Inferencer 생성. `_trainer_spec()`(문자열/원시값 dict)을 출처로 찍어 넣음
-- `reset_nodes(nodes)`: 하위 종속 노드 포함 초기화. Predictor는 leaf라 그래프 캐스케이드 대상이 아니지만, 리셋된 노드를 읽는 Predictor는 `node_names()` 교집합으로 같이 리셋됨
+- **아티팩트가 사라지는 경로가 둘이고, 뜻이 반대다**:
+  - `reset_nodes(nodes)`: **초기화**. 하위 종속 노드 포함, 리셋된 노드를 읽는 Predictor도 같이. Pipeline 정의는 그대로라 그 Predictor는 같은 모델로 다시 학습된다 → `init`으로 복귀. 이미 `retired`인 건 안 건드림(재학습 요청은 부활이 아님)
+  - `set_pipeline(newer)`: **폐기**. 입력 노드 정의가 실제로 달라져 같은 모델을 못 만드므로 `retired`(terminal) — `train()`이 Job을 안 만들고, 이름으로 지정하면 `ValueError`
+  - 판정(`_reach_of`)과 삭제(`_drop_artifacts`)가 분리돼 있어 미리보기와 실제가 같은 traversal을 탄다
+- **`stale_nodes(pipeline)` / `retiring_predictors(pipeline)`**: 채택 전에 묻는 두 절반. `set_pipeline`이 후자를 실제로 호출하므로 미리보기가 실제와 갈라질 수 없다. 사후엔 답할 대상이 없음(아티팩트가 이미 없음)
+- **`_restamp_predictors(exclude)`**: 폐기를 면한 것만 채택 버전으로 옮긴다. 아티팩트가 살아남았다 = 읽는 노드가 두 버전에서 동일 정의 = 새 버전에서 학습해도 같은 모델이라 새 버전을 말해도 참. 폐기된 것은 실제로 학습된 버전을 계속 말한다
+- **`predictor_status(name)` / `predictor_statuses()`**: 상태 조회. `_observed_status`(디스크가 함의하는 상태 — 폐기는 여기서 절대 안 나옴)를 `train()` 끝에 `_sync_predictor_status`가 되쓴다
+- **`remove_predictor(name)` / `purge_retired()`**: 묘비 정리 — 정의+아티팩트+이력. 폐기가 셋을 다 남기므로(정의는 비문, 이력은 그 전에 뭐가 돌았는지) 걷어내는 건 별도 행위
 - 저장/로드: `save()`(meta + splits를 `_store`에 기록), 복원은 `Trainer.load_trainer()`. Pipeline은 `{path}/pipeline.pkl`, splitter/split_indices는 `__trainer.db`의 splits BLOB, **Predictor는 `predictor_defs`에서** 복원
 
 ### Predictor (`_predictor.py`)
@@ -390,11 +406,14 @@ Trainer가 학습하는 끝지점 출력 노드. `name`, `processor`, `method`, 
 ### PredictorStore (`_predictor_store.py`)
 ```sql
 predictors(name PK, desc, processor, method, adapter, params, edges, tag,
-           src_trial, src_experimenter, pipeline_version)
+           src_trial, src_experimenter, pipeline_version, status)
 ```
-- **정의만 있고 이력 테이블이 없다** — Predictor의 fold별 status/info는 그 Trainer의 `predictor_store`(`NodeStore`)의 `node_hist`에 아티팩트와 같이 있음. `TrialStore`가 두 절반을 다 갖는 것과 대비되는데, TrialStore는 프로젝트 전역이라 "어느 Experimenter가 돌렸나"를 답해야 하는 반면 여기는 store 자체가 이미 그 Trainer로 스코프돼 있어서
+- 상수는 이 모듈에: `INIT`/`TRAINED`/`RETIRED`/`ERROR`
+- **정의 + 생명주기 한 칸. 이력 테이블은 없다** — Predictor의 fold별 info는 그 Trainer의 `predictor_store`(`NodeStore`)의 `node_hist`에 아티팩트와 같이 있음. `TrialStore`가 두 절반을 다 갖는 것과 대비되는데, TrialStore는 프로젝트 전역이라 "어느 Experimenter가 돌렸나"를 답해야 하는 반면 여기는 store 자체가 이미 그 Trainer로 스코프돼 있어서
 - **Trainer별인 이유**: Trial은 **결과가 중심**이라 여러 Experimenter의 성적을 한곳에 모아 비교해야 한다. Predictor는 **아티팩트가 중심**이고 서로 비교할 일이 없다 — 답하는 질문이 "*이* Trainer가 뭘 학습하나"라서 프로젝트 레벨로 공유할 이유가 없음. `Trainer`가 `self.predictors`를 상태로 안 들고 이 store를 직접 읽는 property로 둔 근거이기도 함
-- `register`/`register_all`(upsert — `Trainer.train`이 쓰는 것)/`replace_all(predictors)`(통째 교체, 빠진 이름 삭제)/`remove(name)`/`has(predictor)`/`get_by_name(name)`/`list_predictors()`
+- **`status`가 예외인 이유**: 넷 중 셋은 디스크에서 복원되지만 `RETIRED`는 안 된다 — 폐기는 아티팩트를 지우고 이력 행은 남기는데, 그게 정확히 reset이 남기는 모양이라 디스크로는 둘을 못 가른다. 그리고 이 구분이 `_make_predictor_jobs`가 Job을 만들지 말지를 정하므로 캐시가 아니라 일을 한다
+- `register`/`register_all`(upsert — `Trainer.train`이 쓰는 것)/`replace_all(predictors)`(통째 교체, 빠진 이름 삭제)/`remove(name)`/`has(predictor)`/`get_by_name(name)`/`list_predictors()`/`set_status(name, status)`/`get_status(name)`/`list_status()`/`list_names(status=None)`
+  - `register`는 `INSERT OR REPLACE`가 아니라 **`ON CONFLICT DO UPDATE`** — 정의 필드만 쓰고 `status`는 건드리지 않는다. 아니면 `train()`의 재등록과 채택 후 restamp가 행을 다시 쓸 때마다 상태가 조용히 `init`으로 돌아간다. 상태는 `set_status`로만 바뀐다
 - `get_by_name`/`list_predictors`는 dict가 아니라 **`Predictor` 객체**를 반환(`TrialStore`와 다름) — `Trainer.predictors` property가 그대로 내놓기 때문
 - `ArtifactStore`를 상속하지 않음 — 아티팩트도 이력도 안 갖는 순수 정의 레지스트리
 
@@ -625,7 +644,9 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
 - **판정 시점은 `set_pipeline` 하나지만, 그 답은 채택 전에 미리 볼 수 있다** — `Experimenter.stale_nodes(pipeline)` / `Project.stale_nodes()`. `set_pipeline`이 그 메소드를 호출해서 지우므로 미리보기가 실제와 어긋나지 않는다. 사후 조회가 없는 게 아니라 **사후엔 답할 대상이 없다**(판정 즉시 지워짐)
 - **Trial은 캐스케이드하지 않는다**: Trial은 Pipeline 밖이라 diff가 이름을 모르고, stale 노드를 읽은 Trial도 건드리지 않는다 — `Experimenter.set_pipeline`은 stale 노드만 `reset_nodes`로 지우고 끝. 이력도 그대로 남는다. **버전 스탬프가 더하는 건 삭제가 아니라 정지다** — 새 버전을 채택하면 옛 버전 Trial들이 그냥 그 Experimenter에서 안 돌게 된다(`ValueError`). 결과는 그 버전에 대한 기록으로 보존되고, 다시 돌리려면 그 버전을 채택하거나 새 이름으로 저작해야 함
 - **Trial 자신의 재정의도 감지하지 않는다**: `Experimenter._make_jobs`는 (버전 대조를 통과한 뒤엔) 오직 `experiment_hist`의 fold별 status만 본다 — 재정의된 trial이 이미 `'built'`면 조용히 스킵되므로, 다시 돌리려면 `remove_trial_result(name)`을 직접 호출. 다만 성공 이력이 있는 이름의 재정의는 `Project.set_trial`이 막는다
-- **Predictor는 반대로 캐스케이드한다**: Trainer엔 보존할 "과거 실행" 개념이 없으므로, 바뀐 노드를 읽는 Predictor는 그냥 stale이다. `Trainer.reset_nodes`가 `predictor.node_names() & 리셋된_노드` 교집합으로 같이 지운다. Trial/Predictor를 별도 클래스로 둔 판단이 실제로 갈라지는 지점. 그리고 `set_pipeline`이 이어서 재스탬프하므로 지워진 아티팩트를 곧바로 다시 만들 수 있다
+- **Predictor는 폐기된다**: 바뀐 노드를 읽는 Predictor는 자기 모델을 만든 입력이 사라진 것이라, 채택이 그걸 남겨둘 수도 없고 다시 만들 수도 없다 → `retired`(terminal). `train()`이 Job을 안 만들고, 이름으로 지정하면 거절. 미리 물으려면 `Trainer.retiring_predictors(pipeline)`. Trial/Predictor를 별도 클래스로 둔 판단이 실제로 갈라지는 지점
+  - **`reset_nodes`와는 반대 동작이다** — 그쪽은 정의가 그대로라 같은 모델이 다시 나오므로 `init`으로 복귀시킨다. 지우는 파일은 같고 뜻이 정반대
+  - 폐기를 면한 Predictor만 `_restamp_predictors`가 새 버전으로 옮긴다(아티팩트가 살아남았다 = 읽는 노드가 두 버전에서 동일 정의)
 
 ## Trial/Predictor 버전 스탬프 — 정의가 자기 버전을 들고 다닌다
 `pipeline_version`은 이력 행에 붙는 메모가 아니라 **정의의 필드**다. 그래서
@@ -838,7 +859,7 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
     {split_idx}/0/{name}/           # 노드 obj.pkl / result.pkl
     __predictors/                   # Predictor는 별도 디렉토리
       __node_hist.db                #   Predictor용 NodeStore — 노드 것과 파일명이 같아 분리가 강제됨
-      __predictors.db               #   PredictorStore (정의만)
+      __predictors.db               #   PredictorStore (정의 + status)
       {split_idx}/0/{name}/         #   Predictor obj.pkl / result.pkl
 
   # Inferencer는 여기 없다 — 프로젝트가 저장을 관리하지 않는다("Inferencer는 프로젝트 밖" 참조)
