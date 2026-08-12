@@ -892,46 +892,69 @@ class TestStaleNodes:
     answer exists, since set_pipeline turns it straight into deletions."""
 
     @staticmethod
-    def _built_run(project, builder, sample_data, name='run_a'):
+    def _built_exp(project, builder, sample_data, name='run_a'):
         e = project.add_experimenter(name, sample_data, pipeline_version=builder.build().version)
         e.build()
         return e
 
     def test_untouched_working_copy_costs_nothing(self, project, builder, sample_data):
-        e = self._built_run(project, builder, sample_data)
-        assert project.stale_nodes() == {'run_a': []}
+        e = self._built_exp(project, builder, sample_data)
+        assert project.stale_nodes() == {'experimenters': {'run_a': []}, 'trainers': {}}
         assert e.get_status('scaler') == 'built'
 
     def test_edit_names_the_node_it_would_drop(self, project, builder, sample_data):
-        self._built_run(project, builder, sample_data)
+        self._built_exp(project, builder, sample_data)
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
-        assert project.stale_nodes() == {'run_a': ['scaler']}
+        assert project.stale_nodes()['experimenters'] == {'run_a': ['scaler']}
+
+    def test_trainers_answer_too(self, project, builder, sample_data):
+        """Under their own key: exp/{name} and trainers/{name} are separate
+        namespaces, so one flat mapping would drop a shared name silently."""
+        self._built_exp(project, builder, sample_data, 'shared')
+        project.add_trainer('shared', sample_data, pipeline_version=builder.build().version)
+        builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+
+        assert project.stale_nodes() == {
+            'experimenters': {'shared': ['scaler']},
+            'trainers': {'shared': ['scaler']},
+        }
 
     def test_asking_does_not_publish(self, project, builder, sample_data):
-        """The working copy is built through copy(), which has no db — a
-        preview that minted a version would demote the published one and
-        change what add_experimenter() adopts next."""
-        self._built_run(project, builder, sample_data)
+        """The working copy is built through draft(), which mints nothing — a
+        preview that minted a version would change what add_experimenter()
+        adopts next."""
+        self._built_exp(project, builder, sample_data)
         before = project.list_pipeline_versions()
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
         project.stale_nodes()
         assert project.list_pipeline_versions() == before
 
-    def test_narrowed_to_one_run(self, project, builder, sample_data):
-        self._built_run(project, builder, sample_data, 'run_a')
-        self._built_run(project, builder, sample_data, 'run_b')
+    def test_narrowed_to_one_experimenter(self, project, builder, sample_data):
+        """Naming one narrows to exactly that: the other side comes back empty
+        rather than quietly answering in full."""
+        self._built_exp(project, builder, sample_data, 'run_a')
+        self._built_exp(project, builder, sample_data, 'run_b')
+        project.add_trainer('t1', sample_data, pipeline_version=builder.build().version)
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
-        assert project.stale_nodes(experimenter='run_a') == {'run_a': ['scaler']}
+        assert project.stale_nodes(experimenter='run_a') == {
+            'experimenters': {'run_a': ['scaler']}, 'trainers': {}}
+
+    def test_narrowed_to_one_trainer(self, project, builder, sample_data):
+        self._built_exp(project, builder, sample_data, 'run_a')
+        project.add_trainer('t1', sample_data, pipeline_version=builder.build().version)
+        builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+        assert project.stale_nodes(trainer='t1') == {
+            'experimenters': {}, 'trainers': {'t1': ['scaler']}}
 
     def test_published_pipeline_asks_the_other_direction(self, project, builder, sample_data):
-        """How far behind a run is: it adopted v0, the project has since
-        published the node."""
+        """How far behind an Experimenter is: it adopted v0, the project has
+        since published the node."""
         e = project.add_experimenter('run_a', sample_data,
                                      pipeline_version=builder.build().version)
         e.build()
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
         builder.build()
-        assert project.stale_nodes(project.load_pipeline()) == {'run_a': ['scaler']}
+        assert project.stale_nodes(project.load_pipeline())['experimenters'] == {'run_a': ['scaler']}
 
 
 class TestPublishPipeline:

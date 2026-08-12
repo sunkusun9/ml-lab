@@ -530,11 +530,24 @@ class Project:
         return {name: self.experimenters[name].uncollected_trials(collectors)
                 for name in self._experimenter_names(experimenter)}
 
-    def stale_nodes(self, pipeline=None, experimenter=None):
-        """What adopting a definition would cost each Experimenter, before adopting.
+    def stale_nodes(self, pipeline=None, experimenter=None, trainer=None):
+        """What adopting a definition would cost, before adopting — both sides.
 
-        Delegates to ``Experimenter.stale_nodes``, the same code ``set_pipeline``
-        resets by — a preview of the real thing, not a second opinion about it.
+        Delegates to ``Experimenter.stale_nodes`` and ``Trainer.stale_nodes``,
+        the same code each ``set_pipeline`` resets by — a preview of the real
+        thing, not a second opinion about it.
+
+        The two are reported under separate keys rather than in one mapping
+        because ``exp/{name}`` and ``trainers/{name}`` are separate
+        namespaces: one name can exist in both, and a flat dict would drop
+        whichever came second without saying so.
+
+        **Nodes only, on both sides — and that understates a Trainer.** A
+        node named here comes back on the next ``build()`` / ``train()``,
+        whereas adopting also retires every Predictor whose inputs changed,
+        which is terminal. For the whole price of a publish, ask
+        ``publish_pipeline(dry_run=True, trainers=True)``; this stays about
+        nodes, as its name says.
 
         Defaults to the working copy as a :meth:`PipelineBuilder.draft`, which
         is a snapshot and not a publication. Asking what an edit would cost must
@@ -551,17 +564,31 @@ class Project:
                 working copy as it stands. Pass :meth:`load_pipeline` output
                 instead to ask the other direction — how far behind the
                 published definition each Experimenter is.
-            experimenter (str, optional): Ask only this one. ``None`` asks every
-                Experimenter in the project.
+            experimenter (str, optional): Ask only this Experimenter.
+            trainer (str, optional): Ask only this Trainer.
+
+        Naming either narrows to exactly what was named: with neither given
+        every Experimenter and Trainer answers, with one given the other side
+        comes back empty rather than silently answering in full.
 
         Returns:
-            dict: ``{experimenter_name: [node_name, ...]}``, empty list for an
-            Experimenter the change does not touch.
+            dict: ``{'experimenters': {name: [node...]},
+            'trainers': {name: [node...]}}``, an empty list for one the
+            change does not touch.
         """
         if pipeline is None:
             pipeline = self.pipeline.draft()
-        return {name: self.experimenters[name].stale_nodes(pipeline)
-                for name in self._experimenter_names(experimenter)}
+        named = experimenter is not None or trainer is not None
+        exp_names = ([experimenter] if experimenter is not None
+                     else ([] if named else self.list_experimenters()))
+        trainer_names = ([trainer] if trainer is not None
+                         else ([] if named else self.list_trainers()))
+        return {
+            'experimenters': {name: self.experimenters[name].stale_nodes(pipeline)
+                              for name in exp_names},
+            'trainers': {name: self.trainers[name].stale_nodes(pipeline)
+                         for name in trainer_names},
+        }
 
     def _experimenter_names(self, experimenter=None):
         return self.list_experimenters() if experimenter is None else [experimenter]
