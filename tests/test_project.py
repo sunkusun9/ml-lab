@@ -934,6 +934,84 @@ class TestStaleNodes:
         assert project.stale_nodes(project.load_pipeline()) == {'run_a': ['scaler']}
 
 
+class TestPublishPipeline:
+    """Build, propagate, report — one call, because the ordering it enforces
+    spans every Experimenter and no single one can see it."""
+
+    @staticmethod
+    def _built_exp(project, builder, sample_data, name='run_a'):
+        e = project.add_experimenter(name, sample_data, pipeline_version=builder.build().version)
+        e.build()
+        return e
+
+    def test_publishing_moves_the_experimenters_onto_the_new_version(
+            self, project, builder, sample_data):
+        e = self._built_exp(project, builder, sample_data)
+        builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+
+        report = project.publish_pipeline()
+        assert report['version'] == project.load_pipeline().version
+        assert e.pipeline_version == report['version']
+
+    def test_the_report_names_what_it_cost(self, project, builder, sample_data):
+        """Not just the number. Afterwards there is nothing left to ask —
+        the artifacts are gone and the staleness went into deleting them."""
+        e = self._built_exp(project, builder, sample_data)
+        builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+
+        report = project.publish_pipeline()
+        assert report['experimenters'] == {'run_a': ['scaler']}
+        assert e.get_status('scaler') is None
+
+    def test_an_unchanged_definition_moves_nothing(self, project, builder, sample_data):
+        e = self._built_exp(project, builder, sample_data)
+        before = project.list_pipeline_versions()
+
+        report = project.publish_pipeline()
+        assert project.list_pipeline_versions() == before
+        assert report['experimenters'] == {'run_a': []}
+        assert e.get_status('scaler') == 'built'
+
+    def test_a_dry_run_prices_it_without_publishing(self, project, builder, sample_data):
+        e = self._built_exp(project, builder, sample_data)
+        before = project.list_pipeline_versions()
+        builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+
+        report = project.publish_pipeline(dry_run=True)
+        assert report['version'] is None          # a draft carries no number
+        assert report['experimenters'] == {'run_a': ['scaler']}
+        assert project.list_pipeline_versions() == before
+        assert e.get_status('scaler') == 'built'  # adopted nothing
+
+    def test_trainers_stay_out_unless_asked_for(self, project, builder, sample_data):
+        """An Experimenter loses artifacts that rebuild; a Trainer loses
+        trained models for good. The default declines to spend the second."""
+        self._built_exp(project, builder, sample_data)
+        t = project.add_trainer('t1', sample_data, pipeline_version=builder.build().version)
+        builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+
+        report = project.publish_pipeline()
+        assert report['trainers'] == {}
+        assert t.pipeline_version == 1                    # left where it was
+        assert project.experimenters['run_a'].pipeline_version == report['version']
+
+        report = project.publish_pipeline(trainers=True)
+        # Names, not a claim that an artifact stood there — the same reading
+        # Experimenter.stale_nodes has.
+        assert report['trainers'] == {'t1': {'nodes': ['scaler'], 'retired': []}}
+        assert t.pipeline_version == report['version']
+
+    def test_experimenters_can_be_declined_too(self, project, builder, sample_data):
+        e = self._built_exp(project, builder, sample_data)
+        builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
+
+        report = project.publish_pipeline(experimenters=False)
+        assert report['experimenters'] == {}
+        assert e.get_status('scaler') == 'built'
+        assert e.pipeline_version == 1        # the version was still minted
+        assert project.load_pipeline().version == report['version']
+
+
 class TestPendingTrials:
     """Registered Trials that errored or never ran — one list, because both
     still owe a run. Hand-written, this filter tends to catch only the second

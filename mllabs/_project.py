@@ -618,6 +618,88 @@ class Project:
         """
         return self._pipeline_store().load_version(version)
 
+    def publish_pipeline(self, experimenters=True, trainers=False, dry_run=False):
+        """Build the working copy, move Experimenters and Trainers onto it, and
+        report what that cost.
+
+        The sequence this exists for is: build, propagate, *then* author. It
+        has to hold, because the pieces enforcing it are not the ones that
+        would notice it broken. :meth:`set_trial` stamps a Trial with the
+        latest published version, adopting is what gives an Experimenter a
+        version to compare against, and ``exp()`` refuses a stamp that is not
+        the adopted one. Build without propagating and the Trials authored
+        next carry a version nothing holds — which surfaces as a refusal at
+        ``exp()``, some distance from the omission that caused it. One call
+        spanning the project is the only place that ordering can live: an
+        Experimenter knows nothing of its siblings, and a store knows nothing
+        of either.
+
+        **Trainers stay out unless asked for.** The two sides do not pay the
+        same price. An Experimenter loses node artifacts, which the next
+        ``build()`` makes again. A Trainer loses trained models: adopting
+        retires every Predictor whose inputs changed, and retirement is
+        terminal. Work usually moves the other way round anyway — experiment,
+        read the results, then promote into a Trainer — so a publish during
+        experimentation should not reach into what has already been trained.
+
+        Leaving one behind strands nothing. A Trainer keeps its own Pipeline
+        copy and its Predictors carry the version they were trained against,
+        so it goes on working at the version it holds; ``train()`` refuses a
+        mismatch rather than quietly doing the wrong thing. Moving it forward
+        stays available as its own decision, here or through
+        ``trainer.set_pipeline(project.load_pipeline())``.
+
+        Building an unchanged definition returns the version it already has,
+        so calling this out of habit costs nothing and moves nothing.
+
+        What comes back is the cost, not just the number: afterwards there is
+        nothing left to ask, the artifacts being gone and the staleness
+        consumed in deciding to delete them. The two losses are reported
+        apart because they are not the same loss (see
+        :meth:`Trainer.retiring_predictors`).
+
+        Propagation is sequential and not atomic: if one raises, the ones
+        before it have already adopted. Repeating the call is the repair,
+        adoption being idempotent once the version is held.
+
+        Args:
+            experimenters (bool): Propagate to this project's Experimenters.
+                Default ``True``.
+            trainers (bool): Propagate to its Trainers. Default ``False`` —
+                see above. Left ``False``, they are neither adopted into nor
+                opened, and are absent from the report.
+            dry_run (bool): Report the cost and adopt nothing. Uses
+                :meth:`PipelineBuilder.draft` rather than building, so asking
+                what a publish would cost does not perform one — the same
+                reason :meth:`stale_nodes` does. Pair it with
+                ``trainers=True`` to price a Trainer before committing to it.
+
+        Returns:
+            dict: ``{'version', 'experimenters', 'trainers'}``, where
+            ``experimenters`` is ``{name: [node...]}`` and ``trainers`` is
+            ``{name: {'nodes': [...], 'retired': [...]}}``. ``version`` is
+            ``None`` for a dry run — a draft carries no number.
+        """
+        pipeline = self.pipeline.draft() if dry_run else self.pipeline.build()
+        selected_exps = self.experimenters if experimenters else {}
+        selected_trainers = self.trainers if trainers else {}
+
+        report = {
+            'version': pipeline.version,
+            'experimenters': {name: exp.stale_nodes(pipeline)
+                              for name, exp in selected_exps.items()},
+            'trainers': {name: {'nodes': t.stale_nodes(pipeline),
+                                'retired': t.retiring_predictors(pipeline)}
+                         for name, t in selected_trainers.items()},
+        }
+        if dry_run:
+            return report
+        for exp in selected_exps.values():
+            exp.set_pipeline(pipeline)
+        for trainer in selected_trainers.values():
+            trainer.set_pipeline(pipeline)
+        return report
+
     def _seed_base_version(self):
         """Publish the empty Pipeline as version 0, once, at creation.
 

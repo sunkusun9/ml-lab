@@ -273,6 +273,33 @@ class Trainer:
         self._restamp_predictors(exclude=retiring)
         return pipeline
 
+    def stale_nodes(self, pipeline):
+        """Pipeline nodes adopting *pipeline* would reset, sorted.
+
+        The node half of what a version switch costs;
+        :meth:`retiring_predictors` is the other. They are different kinds of
+        loss and are worth asking for separately — a node comes back on the
+        next :meth:`train`, a retired Predictor does not come back at all.
+
+        Same traversal :meth:`set_pipeline` acts on, so this is a preview
+        rather than a second opinion about it. The counterpart to
+        ``Experimenter.stale_nodes``, which a Trainer had no equivalent of.
+
+        Args:
+            pipeline (Pipeline): The version being considered.
+
+        Returns:
+            list[str]: Node names, sorted.
+        """
+        require_built_pipeline(pipeline)
+        if self.pipeline.is_empty:
+            return []
+        stale = pipeline.diff_from(self.pipeline)
+        if not stale:
+            return []
+        affected, predictor_names = self._reach_of(sorted(stale))
+        return sorted(affected - predictor_names)
+
     def retiring_predictors(self, pipeline):
         """Which Predictors adopting *pipeline* would retire, before adopting.
 
