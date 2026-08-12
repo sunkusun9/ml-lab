@@ -4,13 +4,24 @@ One table, ``predictors``, keyed by name — the same identity the artifacts
 use, so redefining a name overwrites its row exactly as it overwrites the
 artifact directory.
 
-Definitions only. A Predictor's per-split outcome (status, fit_time, error,
-...) is execution history and lives in the Trainer's predictor ``NodeStore``
-alongside the artifacts it describes, recorded by ``NodeInfoTracker`` the
-same way Pipeline nodes are. That split is why this store is much smaller
-than :class:`~mllabs.TrialStore`, which carries both halves: a TrialStore is
-project-wide and has to answer "which Experimenter ran this, and how did it
-go", whereas each Trainer's history is already scoped by being its own store.
+Definitions, plus one lifecycle field. A Predictor's per-split outcome
+(fit_time, error, which fold, ...) is execution history and lives in the
+Trainer's predictor ``NodeStore`` alongside the artifacts it describes,
+recorded by ``NodeInfoTracker`` the same way Pipeline nodes are. That split
+is why this store is much smaller than :class:`~mllabs.TrialStore`, which
+carries both halves: a TrialStore is project-wide and has to answer "which
+Experimenter ran this, and how did it go", whereas each Trainer's history is
+already scoped by being its own store.
+
+``status`` is the exception, and it earns the place. Three of its four values
+are recoverable from disk, but :data:`RETIRED` is not: retiring drops the
+artifacts and leaves the history rows standing, so what remains on disk is
+indistinguishable from a Predictor that was reset and is waiting to be
+trained. Retiring is an event that happened, not a fact still legible in what
+survives it, and the difference decides whether ``train()`` builds a Job.
+Keeping the other three here too costs a column and means one place answers
+"where does this Predictor stand" instead of a cross-reference only someone
+holding the convention can perform.
 
 Scoped per Trainer rather than per project for the same reason: what this
 answers is "what is *this* Trainer training", which is that Trainer's own
@@ -22,6 +33,17 @@ import sqlite3
 from pathlib import Path
 
 from ._predictor import Predictor
+
+#: Registered, with at least one split still to train.
+INIT = 'init'
+#: Every split built — this is what :meth:`Trainer.to_inferencer` can ship.
+TRAINED = 'trained'
+#: Ended by a Pipeline version switch its inputs did not survive. Terminal:
+#: no Job is ever built for it again. Wanting the same specification back
+#: means registering it afresh, under the version that can serve it.
+RETIRED = 'retired'
+#: At least one split failed. One bad fold is a bad Predictor.
+ERROR = 'error'
 
 _SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS predictors (
@@ -35,7 +57,8 @@ _SCHEMA_SQL = """
         tag              TEXT,
         src_trial        TEXT,
         src_experimenter TEXT,
-        pipeline_version INTEGER
+        pipeline_version INTEGER,
+        status           TEXT NOT NULL DEFAULT 'init'
     );
 """
 
@@ -56,18 +79,34 @@ class PredictorStore:
             conn.executescript(_SCHEMA_SQL)
 
     def register(self, predictor):
-        """Store *predictor*'s definition under its name."""
+        """Store *predictor*'s definition under its name.
+
+        An upsert that writes every definition field and leaves ``status``
+        alone, rather than ``INSERT OR REPLACE``, which would silently return
+        a Predictor to :data:`INIT` every time its row is rewritten —
+        including on ``Trainer.train``'s re-registration of what it was just
+        handed, and on the restamp that follows adopting a version. Status
+        changes only through :meth:`set_status`, where something decided it.
+        """
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO predictors "
+                "INSERT INTO predictors "
                 "(name, desc, processor, method, adapter, params, edges, tag, "
-                "src_trial, src_experimenter, pipeline_version) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "src_trial, src_experimenter, pipeline_version, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET "
+                "desc=excluded.desc, processor=excluded.processor, "
+                "method=excluded.method, adapter=excluded.adapter, "
+                "params=excluded.params, edges=excluded.edges, "
+                "tag=excluded.tag, src_trial=excluded.src_trial, "
+                "src_experimenter=excluded.src_experimenter, "
+                "pipeline_version=excluded.pipeline_version",
                 (predictor.name, predictor.desc, predictor.processor,
                  predictor.method, json.dumps(predictor.adapter),
                  json.dumps(predictor.params), json.dumps(predictor.edges),
                  json.dumps(predictor.tag), predictor.src_trial,
-                 predictor.src_experimenter, predictor.pipeline_version),
+                 predictor.src_experimenter, predictor.pipeline_version,
+                 INIT),
             )
 
     def register_all(self, predictors):
@@ -106,6 +145,36 @@ class PredictorStore:
                 and stored.params == predictor.params
                 and stored.edges == predictor.edges
                 and stored.pipeline_version == predictor.pipeline_version)
+
+    def set_status(self, name, status):
+        """Move *name* to *status*. No-op if the name is not stored."""
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute("UPDATE predictors SET status = ? WHERE name = ?",
+                         (status, name))
+
+    def get_status(self, name):
+        """Stored status for *name*, or ``None`` if it is not registered."""
+        with sqlite3.connect(str(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT status FROM predictors WHERE name = ?", (name,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def list_status(self):
+        """``{name: status}`` for every stored Predictor.
+
+        One query, so a caller deciding across the whole registry — which to
+        build Jobs for, which to restamp — does not ask per name.
+        """
+        with sqlite3.connect(str(self.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT name, status FROM predictors ORDER BY rowid").fetchall()
+        return {name: status for name, status in rows}
+
+    def list_names(self, status=None):
+        """Stored names, optionally only those in *status*."""
+        return [n for n, s in self.list_status().items()
+                if status is None or s == status]
 
     def get_by_name(self, name):
         """Stored :class:`~mllabs.Predictor` for *name*, or ``None``."""

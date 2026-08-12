@@ -4,7 +4,7 @@ import numpy as np
 from ._data_wrapper import wrap, unwrap, DataWrapperProvider
 from ._flow import TrainDataFlow
 from ._store import NodeStore
-from ._predictor_store import PredictorStore
+from ._predictor_store import PredictorStore, INIT, TRAINED, RETIRED, ERROR
 from ._trainer_store import TrainerStore
 from ._trial import Trial
 from ._edge_dsl import parse, eval_expr, referenced_nodes
@@ -259,31 +259,82 @@ class Trainer:
         pipeline.check_data_compatibility(self.data)
         # See Experimenter.set_pipeline: the empty Pipeline means nothing has
         # been adopted, so there is nothing to invalidate against.
+        retiring = self.retiring_predictors(pipeline)
         if not self.pipeline.is_empty:
             stale = pipeline.diff_from(self.pipeline)
             if stale:
-                self.reset_nodes(sorted(stale))
+                affected, predictor_names = self._reach_of(sorted(stale))
+                self._drop_artifacts(affected, predictor_names)
         self.pipeline = pipeline
         self._store.save_pipeline(pipeline)
         self.save()
-        self._restamp_predictors()
+        for name in retiring:
+            self.predictor_defs.set_status(name, RETIRED)
+        self._restamp_predictors(exclude=retiring)
         return pipeline
 
-    def _restamp_predictors(self):
-        """Move the registered Predictors onto the version just adopted.
+    def retiring_predictors(self, pipeline):
+        """Which Predictors adopting *pipeline* would retire, before adopting.
 
-        Adopting a version here *is* the decision to train against it, so the
-        Predictors this Trainer already holds follow it rather than being
-        stranded: without this the reset above would delete their artifacts and
-        :meth:`train` would then refuse to rebuild them, leaving the whole
-        version-switch path unreachable.
+        The question has to be asked beforehand, because afterwards there is
+        nothing left to ask: the artifacts are gone and the only record of why
+        is the status this call decides. Same shape as
+        ``Experimenter.stale_nodes``, and for the same reason — this is the
+        code :meth:`set_pipeline` acts on, not a second opinion about it.
+
+        A Predictor is retired when the change reaches a node it reads, which
+        means the inputs that produced its artifact no longer exist under the
+        adopted definition. One that reads only nodes defined identically in
+        both versions keeps its artifact and is restamped onto the new version
+        instead: training it there would produce the same model, so claiming
+        the new version is true.
+
+        Nothing is retired twice, and adopting onto an empty Pipeline retires
+        nothing — there is no previous definition to have diverged from.
+
+        Args:
+            pipeline (Pipeline): The version being considered.
+
+        Returns:
+            list[str]: Predictor names, sorted.
+        """
+        require_built_pipeline(pipeline)
+        if self.pipeline.is_empty:
+            return []
+        stale = pipeline.diff_from(self.pipeline)
+        if not stale:
+            return []
+        affected, predictor_names = self._reach_of(sorted(stale))
+        statuses = self.predictor_defs.list_status()
+        return sorted(name for name in affected & predictor_names
+                      if statuses.get(name) != RETIRED)
+
+    def _restamp_predictors(self, exclude=()):
+        """Move the surviving Predictors onto the version just adopted.
+
+        Only the survivors. A Predictor whose artifact came through the switch
+        reads nodes defined identically in both versions, so it would train to
+        the same model under the new one and naming it is accurate. A retired
+        one is the opposite case — its inputs really did change — and it goes
+        on naming the version it was actually trained against, which is the
+        only true thing left to say about it.
 
         The gate in :meth:`train` is not weakened by this, because it guards a
         different motion — a Predictor arriving from elsewhere, promoted from a
         Trial evaluated against some other version. That one is still refused,
         which is the case where training would ship something unmeasured.
+
+        Args:
+            exclude (iterable[str]): Names not to move — the ones being
+                retired by this same adoption.
         """
+        exclude = set(exclude)
+        statuses = self.predictor_defs.list_status()
         for predictor in self.predictor_defs.list_predictors():
+            if predictor.name in exclude:
+                continue
+            if statuses.get(predictor.name) == RETIRED:
+                continue
             if predictor.pipeline_version != self.pipeline_version:
                 predictor.pipeline_version = self.pipeline_version
                 self.predictor_defs.register(predictor)
@@ -309,6 +360,43 @@ class Trainer:
     def predictor_specs(self):
         """``{name: ProcessorSpec}`` for the registered Predictors."""
         return {p.name: p.get_spec() for p in self.predictors}
+
+    def predictor_status(self, name):
+        """Where *name* stands: ``init`` / ``trained`` / ``retired`` /
+        ``error``, or ``None`` if it is not registered here."""
+        return self.predictor_defs.get_status(name)
+
+    def predictor_statuses(self):
+        """``{name: status}`` for every registered Predictor."""
+        return self.predictor_defs.list_status()
+
+    def _observed_status(self, name):
+        """The status implied by what is on disk right now.
+
+        Retirement is never among the answers, and cannot be: retiring drops
+        the artifacts and leaves the history rows, which is exactly what a
+        reset leaves behind too. That is the whole reason the status is
+        stored rather than derived — this method covers the other three.
+        """
+        if any(s == 'error' for s in self.predictor_store.get_status(name).values()):
+            return ERROR
+        n = len(self.train_folds)
+        built = sum(1 for i in range(n)
+                    if self.predictor_store.status(name, i, 0) == 'built')
+        return TRAINED if n and built == n else INIT
+
+    def _sync_predictor_status(self, names):
+        """Write back what training left on disk, retirement excepted."""
+        statuses = self.predictor_defs.list_status()
+        for name in names:
+            if statuses.get(name) == RETIRED:
+                continue
+            self.predictor_defs.set_status(name, self._observed_status(name))
+
+    def _has_pending(self, name):
+        """Whether any split of *name* still needs training."""
+        return any(self.predictor_store.status(name, i, 0) != 'built'
+                   for i in range(len(self.train_folds)))
 
     def _nodes_for(self, predictors):
         """Pipeline nodes *predictors* need, topologically ordered.
@@ -368,7 +456,18 @@ class Trainer:
                 return (r['info'] or {}).get('error')
         return None
 
-    def reset_nodes(self, nodes):
+    def _reach_of(self, nodes):
+        """Everything dropping *nodes* would take with it.
+
+        Returns ``(affected, predictor_names)``: the node and Predictor names
+        the drop reaches, and the set of names among them that are Predictors
+        rather than Pipeline nodes.
+
+        Split out from the dropping so that asking and doing run the same
+        traversal — :meth:`retiring_predictors` previews with it and
+        :meth:`set_pipeline` acts on it, which is what keeps a preview from
+        being a second opinion about the real thing.
+        """
         pipeline = self.pipeline
         predictor_names = set(self.predictor_names())
         selected_set = set(self.selected_nodes) | predictor_names
@@ -385,7 +484,8 @@ class Trainer:
                     if downstream in pipeline.nodes:
                         queue.append(downstream)
 
-        # A Predictor reading a reset node must be retrained too.
+        # A Predictor reading a dropped node cannot keep its own artifact:
+        # the inputs that produced it are gone.
         node_reset = affected & set(self.selected_nodes)
         if node_reset:
             for predictor in self.predictors:
@@ -394,6 +494,17 @@ class Trainer:
                 if predictor.node_names() & node_reset:
                     affected.add(predictor.name)
 
+        return affected, predictor_names
+
+    def _drop_artifacts(self, affected, predictor_names):
+        """Delete the artifacts of *affected*, and forget them in every flow.
+
+        Says nothing about what it means — :meth:`reset_nodes` calls it to
+        return a Predictor to ``init`` and :meth:`set_pipeline` calls it to
+        retire one. The files removed are the same either way; the difference
+        is the status written afterwards, and whether a Job is ever built
+        again.
+        """
         for name in affected:
             if name in predictor_names:
                 for fold in self.train_folds:
@@ -407,7 +518,56 @@ class Trainer:
         if self.cache is not None:
             self.cache.clear_nodes(affected)
 
+    def reset_nodes(self, nodes):
+        """Drop *nodes*' artifacts so the next :meth:`train` rebuilds them.
+
+        This is the initialising sense of the word, and it is deliberately
+        not the retiring one. Asking for a rebuild leaves the Pipeline
+        definition untouched, so a Predictor caught by the cascade will be fed
+        exactly the inputs it had before and would train to the same model —
+        there is nothing to end, and it goes back to ``init``.
+
+        A version switch is the other case, and takes the other path: there
+        the inputs really did change, the same model cannot be produced again,
+        and the Predictor is retired rather than reset (:meth:`set_pipeline`).
+        A Predictor already retired stays that way — a rebuild request is not
+        a resurrection.
+        """
+        affected, predictor_names = self._reach_of(nodes)
+        self._drop_artifacts(affected, predictor_names)
+        for name in affected & predictor_names:
+            if self.predictor_defs.get_status(name) != RETIRED:
+                self.predictor_defs.set_status(name, INIT)
         self.save()
+
+    def remove_predictor(self, name):
+        """Erase *name* from this Trainer entirely — definition, artifacts,
+        history.
+
+        Retiring deliberately leaves all three standing: the definition is the
+        inscription on the tombstone, and the history says what ran before it.
+        They accumulate, so clearing them is a separate act with its own call
+        rather than a side effect of the switch that ended the Predictor —
+        the shape ``Project.remove_trial`` has, for the same reason.
+
+        Works on any status, not only retired ones.
+        """
+        for fold in self.train_folds:
+            self.predictor_store.reset_node(name, fold.split_idx, 0)
+            fold.train_data_flows[0].node_objs.pop(name, None)
+            fold.train_data_flows[0]._node_edges.pop(name, None)
+        self.predictor_store.remove_hist(node_name=name)
+        self.predictor_defs.remove(name)
+        if self.cache is not None:
+            self.cache.clear_nodes([name])
+        self.save()
+
+    def purge_retired(self):
+        """Remove every retired Predictor. Returns the names removed."""
+        names = self.predictor_defs.list_names(status=RETIRED)
+        for name in names:
+            self.remove_predictor(name)
+        return names
 
     # ------------------------------------------------------------------
     # train
@@ -425,14 +585,22 @@ class Trainer:
         A split is skipped only if its artifact is already built — the same
         disk-based test :meth:`_make_node_jobs` uses, so a redefined
         Predictor does not by itself force a rerun of splits already built.
+
+        A retired Predictor is skipped whole. Its artifacts are gone, so the
+        disk test alone would hand it a Job for every split and train it back
+        into existence, which is precisely what retirement means not to
+        happen. Disk cannot tell that case from a reset one; the status can.
         """
         from ._executor import Job
         from .adapter import resolve_node_adapter
         from .adapter._base import GPU_NO
 
+        statuses = self.predictor_defs.list_status()
         gpu_cache = {}
         jobs = []
         for predictor in predictors:
+            if statuses.get(predictor.name) == RETIRED:
+                continue
             spec = predictor.get_spec()
             if predictor.name not in gpu_cache:
                 adapter = resolve_node_adapter(spec.processor, spec.adapter)
@@ -519,8 +687,11 @@ class Trainer:
         pipeline = self.pipeline
         pipeline.check_data_compatibility(self.data)
 
+        statuses = self.predictor_defs.list_status()
         if predictors is None:
-            predictors = self.predictors
+            # Resuming: retired names are not work left over, they are over.
+            predictors = [p for p in self.predictors
+                          if statuses.get(p.name) != RETIRED]
         else:
             predictors = list(predictors)
             for p in predictors:
@@ -529,11 +700,24 @@ class Trainer:
                         f"train() got a Trial ({p.name!r}); promote it with "
                         f"Predictor.from_trial(trial, experimenter=...) first"
                     )
+                if statuses.get(p.name) == RETIRED:
+                    raise ValueError(
+                        f"Predictor '{p.name}' is retired: a Pipeline version "
+                        f"switch changed the nodes it reads, so the model it "
+                        f"held cannot be produced again. Register the same "
+                        f"specification under another name to train it against "
+                        f"version {self.pipeline_version}."
+                    )
                 if p.pipeline_version is None:
                     p.pipeline_version = self.pipeline_version
             self.predictor_defs.register_all(predictors)
         for p in predictors:
-            if p.pipeline_version != self.pipeline_version:
+            # Only what would actually be trained. A Predictor whose splits
+            # are all built files no Job, so its version is a record of what
+            # produced it rather than a claim about what is about to run —
+            # and after a version switch that record is deliberately left
+            # behind (see _restamp_predictors).
+            if p.pipeline_version != self.pipeline_version and self._has_pending(p.name):
                 raise ValueError(
                     f"Predictor '{p.name}' is defined against pipeline version "
                     f"{p.pipeline_version}, and this Trainer has adopted "
@@ -603,6 +787,7 @@ class Trainer:
         else:
             logger.info(f"Train complete: {len(target_all)} node(s)")
 
+        self._sync_predictor_status([p.name for p in predictors])
         self.save()
 
     # ------------------------------------------------------------------
