@@ -2,7 +2,7 @@
 
 ## Creating a project
 
-A `Project` is a directory. It hands out paths and owns what is shared across runs — the dataset, the pipeline, the Trial store, the cache.
+A `Project` is a directory. It hands out paths and owns what is shared across Experimenters and Trainers — the dataset, the pipeline, the Trial store, the cache.
 
 ```python
 from mllabs import Project
@@ -10,7 +10,7 @@ from mllabs import Project
 project = Project('exp', data=df)      # created if missing
 ```
 
-The dataset belongs here because it is the one thing a run cannot restore from its own directory. Give it once and `add_experimenter` / `add_trainer` and the registries stop asking for a dataframe. `project.set_data(df)` sets it later; `aug_data=` is the same, for data appended to inner train splits.
+The dataset belongs here because it is the one thing an Experimenter or Trainer cannot restore from its own directory. Give it once and `add_experimenter` / `add_trainer` and the registries stop asking for a dataframe. `project.set_data(df)` sets it later; `aug_data=` is the same, for data appended to inner train splits.
 
 Everything else is reached from it:
 
@@ -21,11 +21,11 @@ project.list_experimenters()           # names only
 project.experimenters                  # the objects, opened on demand
 ```
 
-Collectors are not among them — a registry belongs to the run that writes into it, as `e.collectors`. See [Collectors](collectors.md).
+Collectors are not among them — a registry belongs to the Experimenter that writes into it, as `e.collectors`. See [Collectors](collectors.md).
 
 **One pipeline per project.** What you actually want from several is to refer back to an earlier definition, and that is a version's job rather than a name's — so `pipeline/` holds one builder and its numbered versions.
 
-## Adding and removing runs
+## Adding and removing Experimenters and Trainers
 
 ```python
 project.add_experimenter('cv5', sp=..., splitter_params={'y': 'target'})
@@ -37,7 +37,7 @@ t = project.trainers['final']
 project.remove_experimenter('cv5')     # deletes the directory
 ```
 
-`add_*` is strictly an addition: a taken name raises. Constructing an Experimenter splits the data afresh and resets its provenance, so doing that over an existing one is damage rather than a reopen — and an accessor that quietly created when the name was free would turn a typo into a second run instead of an error.
+`add_*` is strictly an addition: a taken name raises. Constructing an Experimenter splits the data afresh and resets its provenance, so doing that over an existing one is damage rather than a reopen — and an accessor that quietly created when the name was free would turn a typo into a second Experimenter instead of an error.
 
 Two different questions decide whether a name is free. `ProjectStore` says what this project *manages*; `ExperimenterStore.stored_at(path)` says whether the directory is *occupied*, possibly by something built outside the project. Either one refuses, with a message saying which.
 
@@ -181,6 +181,30 @@ project.remove_pipeline_version(1)   # any but the latest
 
 The latest is what an omitted version number resolves to, so it cannot be removed — deleting it would silently change what the next `add_experimenter` adopts. Removing an older one breaks nothing that ran against it: every Experimenter and Trainer keeps its own Pipeline copy. What is lost is what a provenance pointer refers to.
 
+### Publishing and propagating
+
+Building alone leaves everything else where it was, and the ordering that matters is easy to miss: `set_trial` stamps a Trial with the **latest published** version, adopting is what gives an Experimenter a version to compare against, and `exp()` refuses a stamp that is not the adopted one. Build without adopting and the Trials you author next carry a version nothing holds — which surfaces as a refusal at `exp()`, some distance from the omission.
+
+`publish_pipeline()` is the pair, and reports what it cost:
+
+```python
+report = project.publish_pipeline()
+report['version']            # 3
+report['experimenters']      # {'phase2': ['scaler', 'tgt_delta']}   nodes dropped
+report['trainers']           # {} — not touched by default
+```
+
+Building an unchanged definition returns the version it already has, so calling it out of habit costs nothing and moves nothing.
+
+**Trainers stay out unless asked for.** The two sides do not pay the same price: an Experimenter loses node artifacts the next `build()` makes again, while adopting on a Trainer *retires* every Predictor whose inputs changed, and that is terminal. Work moves the other way round anyway — experiment, read the results, then promote into a Trainer.
+
+```python
+project.publish_pipeline(dry_run=True, trainers=True)   # price it first
+project.publish_pipeline(trainers=True)                 # then commit
+```
+
+Leaving a Trainer behind strands nothing. It keeps its own Pipeline copy and its Predictors carry the version they trained against, so it goes on working where it is, and `train()` refuses a mismatch rather than quietly doing the wrong thing.
+
 ### Looking without publishing
 
 `draft()` returns the same snapshot `build()` does, unregistered:
@@ -188,10 +212,14 @@ The latest is what an omitted version number resolves to, so it cannot be remove
 ```python
 snapshot = project.pipeline.draft()
 snapshot.version, snapshot.status    # (None, 'draft')
-project.stale_nodes()                # what adopting the current edits would cost
+
+project.stale_nodes()
+# {'experimenters': {'phase2': ['scaler']}, 'trainers': {'final': ['scaler']}}
 ```
 
-This is how a question stays a question — `stale_nodes()` leans on it so that asking what an edit would cost is not what commits the edit. A draft cannot be adopted: without a number, nothing that ran against it could say what that was.
+This is how a question stays a question — `stale_nodes()` and `publish_pipeline(dry_run=True)` both lean on it, so asking what an edit would cost is not what commits the edit. A draft cannot be adopted: without a number, nothing that ran against it could say what that was.
+
+The two sides answer under separate keys because `exp/{name}` and `trainers/{name}` are separate namespaces — one name can exist in both. Pass `experimenter=` or `trainer=` to narrow to exactly one, and the other side comes back empty. Both report **nodes**, which understates a Trainer: for the retirements too, use `publish_pipeline(dry_run=True, trainers=True)`.
 
 `PipelineBuilder()` constructed without a path has nowhere to publish, so `build()` raises there; `draft()` is how you get the snapshot.
 
@@ -220,7 +248,7 @@ p.remove_node('poly')
 p.copy_nodes(['scale', 'ohe'])       # into another builder
 ```
 
-Editing the builder never disturbs a run in progress: runs hold the built Pipeline, and adopting a new version is an explicit `set_pipeline()` call — see [Experimenter & Trials](experimenter-trials.md).
+Editing the builder never disturbs an execution in progress: an Experimenter or Trainer holds the built Pipeline, and adopting a new version is an explicit `set_pipeline()` call — see [Experimenter & Trials](experimenter-trials.md).
 
 ## Related
 

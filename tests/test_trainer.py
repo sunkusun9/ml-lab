@@ -369,22 +369,89 @@ class TestTrain:
         trainer.train([redefined])
         assert _build_ids(trainer, 'dt') != before
 
-    def test_node_edit_cascades_into_the_predictor(self, pipeline, sample_data, sp_v):
+    def test_node_edit_rebuilds_the_node_and_retires_the_predictor(
+            self, pipeline, sample_data, sp_v):
+        """The two halves of a version switch part company here. The node is
+        reset — its definition changed, and rebuilding it is what the new
+        version asks for. The Predictor reading it is retired: the inputs that
+        produced its model are gone, so there is nothing to rebuild it to."""
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
         trainer.train(_predictors())
-        before = {name: _build_ids(trainer, name) for name in ['scaler', 'dt']}
+        before = _build_ids(trainer, 'scaler')
 
         pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
                          method='transform', edges={'X': '{f1, f2, f3}'},
                          params={'with_std': False})
         trainer.set_pipeline(pipeline.build())
         assert trainer.get_status('scaler') is None
-        assert trainer.get_status('dt') is None      # cascaded via node_names()
-        trainer.train()
+        assert trainer.get_status('dt') is None
+        assert trainer.predictor_status('dt') == 'retired'
 
-        for name in ['scaler', 'dt']:
-            assert _build_ids(trainer, name) != before[name]
+        trainer.train()
+        assert _build_ids(trainer, 'scaler') != before   # node came back
+        assert trainer.get_status('dt') is None          # the Predictor did not
+
+    def test_a_retired_predictor_is_refused_by_name(self, pipeline, sample_data, sp_v):
+        """Resuming skips it silently; naming it says the caller believes it is
+        still trainable, and that is worth an error rather than a no-op."""
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        trainer.train(_predictors())
+
+        pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+                         method='transform', edges={'X': '{f1, f2, f3}'},
+                         params={'with_std': False})
+        trainer.set_pipeline(pipeline.build())
+        with pytest.raises(ValueError, match='retired'):
+            trainer.train([_dt()])
+
+    def test_retiring_predictors_previews_the_same_names(
+            self, pipeline, sample_data, sp_v):
+        """Asked before adopting, answered by the code adoption acts on."""
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        trainer.train(_predictors())
+
+        pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+                         method='transform', edges={'X': '{f1, f2, f3}'},
+                         params={'with_std': False})
+        nxt = pipeline.build()
+        assert trainer.retiring_predictors(nxt) == ['dt']
+        trainer.set_pipeline(nxt)
+        assert trainer.predictor_status('dt') == 'retired'
+        # Nothing is retired twice, and there is nothing left to retire.
+        assert trainer.retiring_predictors(nxt) == []
+
+    def test_reset_nodes_initialises_rather_than_retires(
+            self, pipeline, sample_data, sp_v):
+        """Asking for a rebuild leaves the definition alone, so the Predictor
+        would train to the same model — it goes back to init and does."""
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        trainer.train(_predictors())
+        before = _build_ids(trainer, 'dt')
+
+        trainer.reset_nodes(['scaler'])
+        assert trainer.predictor_status('dt') == 'init'
+        trainer.train()
+        assert trainer.predictor_status('dt') == 'trained'
+        assert _build_ids(trainer, 'dt') != before
+
+    def test_purge_retired_clears_the_tombstones(self, pipeline, sample_data, sp_v):
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        trainer.train(_predictors())
+
+        pipeline.set_grp('scale', processor='sklearn.preprocessing.StandardScaler',
+                         method='transform', edges={'X': '{f1, f2, f3}'},
+                         params={'with_std': False})
+        trainer.set_pipeline(pipeline.build())
+        assert trainer.predictor_defs.get_by_name('dt') is not None   # tombstone stands
+
+        assert trainer.purge_retired() == ['dt']
+        assert trainer.predictor_defs.get_by_name('dt') is None
+        assert trainer.predictor_store.get_hist(node_name='dt') == []
 
     def test_unrelated_node_edit_leaves_the_predictor_alone(self, pipeline, sample_data, sp_v):
         pipeline.set_grp('other', processor='sklearn.preprocessing.StandardScaler',
@@ -435,10 +502,30 @@ class TestPredictorVersion:
         with pytest.raises(ValueError, match='never evaluated'):
             trainer.train([stale])
 
-    def test_adopting_a_new_version_brings_the_predictors_along(
+    def test_adopting_brings_the_survivors_along(self, pipeline, sample_data, sp_v):
+        """A Predictor whose artifact came through the switch reads nodes
+        defined identically in both versions, so it would train to the same
+        model there — naming the adopted version is accurate."""
+        pipeline.set_grp('other', processor='sklearn.preprocessing.StandardScaler',
+                         method='transform', edges={'X': '{f1}'})
+        pipeline.set_node('unused', grp='other')
+        trainer = _make_trainer(pipeline, sample_data, sp_v)
+        trainer.set_pipeline(pipeline.build())
+        trainer.train(_predictors())
+        assert trainer.predictor_defs.get_by_name('dt').pipeline_version == 1
+
+        pipeline.set_grp('other', processor='sklearn.preprocessing.StandardScaler',
+                         method='transform', edges={'X': '{f1}'},
+                         params={'with_mean': False})
+        trainer.set_pipeline(pipeline.build())
+        assert trainer.pipeline_version == 2
+        assert trainer.predictor_status('dt') == 'trained'
+        assert trainer.predictor_defs.get_by_name('dt').pipeline_version == 2
+
+    def test_a_retired_predictor_keeps_the_version_it_trained_under(
             self, pipeline, sample_data, sp_v):
-        """Adopting is what says which definition this Trainer trains against.
-        Stranding them behind would leave the reset artifacts unrebuildable."""
+        """The opposite case: its inputs did change, so the version it was
+        actually trained against is the only true thing left to say."""
         trainer = _make_trainer(pipeline, sample_data, sp_v)
         trainer.set_pipeline(pipeline.build())
         trainer.train(_predictors())
@@ -449,9 +536,11 @@ class TestPredictorVersion:
                          params={'with_std': False})
         trainer.set_pipeline(pipeline.build())
         assert trainer.pipeline_version == 2
-        assert trainer.predictor_defs.get_by_name('dt').pipeline_version == 2
+        assert trainer.predictor_status('dt') == 'retired'
+        assert trainer.predictor_defs.get_by_name('dt').pipeline_version == 1
+
+        # A stranded version no longer blocks the healthy work around it.
         trainer.train()
-        assert trainer.get_status('dt') == 'built'
 
 
 class TestPredictorStorage:

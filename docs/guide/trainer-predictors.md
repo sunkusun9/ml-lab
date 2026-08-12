@@ -84,6 +84,24 @@ t.predictor_names()
 t.selected_nodes        # the Pipeline nodes those Predictors read
 ```
 
+## Where a Predictor stands
+
+Each one carries a status, and `train()` writes back what it left on disk:
+
+| | |
+|---|---|
+| `init` | registered, with at least one split still to train |
+| `trained` | every split built — this is what `to_inferencer()` can ship |
+| `retired` | ended by a version switch its inputs did not survive. Terminal |
+| `error` | at least one split failed. One bad fold is a bad Predictor |
+
+```python
+t.predictor_status('lgb_final')     # 'trained'
+t.predictor_statuses()              # {name: status}
+```
+
+Three of the four could be read off disk, but `retired` could not: retiring drops the artifacts and leaves the history rows standing, which is exactly what a reset leaves behind. Without the status recorded, a retired Predictor looks like one waiting to be trained, and `train()` would build it back into existence.
+
 ## Two stores, on purpose
 
 | | |
@@ -127,18 +145,42 @@ inf.save('inferencers/v1')
 
 See [Inferencer](../serving/inferencer.md) for serving.
 
-## Resetting
+## Resetting, and retiring
+
+Two things drop a Predictor's artifact, and they are not the same thing.
+
+**Resetting** is asking for a rebuild:
 
 ```python
 t.reset_nodes(['scale'])
 ```
 
-Downstream nodes go with it, and so does any Predictor that reads one of the reset nodes — unlike an Experimenter, a Trainer has no historical run to preserve, so a Predictor trained against a changed node is simply stale.
+Downstream nodes go with it, and so does any Predictor reading one of them. The Pipeline definition is untouched, so those Predictors would train to the same model as before — they go back to `init`, and the next `train()` makes them again.
 
-Adopting a new Pipeline version does the same thing automatically for whatever the diff invalidated:
+**Retiring** is what a version switch does:
 
 ```python
-t.set_pipeline(project.load_pipeline('main', 3))
+t.set_pipeline(project.load_pipeline(3))
+```
+
+Here the definitions really did change. A Predictor whose inputs are gone cannot be trained back to the model it held, so it is retired rather than reset: terminal, skipped by `train()`, and refused if you name it explicitly. Wanting the same specification again means registering it under another name, against the version that can serve it.
+
+Ask before you commit to it:
+
+```python
+t.stale_nodes(candidate)            # nodes that would be reset
+t.retiring_predictors(candidate)    # Predictors that would end
+```
+
+Both run the traversal `set_pipeline` acts on, so a preview cannot disagree with the effect. Afterwards there is nothing left to ask — the artifacts are gone, and the staleness went into deciding to delete them.
+
+A Predictor that comes through the switch is **restamped** onto the adopted version: its artifact survived, which means the nodes it reads are defined identically in both versions, so it would train to the same model there. A retired one keeps naming the version it actually trained against, that being the only true thing left to say about it.
+
+Retiring leaves the definition and the history standing, as the record of what was there. Clear them when you want to:
+
+```python
+t.remove_predictor('lgb_final')     # definition, artifacts, history
+t.purge_retired()                   # every retired one; returns the names
 ```
 
 ## Samplers
