@@ -341,6 +341,50 @@ class TestSetTrialStampsTheVersion:
         assert [t.pipeline_version for t in project.trials.list_trials()] == [0, 0]
 
 
+class TestChainTrial:
+    """Project.chain_trial — chain() plus registration, in one call."""
+
+    def test_registers_the_derived_trial(self, project):
+        project.set_trial(_trial())
+        assert project.chain_trial('dt', 'dt_stk') == 'dt_stk'
+        assert project.trials.get_by_name('dt_stk').src_trial == 'dt'
+
+    def test_unknown_source_raises(self, project):
+        with pytest.raises(KeyError, match='nope'):
+            project.chain_trial('nope', 'x')
+
+    def test_name_left_unset_is_minted(self, project):
+        project.set_trial(_trial())
+        name = project.chain_trial('dt')
+        assert name is not None and name != 'dt'
+        assert project.trials.get_by_name(name).src_trial == 'dt'
+
+    def test_overrides_pass_through(self, project):
+        project.set_trial(_trial(params={'max_depth': 3}))
+        project.chain_trial('dt', 'dt_stk', params={'max_depth': 9})
+        assert project.trials.get_by_name('dt_stk').params == {'max_depth': 9}
+
+    def test_pipeline_version_defaults_to_latest_published(self, project, builder):
+        builder.build()
+        project.set_trial(_trial(pipeline_version=0))
+        project.chain_trial('dt', 'dt_stk')
+        assert project.trials.get_by_name('dt_stk').pipeline_version == 1
+
+    def test_pipeline_version_minus_one_inherits_the_source(self, project, builder):
+        builder.build()
+        project.set_trial(_trial(pipeline_version=0))
+        project.chain_trial('dt', 'dt_stk', pipeline_version=-1)
+        assert project.trials.get_by_name('dt_stk').pipeline_version == 0
+
+    def test_freeze_gate_still_applies(self, project):
+        project.set_trial(_trial())
+        project.trials.record('dt', 'run_a', 0, 0, status='built')
+        project.set_trial(_trial('dt_stk', params={'max_depth': 9}))
+        project.trials.record('dt_stk', 'run_a', 0, 0, status='built')
+        with pytest.raises(ValueError, match='dt_stk'):
+            project.chain_trial('dt', 'dt_stk', params={'max_depth': 3})
+
+
 class TestTrialRegistration:
     def test_same_definition_registers_once(self, store):
         store.register(_trial())
@@ -405,6 +449,50 @@ class TestTrialRegistration:
     def test_survives_reopen(self, store, tmp_path):
         store.register(_trial())
         assert TrialStore(tmp_path / 'ts').get_by_name('dt') is not None
+
+    def test_src_trial_roundtrips(self, store):
+        chained = _trial().chain('dt_stk')
+        store.register(chained)
+        assert store.get_by_name('dt_stk').src_trial == 'dt'
+
+    def test_src_trial_is_not_part_of_the_definition(self, store):
+        """Provenance, not identity — has() ignores it like desc/tag."""
+        store.register(_trial())
+        with_src = _trial()
+        with_src.src_trial = 'somewhere-else'
+        assert store.has(with_src)
+
+
+class TestTrialStoreNaming:
+    def test_next_seq_increases(self, store):
+        first = store.next_seq()
+        assert store.next_seq() == first + 1
+
+    def test_next_seq_persists_across_reopen(self, store, tmp_path):
+        store.next_seq()
+        store.next_seq()
+        reopened = TrialStore(tmp_path / 'ts')
+        assert reopened.next_seq() == 3
+
+    def test_next_name_keeps_the_prefix_of_a_full_name(self, store):
+        assert store.next_name('lgb5').startswith('lgb')
+
+    def test_next_name_accepts_a_bare_prefix(self, store):
+        assert store.next_name('lgb').startswith('lgb')
+
+    def test_next_name_appends_the_sequence_value(self, store):
+        seq = store.next_seq()
+        assert store.next_name('lgb') == f'lgb{seq + 1}'
+
+    def test_next_name_never_repeats(self, store):
+        assert store.next_name('lgb') != store.next_name('lgb')
+
+    def test_next_name_does_not_derive_from_existing_rows(self, store):
+        """A naive 'highest existing number + 1' would return 'lgb10' here —
+        the actual value comes from the store's own global counter, which
+        knows nothing about what is registered under the prefix."""
+        store.register(_trial('lgb9'))
+        assert store.next_name('lgb') != 'lgb10'
 
 
 class TestExperimentHist:

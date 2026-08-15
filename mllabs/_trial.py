@@ -3,6 +3,11 @@ from itertools import product
 from ._edge_dsl import referenced_nodes
 from ._pipeline import (
     ProcessorSpec, _validate_processor, _validate_adapter, _validate_params,
+    _combine_edges,
+)
+
+_CHAINABLE_FIELDS = frozenset(
+    ('processor', 'method', 'adapter', 'params', 'edges', 'desc', 'tag')
 )
 
 
@@ -51,13 +56,18 @@ class Trial:
         pipeline_version (int | None): The Pipeline version this was authored
             against. ``None`` means unstamped, which ``Project.set_trial``
             resolves to the latest published version on registration.
+        src_trial (str | None): Name of the Trial this one was chained from,
+            if any. Reference only — no foreign key, no validation, and no
+            staleness: it is never checked against what ``src_trial`` still
+            names, or whether it still exists. See :meth:`chain`.
     """
 
     __slots__ = ('name', 'processor', 'method', 'adapter', 'params', 'edges',
-                 'desc', 'tag', 'pipeline_version')
+                 'desc', 'tag', 'pipeline_version', 'src_trial')
 
     def __init__(self, name, processor, edges, method='predict', adapter=None,
-                 params=None, desc=None, tag=None, pipeline_version=None):
+                 params=None, desc=None, tag=None, pipeline_version=None,
+                 src_trial=None):
         self.name = name
         self.processor = processor
         self.edges = dict(edges or {})
@@ -67,6 +77,7 @@ class Trial:
         self.desc = desc
         self.tag = list(tag or [])
         self.pipeline_version = pipeline_version
+        self.src_trial = src_trial
 
     def get_spec(self):
         """This Trial's :class:`~mllabs._pipeline.ProcessorSpec`.
@@ -83,6 +94,60 @@ class Trial:
             method=self.method,
             adapter=self.adapter,
             params=self.params,
+        )
+
+    def chain(self, name, pipeline_version=None, **overrides):
+        """A new Trial derived from this one, with ``src_trial`` recorded.
+
+        Every field not named in *overrides* is inherited verbatim, except
+        ``params`` and ``edges``, which never fully replace — ``params`` is
+        merged over ``self.params`` (only the given keys change) and
+        ``edges`` is combined per key the same way a Pipeline node's own
+        edges extend its group's: a value starting with ``'+'``/``'-'``
+        continues ``self``'s (already-resolved) string for that key, anything
+        else replaces it outright, and a key left out of *overrides*
+        inherits unchanged.
+
+        Overrides are read by presence, not by value — ``adapter=None`` in
+        *overrides* clears the adapter, which a plain keyword default could
+        not distinguish from "not given".
+
+        Args:
+            name (str): Name for the new Trial. Required: ``self`` and the
+                result share a TrialStore, so leaving this to default to
+                ``self.name`` would overwrite ``self``'s own row.
+            pipeline_version (int, optional): ``None`` (default) leaves the
+                result unstamped, same as any newly authored Trial —
+                ``Project.set_trial`` fills in the latest published version.
+                ``-1`` copies ``self.pipeline_version`` instead. Any other
+                value is used as given.
+            **overrides: Any of ``processor``/``method``/``adapter``/
+                ``params``/``edges``/``desc``/``tag``.
+
+        Returns:
+            Trial
+        """
+        unknown = set(overrides) - _CHAINABLE_FIELDS
+        if unknown:
+            raise TypeError(
+                f"chain() got unexpected keyword argument(s): {sorted(unknown)}"
+            )
+
+        def field(key, default):
+            return overrides[key] if key in overrides else default
+
+        return Trial(
+            name=name,
+            processor=field('processor', self.processor),
+            edges=_combine_edges(overrides.get('edges', {}), self.edges),
+            method=field('method', self.method),
+            adapter=field('adapter', self.adapter),
+            params={**self.params, **overrides.get('params', {})},
+            desc=field('desc', self.desc),
+            tag=field('tag', list(self.tag)),
+            pipeline_version=(self.pipeline_version if pipeline_version == -1
+                              else pipeline_version),
+            src_trial=self.name,
         )
 
     def node_names(self):

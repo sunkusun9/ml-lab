@@ -163,6 +163,81 @@ class TestTrialSpec:
         assert trial.node_names() == {'scaler', 'labeller'}
 
 
+class TestTrialChain:
+    """Trial.chain — deriving a new Trial, with the source recorded."""
+
+    def _src(self, **kw):
+        base = dict(name='lgb5', processor=LGBM, edges=EDGES,
+                    method='predict_proba', adapter=None,
+                    params={'max_depth': 3, 'random_state': 42},
+                    desc='round 5', tag=['final'], pipeline_version=2)
+        base.update(kw)
+        return Trial(**base)
+
+    def test_src_trial_records_the_source_name(self):
+        chained = self._src().chain('lgb5_stk')
+        assert chained.src_trial == 'lgb5'
+
+    def test_unspecified_fields_inherit(self):
+        src = self._src()
+        chained = src.chain('lgb5_stk')
+        assert chained.processor == src.processor
+        assert chained.method == src.method
+        assert chained.adapter == src.adapter
+        assert chained.desc == src.desc
+        assert chained.tag == src.tag
+
+    def test_named_override_replaces_the_field(self):
+        chained = self._src().chain('lgb5_stk', method='predict', desc='fixed rounds')
+        assert chained.method == 'predict'
+        assert chained.desc == 'fixed rounds'
+
+    def test_adapter_none_override_clears_it(self):
+        """A plain keyword default of None could not tell 'clear it' apart
+        from 'not given' — this is why overrides are read by presence."""
+        src = self._src(adapter='mllabs.adapter.LightGBMAdapter')
+        chained = src.chain('lgb5_stk', adapter=None)
+        assert chained.adapter is None
+
+    def test_params_merge_only_overrides_given_keys(self):
+        chained = self._src().chain('lgb5_stk', params={'max_depth': 7})
+        assert chained.params == {'max_depth': 7, 'random_state': 42}
+
+    def test_params_not_shared_with_the_source(self):
+        src = self._src()
+        chained = src.chain('lgb5_stk', params={'max_depth': 7})
+        chained.params['random_state'] = 0
+        assert src.params['random_state'] == 42
+
+    def test_edges_unspecified_key_inherits(self):
+        chained = self._src().chain('lgb5_stk', edges={'X': 'newnode:(*)'})
+        assert chained.edges['y'] == EDGES['y']
+
+    def test_edges_plain_value_replaces(self):
+        chained = self._src().chain('lgb5_stk', edges={'X': 'newnode:(*)'})
+        assert chained.edges['X'] == 'newnode:(*)'
+
+    def test_edges_plus_prefix_extends_the_source(self):
+        chained = self._src().chain('lgb5_stk', edges={'X': '+ extra:(*)'})
+        assert chained.edges['X'] == 'scaler:(*) + extra:(*)'
+
+    def test_pipeline_version_default_is_unstamped(self):
+        chained = self._src().chain('lgb5_stk')
+        assert chained.pipeline_version is None
+
+    def test_pipeline_version_minus_one_inherits_the_source(self):
+        chained = self._src().chain('lgb5_stk', pipeline_version=-1)
+        assert chained.pipeline_version == 2
+
+    def test_pipeline_version_explicit_value_is_used_as_given(self):
+        chained = self._src().chain('lgb5_stk', pipeline_version=5)
+        assert chained.pipeline_version == 5
+
+    def test_unknown_override_is_rejected(self):
+        with pytest.raises(TypeError, match='unexpected keyword'):
+            self._src().chain('lgb5_stk', pipeline_version=-1, tag=['x'], bogus=1)
+
+
 class TestCollectorsRegistry:
     def _reg(self, tmp_path):
         return Collectors(tmp_path)

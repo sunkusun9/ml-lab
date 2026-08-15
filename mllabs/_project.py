@@ -426,6 +426,36 @@ class Project:
                 f"published. Published versions: {sorted(known)}."
             )
 
+    def chain_trial(self, src_name, name=None, pipeline_version=None, **overrides):
+        """Author a Trial derived from an already-registered one.
+
+        Looks up *src_name* in :attr:`trials`, derives the successor via
+        ``Trial.chain``, and registers it through :meth:`set_trial` — so the
+        freeze gate and version stamping apply exactly as they would to any
+        other authored Trial.
+
+        Args:
+            src_name (str): Name of the registered source Trial.
+            name (str, optional): Name for the new Trial. Left unset, one is
+                minted from ``self.trials.next_name(src_name)`` — a fresh
+                number under *src_name*'s own prefix.
+            pipeline_version, **overrides: Passed straight to ``Trial.chain``.
+
+        Returns:
+            str | None: The new Trial's name, or ``None`` if nothing
+            changed (see :meth:`set_trial`).
+
+        Raises:
+            KeyError: If *src_name* is not registered.
+        """
+        src = self.trials.get_by_name(src_name)
+        if src is None:
+            raise KeyError(f"No Trial registered under {src_name!r}")
+        if name is None:
+            name = self.trials.next_name(src_name)
+        trial = src.chain(name, pipeline_version=pipeline_version, **overrides)
+        return self.set_trial(trial)
+
     def error_trials(self, experimenter=None):
         """Failed folds of Trial execution, one dict each.
 
