@@ -57,7 +57,7 @@ Already-built folds are skipped. `n_jobs` is capped at the actual number of jobs
 A Trial is one configuration to evaluate. It looks like a node — same `ProcessorSpec` — but lives outside the Pipeline.
 
 ```python
-from mllabs import Trial, make_trials
+from mllabs import Trial, GridTrials
 
 trial = Trial('lgb1', 'lightgbm.LGBMClassifier',
               edges={'X': 'scale:(*) + ohe:(*)', 'y': '{target}'},
@@ -66,29 +66,29 @@ trial = Trial('lgb1', 'lightgbm.LGBMClassifier',
               tag=['baseline'])
 ```
 
-`make_trials` expands a grid, naming the results `{name}_{i}`:
+`GridTrials` expands a grid — it only enumerates *content* (processor/method/adapter/params/edges/tag), not names:
 
 ```python
-trials = make_trials('lgb', 'lightgbm.LGBMClassifier',
-                     edges={'X': 'scale:(*)', 'y': '{target}'},
-                     method='predict',
-                     params={'random_state': 42},
-                     param_grid={'num_leaves': [31, 63], 'learning_rate': [0.05, 0.1]})
+gen = GridTrials('lightgbm.LGBMClassifier',
+                 edges={'X': 'scale:(*)', 'y': '{target}'},
+                 method='predict',
+                 params={'random_state': 42},
+                 param_grid={'num_leaves': [31, 63], 'learning_rate': [0.05, 0.1]})
 ```
-
-!!! warning "A Trial's name is its identity"
-    `TrialStore` is project-wide and keyed by name, so a name is what history, results and every run's reference to it all hang on. Give a new configuration a new name.
 
 ## Registering
 
 A Trial belongs to the project, so it is added there — separately from running it:
 
 ```python
-names = project.set_trials(trials)     # ['lgb_0', 'lgb_1', 'lgb_2', 'lgb_3']
 project.set_trial(trial)               # 'lgb1', or None if unchanged
+project.make_trials('lgb', gen)        # names + registers all four combos
 ```
 
-Both return only what was **added or changed**, so the return value is the work list for the next run. A definition identical to the stored one is not a change and comes back as `None` / omitted.
+`make_trials` mints each name from `project.trials.next_name('lgb')` — assigned, never derived from the combo's position in the grid, so growing or shrinking the sweep later never renames a sibling combo. Both return only what was **added or changed**, so the return value is the work list for the next run. A definition identical to the stored one is not a change and comes back as `None` / omitted.
+
+!!! warning "A Trial's name is its identity"
+    `TrialStore` is project-wide and keyed by name, so a name is what history, results and every run's reference to it all hang on. Give a new configuration a new name.
 
 A name that already ran successfully somewhere is frozen — `set_trial` raises rather than redefine it. The history is keyed by name and a Trial leaves no artifact, so a redefinition would silently leave the old results describing a definition that never produced them. Change one by giving it a new name, or `project.remove_trial(name)` to give up the results with it.
 

@@ -49,7 +49,7 @@ Project(path, data, aug_data, cache_maxsize)   경로·데이터·캐시 소유 
 
 - **Project** (`_project.py`): 디렉토리 레이아웃 + 데이터셋 + `pipeline`/`TrialStore`/`ProjectStore`/`cache`, 그리고 자기가 내준 Experimenter/Trainer를 이름으로 들고 있음(같은 이름은 같은 객체). 별도 `save()`는 없다 — 각 컴포넌트가 이미 write-through
 - **PipelineBuilder / Pipeline** (`_pipeline.py`): 가변 빌더 + `build()`가 만드는 불변 **노드 전용** 그래프
-- **Trial / make_trials** (`_trial.py`): 평가할 구성 하나. Pipeline 밖에 있음
+- **Trial / GridTrials** (`_trial.py`): 평가할 구성 하나 / 그 구성들을 만들어내는 생성기 하나. Pipeline 밖에 있음
 - **TrialStore** (`_trial_store.py`): `trials`(정의) + `experiment_hist`(fold별 실행 이력). 저작은 `Project.set_trial`, 실행은 `Experimenter.exp`가 **이름으로** 꺼내 씀
 - **Predictor** (`_predictor.py`): Trainer가 학습하는 끝지점 출력 노드. Trial과 같은 실행 정의 + 출처(`src_trial`/`src_experimenter`)
 - **PredictorStore** (`_predictor_store.py`): `predictors`(정의 + `status`) 하나뿐 — fold별 이력은 Trainer의 두 번째 `NodeStore`가 가짐
@@ -178,11 +178,11 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   - **`chain(name, pipeline_version=None, **overrides)`** → `Trial`: 자신에서 파생된 새 Trial. `name`은 **필수**(같은 `TrialStore`에 들어가므로 `self.name` 재사용은 자기 자신의 행을 덮어씀). 지정 안 한 필드는 상속하되 `params`는 `self.params` 위에 partial merge, `edges`는 키별로 `_combine_edges`(그룹/노드 상속과 같은 `+`/`-` 관례)로 결합 — 완전 대체가 아님. override는 **존재 여부로 읽는다**(`adapter=None`은 명시적으로 지우는 것과 미지정 상속을 구분해야 해서 `**overrides`를 씀, 단순 키워드 기본값 `None`으로는 둘을 못 가른다). `pipeline_version`은 `None`(기본, unstamped — `Project.set_trial`이 최신 published로 채움) / `-1`(`self.pipeline_version` 상속) / 그 외 정수(그대로 사용). `src_trial=self.name` 자동 세팅
   - **자동 이름은 여기서 안 만든다** — `Trial`은 store 참조가 없는 순수 데이터라 "전역에서 유일한 다음 번호"를 스스로 답할 수 없다. 그건 `TrialStore.next_name`이 맡고, `Project.chain_trial`이 이름 채우기 + `chain()` + 등록을 한 호출로 묶는다
 
-- **`make_trials(name, processor, edges, method, adapter, params, param_grid, tags, pipeline_version)`** → `list[Trial]`
-  - 프로젝트를 모르는 순수 빌더라 `pipeline_version`은 그냥 통과시킬 뿐 — 안 주면 `set_trial`이 채운다. 받는 이유는 스윕 전체를 옛 버전에 대고 저작할 수 있어야 해서(`desc`를 안 받는 것과 다른 점: 저건 표시용, 이건 실행을 가른다)
-  - `params`(전 trial 공통) + `param_grid`(`{param: [values]}`) 카테시안 곱, grid 키 정렬 기준 결정적 순서
-  - 이름: 단일이면 `{name}`, 복수면 `{name}_{idx}` (0 패딩)
-  - `_validate_processor`/`_validate_adapter`/`_validate_params`로 spec 검증 (Pipeline과 동일 규칙)
+- **`GridTrials(processor, edges, method, adapter, params, param_grid, tags)`** — `Project.make_trials`용 생성기. `combos() -> list[dict]`가 전부(각 dict는 `processor`/`edges`/`method`/`adapter`/`params`/`tag` — `Trial(name=..., **combo)`의 `name` 뺀 나머지)
+  - **이름을 전혀 안 만든다** — 예전 자유함수 `make_trials`가 `{name}_{idx}`를 combo 개수 기반 zero-pad로 파생시켰던 게 결함이었다(#132): 1개→2개면 원래 이름이 사라지고, 10개→11개면 자릿수가 늘어 **전부** 밀리고, grid 값이 하나 늘면 같은 idx가 다른 조합을 가리키게 됐다. `GridTrials`는 애초에 이름 개념이 없어서 이 결함이 구조적으로 불가능하다 — 이름은 순전히 `Project.make_trials` 쪽(`TrialStore.next_name`) 책임
+  - `params`(전 combo 공통) + `param_grid`(`{param: [values]}`) 카테시안 곱, grid 키 정렬 기준 결정적 순서
+  - `_validate_processor`/`_validate_adapter`/`_validate_params`로 생성자에서 spec 검증 (Pipeline과 동일 규칙)
+  - **`GridTrials` 하나만이 아니다** — `combos() -> list[dict]`만 지키면 다른 생성기도 같은 자리에 낄 수 있다(모델 계열 bake-off, edges 스윕 등). 지금은 `GridTrials`만 구현, 나머지는 실제로 필요해지면
 
 ### compare_specs (`_describer.py`)
 여러 `ProcessorSpec`의 공통점/차이점을 분석하는 도구. `{name: spec}`을 받는다 — Trial이면
@@ -231,6 +231,7 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   - 스탬프가 동결과 맞물린다: 파이프라인이 넘어간 뒤 성공 이력 있는 이름을 다시 등록하면 **버전이 달라져서 "변경"으로 잡히고** 그대로 `ValueError`. 옛 결과가 그걸 만든 적 없는 버전을 설명하게 되는 걸 관례가 아니라 기계가 막는다
   - `set_trials`는 **전부 검사한 뒤에 쓴다** — 하나가 얼려 있으면 아무것도 안 바뀐다(절반만 등록되면 반환한 작업 목록이 거짓이 됨). **스탬프가 먼저** 도는 이유는 미스탬프 Trial은 저장된 것과 필드가 하나 달라서, 찍기 전에 비교하면 전부 "변경"으로 나오기 때문
   - 문지기 없는 저수준 경로는 `trials.register()` — 테스트가 재정의 동작을 직접 확인할 때 씀(스탬프도 안 찍히므로 `exp()`가 거부한다. 테스트 헬퍼들이 직접 채워 넣는 이유)
+- **`make_trials(name, generator, pipeline_version=None)`**: `generator.combos()`(예: `GridTrials`)가 내놓은 각 combo에 `self.trials.next_name(name)`으로 이름을 채번해 `Trial`을 만들고 `self.set_trials(...)`로 등록까지 한 호출로. `pipeline_version`은 배치 전체에 동일 적용(안 주면 combo마다 `set_trial`이 최신 published로 채움). `chain_trial`과 같은 자리 — "채번 + 구성 + 등록"을 한데 묶어서, 스윕을 키워도 이미 등록된 이름은 절대 안 건드린다(매 호출이 항상 새 이름만 만들어내므로)
 - **`chain_trial(src_name, name=None, pipeline_version=None, **overrides)`**: 등록된 Trial 하나에서 파생시켜 바로 등록. `self.trials.get_by_name(src_name)`으로 원본을 찾고(없으면 `KeyError`), `name`이 없으면 `self.trials.next_name(src_name)`으로 채운 뒤 `Trial.chain(...)` → `self.set_trial(...)`로 넘긴다 — freeze gate와 버전 스탬핑이 여느 저작과 똑같이 적용됨. 이름 충돌을 막는 별도 로직은 없다: `next_name`이 이미 등록된 걸 피해가지 않고, `set_trial`의 freeze gate가 유일한 안전망(성공 이력 없는 이름끼리 겹치면 조용히 덮어써진다 — 손으로 지은 이름이 겹칠 때와 같은 리스크)
 - **`error_trials(experimenter=None)`**: Trial 실행 실패를 fold당 dict 하나로 — `trial_name`/`experimenter`/`outer_idx`/`inner_idx`/`pipeline_version` + 평탄화된 `type`/`message`/`traceback`. `Experimenter.error_nodes`의 Trial판이고 **여기 있는 이유는 이력의 주인이 여기라서**(노드 이력은 Experimenter, Trial 이력은 프로젝트). 깨끗하면 `[]`
 - **`pending_trials(experimenter=None)`**: 등록된 Trial 중 **에러났거나 이력이 아예 없는** 이름 목록. 둘 다 "아직 돌려야 할 것"이라 한 목록으로 낸다 — 손으로 쓰면 후자만 잡아서 실패한 게 조용히 빠진다(#130이 노트북에서 지목한 실제 버그)

@@ -1,7 +1,7 @@
 import pytest
 
 from mllabs import CollectorStore, Collectors, Connector, PipelineBuilder
-from mllabs import Trial, make_trials, compare_specs
+from mllabs import Trial, GridTrials, compare_specs
 
 
 LGBM = 'lightgbm.LGBMClassifier'
@@ -20,105 +20,112 @@ def pipeline():
 
 
 @pytest.fixture
-def swept():
-    return make_trials(
-        'lgbm', processor=LGBM, edges=EDGES,
+def swept_combos():
+    return GridTrials(
+        processor=LGBM, edges=EDGES,
         params={'random_state': 42},
         param_grid={'max_depth': [3, 5], 'learning_rate': [0.05, 0.1]},
-    )
+    ).combos()
 
 
-class TestMakeTrialsGrid:
-    def test_trial_count_is_cartesian_product(self, swept):
-        assert len(swept) == 4
+@pytest.fixture
+def swept(swept_combos):
+    """Combos wrapped into named Trials, for tests that need real Trial
+    objects — naming here is just an arbitrary index, not a claim about how
+    GridTrials/Project.make_trials names anything (see TestMakeTrials in
+    test_project.py for that)."""
+    return [Trial(name=f'lgbm_{i}', **combo) for i, combo in enumerate(swept_combos)]
 
-    def test_no_grid_yields_single_trial(self):
-        trials = make_trials('one', processor=TREE, edges=EDGES, params={'max_depth': 3})
-        assert len(trials) == 1
-        assert trials[0].name == 'one'
 
-    def test_fixed_params_merged_into_every_trial(self, swept):
-        assert all(t.params['random_state'] == 42 for t in swept)
+class TestGridTrials:
+    def test_combo_count_is_cartesian_product(self, swept_combos):
+        assert len(swept_combos) == 4
 
-    def test_grid_params_cover_all_combinations(self, swept):
-        combos = {(t.params['max_depth'], t.params['learning_rate'])
-                  for t in swept}
+    def test_no_grid_yields_single_combo(self):
+        combos = GridTrials(processor=TREE, edges=EDGES, params={'max_depth': 3}).combos()
+        assert len(combos) == 1
+        assert combos[0]['params'] == {'max_depth': 3}
+
+    def test_fixed_params_merged_into_every_combo(self, swept_combos):
+        assert all(c['params']['random_state'] == 42 for c in swept_combos)
+
+    def test_grid_params_cover_all_combinations(self, swept_combos):
+        combos = {(c['params']['max_depth'], c['params']['learning_rate'])
+                  for c in swept_combos}
         assert combos == {(3, 0.05), (3, 0.1), (5, 0.05), (5, 0.1)}
 
     def test_grid_overrides_fixed_param(self):
-        trials = make_trials('x', processor=TREE, edges=EDGES,
-                             params={'max_depth': 1}, param_grid={'max_depth': [7]})
-        assert trials[0].params['max_depth'] == 7
+        combos = GridTrials(processor=TREE, edges=EDGES,
+                            params={'max_depth': 1}, param_grid={'max_depth': [7]}).combos()
+        assert combos[0]['params']['max_depth'] == 7
 
-    def test_shared_fields_are_identical(self, swept):
-        for t in swept:
-            assert t.processor == LGBM
-            assert t.method == 'predict'
-            assert t.edges == EDGES
+    def test_shared_fields_are_identical(self, swept_combos):
+        for c in swept_combos:
+            assert c['processor'] == LGBM
+            assert c['method'] == 'predict'
+            assert c['edges'] == EDGES
 
-    def test_edges_not_shared_between_trials(self, swept):
-        a, b = swept[:2]
-        a.edges['X'] = 'mutated'
-        assert b.edges['X'] == 'scaler:(*)'
+    def test_edges_not_shared_between_combos(self, swept_combos):
+        a, b = swept_combos[:2]
+        a['edges']['X'] = 'mutated'
+        assert b['edges']['X'] == 'scaler:(*)'
 
-    def test_names_are_unique_and_padded(self, swept):
-        assert [t.name for t in swept] == ['lgbm_0', 'lgbm_1', 'lgbm_2', 'lgbm_3']
-
-    def test_wide_index_padding(self):
-        trials = make_trials('w', processor=TREE, edges=EDGES,
-                             param_grid={'max_depth': list(range(12))})
-        assert trials[0].name == 'w_00'
+    def test_combos_carry_no_name(self, swept_combos):
+        """Naming is Project.make_trials's job, not this class's — a combo
+        is content only, so growing/shrinking the grid never has a name to
+        rename in the first place."""
+        assert all('name' not in c for c in swept_combos)
 
     def test_order_is_deterministic(self):
         def mk():
-            return make_trials('d', processor=TREE, edges=EDGES,
-                               param_grid={'b': [1, 2], 'a': ['x', 'y']})
-        assert [t.params for t in mk()] == [t.params for t in mk()]
+            return GridTrials(processor=TREE, edges=EDGES,
+                              param_grid={'b': [1, 2], 'a': ['x', 'y']}).combos()
+        assert [c['params'] for c in mk()] == [c['params'] for c in mk()]
 
-    def test_tags_propagate_to_trials(self):
-        trials = make_trials('t', processor=TREE, edges=EDGES,
-                             param_grid={'max_depth': [1, 2]}, tags=['final'])
-        assert all(t.tag == ['final'] for t in trials)
+    def test_tags_propagate_to_combos(self):
+        combos = GridTrials(processor=TREE, edges=EDGES,
+                            param_grid={'max_depth': [1, 2]}, tags=['final']).combos()
+        assert all(c['tag'] == ['final'] for c in combos)
 
 
-class TestMakeTrialsValidation:
+class TestGridTrialsValidation:
     def test_processor_class_rejected(self):
         from sklearn.tree import DecisionTreeClassifier
         with pytest.raises(TypeError, match='processor must be'):
-            make_trials('x', processor=DecisionTreeClassifier, edges=EDGES)
+            GridTrials(processor=DecisionTreeClassifier, edges=EDGES)
 
     def test_adapter_instance_rejected(self):
         from mllabs.adapter import DefaultAdapter
         with pytest.raises(TypeError, match='adapter must be'):
-            make_trials('x', processor=TREE, edges=EDGES, adapter=DefaultAdapter())
+            GridTrials(processor=TREE, edges=EDGES, adapter=DefaultAdapter())
 
     def test_live_object_in_params_rejected(self):
         from mllabs import ColSelector
         with pytest.raises(TypeError, match='must be plain data'):
-            make_trials('x', processor=TREE, edges=EDGES,
-                             params={'cat_features': ColSelector('*')})
+            GridTrials(processor=TREE, edges=EDGES,
+                      params={'cat_features': ColSelector('*')})
 
     def test_live_object_in_grid_rejected(self):
         from mllabs import ColSelector
         with pytest.raises(TypeError, match='must be plain data'):
-            make_trials('x', processor=TREE, edges=EDGES,
-                             param_grid={'cat_features': [ColSelector('*')]})
+            GridTrials(processor=TREE, edges=EDGES,
+                      param_grid={'cat_features': [ColSelector('*')]})
 
     def test_empty_edges_rejected(self):
         with pytest.raises(ValueError, match='non-empty'):
-            make_trials('x', processor=TREE, edges={})
+            GridTrials(processor=TREE, edges={})
 
     def test_non_string_edge_rejected(self):
         with pytest.raises(TypeError, match='DSL string'):
-            make_trials('x', processor=TREE, edges={'X': ['a', 'b']})
+            GridTrials(processor=TREE, edges={'X': ['a', 'b']})
 
     def test_scalar_grid_value_rejected(self):
         with pytest.raises(TypeError, match='must be a list'):
-            make_trials('x', processor=TREE, edges=EDGES, param_grid={'max_depth': 3})
+            GridTrials(processor=TREE, edges=EDGES, param_grid={'max_depth': 3})
 
     def test_empty_grid_value_rejected(self):
         with pytest.raises(ValueError, match='is empty'):
-            make_trials('x', processor=TREE, edges=EDGES, param_grid={'max_depth': []})
+            GridTrials(processor=TREE, edges=EDGES, param_grid={'max_depth': []})
 
 
 class TestTrialSpec:

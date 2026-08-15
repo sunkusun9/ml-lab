@@ -6,7 +6,7 @@ to the same `ProcessorSpec` — what differs is the question each answers.
 
 ::: mllabs.Trial
 
-::: mllabs.make_trials
+::: mllabs.GridTrials
 
 ::: mllabs.Predictor
 

@@ -170,88 +170,99 @@ class Trial:
         return f"<Trial {self.name!r} processor={self.processor!r}>"
 
 
-def make_trials(name, processor, edges, method='predict', adapter=None,
-                params=None, param_grid=None, tags=None, pipeline_version=None):
-    """Build a list of Trials sweeping *param_grid* over one fixed processor.
+class GridTrials:
+    """Cartesian-product param sweep over one fixed processor.
 
-    Every Trial shares processor/method/adapter/edges; ``params`` holds the
+    A generator for :meth:`~mllabs.Project.make_trials` — it enumerates what
+    a batch of Trials should *contain* (processor/method/adapter/params/
+    edges/tag), not what they are *named*. Naming is assign-based
+    (``TrialStore.next_name``) and lives entirely on the ``Project`` side, on
+    purpose: a name derived from grid position — as the old free-function
+    ``make_trials`` did — renames every sibling combo when the grid grows,
+    or worse, silently repoints a name at a different combo when an axis
+    gains a value in the middle of the sort order. Keeping this class
+    unaware of names is what makes that defect structurally impossible
+    here, not just avoided by convention.
+
+    Every combo shares processor/method/adapter/edges; ``params`` holds the
     values constant across the sweep and ``param_grid`` (``{param: [values]}``)
     is expanded as a cartesian product::
 
-        trials = make_trials(
-            'lgbm',
+        gen = GridTrials(
             processor='lightgbm.LGBMClassifier',
             edges={'X': 'scaler:(*)', 'y': '{target}'},
             params={'random_state': 42},
             param_grid={'max_depth': [3, 5], 'learning_rate': [0.05, 0.1]},
-        )                                    # lgbm_0 .. lgbm_3
+        )
+        project.make_trials('lgbm', gen)
 
-    Order is deterministic (grid keys sorted, values in the order given), so the
-    same call always produces the same trial names.
+    Order is deterministic (grid keys sorted, values in the order given), so
+    the same instance always produces the same sequence of combos.
 
     Args:
-        name (str): Name prefix. A single trial takes *name* unchanged;
-            several get ``{name}_{idx}`` zero-padded.
         processor (str): ``"module.ClassName"`` reference.
-        edges (dict): ``{key: dsl_string}`` shared by every trial.
+        edges (dict): ``{key: dsl_string}`` shared by every combo.
         method (str): Processor method. Default ``'predict'``.
         adapter: ``None`` / string ref / ``{"__ref__": ...}`` spec.
         params (dict, optional): Params fixed across the sweep.
         param_grid (dict, optional): ``{param: [values]}``. Omitted yields a
-            single Trial from *params* alone.
-        tags (list[str], optional): Tags applied to every Trial.
-        pipeline_version (int, optional): Pipeline version every Trial in the
-            sweep is authored against. Left unset, ``Project.set_trial`` fills
-            in the latest published one — pass it only to sweep against an
-            older version.
-
-    Returns:
-        list[Trial]
+            single combo from *params* alone.
+        tags (list[str], optional): Tags applied to every combo.
     """
-    where = f"make_trials({name!r})"
-    _validate_processor(processor, where)
-    _validate_adapter(adapter, where)
-    _validate_params(params, where)
-    _validate_params(param_grid, where)
 
-    if not isinstance(edges, dict) or not edges:
-        raise ValueError(f"{where}: edges must be a non-empty {{key: dsl_string}} dict")
-    for key, dsl_string in edges.items():
-        if not isinstance(dsl_string, str):
-            raise TypeError(
-                f"{where}: edges[{key!r}] must be a DSL string, got "
-                f"{type(dsl_string).__name__}"
-            )
+    def __init__(self, processor, edges, method='predict', adapter=None,
+                 params=None, param_grid=None, tags=None):
+        where = 'GridTrials'
+        _validate_processor(processor, where)
+        _validate_adapter(adapter, where)
+        _validate_params(params, where)
+        _validate_params(param_grid, where)
 
-    param_grid = dict(param_grid or {})
-    for key, values in param_grid.items():
-        if not isinstance(values, (list, tuple)):
-            raise TypeError(
-                f"{where}: param_grid[{key!r}] must be a list of values, got "
-                f"{type(values).__name__}"
-            )
-        if not values:
-            raise ValueError(f"{where}: param_grid[{key!r}] is empty")
+        if not isinstance(edges, dict) or not edges:
+            raise ValueError(f"{where}: edges must be a non-empty {{key: dsl_string}} dict")
+        for key, dsl_string in edges.items():
+            if not isinstance(dsl_string, str):
+                raise TypeError(
+                    f"{where}: edges[{key!r}] must be a DSL string, got "
+                    f"{type(dsl_string).__name__}"
+                )
 
-    grid_keys = sorted(param_grid)
-    combos = [
-        dict(zip(grid_keys, values))
-        for values in product(*(param_grid[k] for k in grid_keys))
-    ]
+        param_grid = dict(param_grid or {})
+        for key, values in param_grid.items():
+            if not isinstance(values, (list, tuple)):
+                raise TypeError(
+                    f"{where}: param_grid[{key!r}] must be a list of values, got "
+                    f"{type(values).__name__}"
+                )
+            if not values:
+                raise ValueError(f"{where}: param_grid[{key!r}] is empty")
 
-    width = len(str(len(combos) - 1)) if len(combos) > 1 else 0
-    trials = []
-    for idx, combo in enumerate(combos):
-        merged = dict(params or {})
-        merged.update(combo)
-        trials.append(Trial(
-            name=name if len(combos) == 1 else f"{name}_{idx:0{width}d}",
-            processor=processor,
-            edges=dict(edges),
-            method=method,
-            adapter=adapter,
-            params=merged,
-            tag=list(tags or []),
-            pipeline_version=pipeline_version,
-        ))
-    return trials
+        self.processor = processor
+        self.edges = dict(edges)
+        self.method = method
+        self.adapter = adapter
+        self.params = dict(params or {})
+        self.param_grid = param_grid
+        self.tags = list(tags or [])
+
+    def combos(self):
+        """Every combo as ``Trial`` constructor kwargs, minus ``name``.
+
+        Returns:
+            list[dict]: each with ``processor``/``edges``/``method``/
+            ``adapter``/``params``/``tag``.
+        """
+        grid_keys = sorted(self.param_grid)
+        result = []
+        for values in product(*(self.param_grid[k] for k in grid_keys)):
+            merged = dict(self.params)
+            merged.update(zip(grid_keys, values))
+            result.append(dict(
+                processor=self.processor,
+                edges=dict(self.edges),
+                method=self.method,
+                adapter=self.adapter,
+                params=merged,
+                tag=list(self.tags),
+            ))
+        return result

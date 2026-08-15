@@ -4,7 +4,7 @@ import pandas as pd
 from sklearn.model_selection import ShuffleSplit
 
 from mllabs._experimenter import Experimenter
-from mllabs import (Project, TrialStore, Trial, Predictor, PipelineBuilder, make_trials,
+from mllabs import (Project, TrialStore, Trial, GridTrials, Predictor, PipelineBuilder,
                     Collectors, Connector, MetricCollector)
 
 
@@ -43,6 +43,14 @@ def store(tmp_path):
 def _trial(name='dt', params=None, pipeline_version=None):
     return Trial(name, TREE, EDGES, params=params or {'max_depth': 3},
                  pipeline_version=pipeline_version)
+
+
+def _named_grid(names, **grid_kw):
+    """A GridTrials sweep wrapped into Trials under explicit *names* — for
+    tests that need a fixed, predictable batch. Real naming (next_name) is
+    Project.make_trials's job, exercised in TestMakeTrials."""
+    combos = GridTrials(processor=TREE, edges=EDGES, **grid_kw).combos()
+    return [Trial(name=n, **c) for n, c in zip(names, combos)]
 
 
 def dummy_metric(y, pred):
@@ -265,8 +273,7 @@ class TestSetTrial:
         assert project.set_trial(_trial(params={'max_depth': 5})) == 'dt'
 
     def test_set_trials_returns_only_what_changed(self, project):
-        trials = make_trials('dt', processor=TREE, edges=EDGES,
-                             param_grid={'max_depth': [3, 5]})
+        trials = _named_grid(['dt_0', 'dt_1'], param_grid={'max_depth': [3, 5]})
         assert project.set_trials(trials) == ['dt_0', 'dt_1']
         assert project.set_trials(trials) == []
 
@@ -275,8 +282,7 @@ class TestSetTrial:
         registered — the returned work list would then be a lie."""
         project.set_trial(_trial('dt_0', params={'max_depth': 3}))
         project.trials.record('dt_0', 'run_a', 0, 0, status='built')
-        trials = make_trials('dt', processor=TREE, edges=EDGES,
-                             param_grid={'max_depth': [9, 11]})
+        trials = _named_grid(['dt_0', 'dt_1'], param_grid={'max_depth': [9, 11]})
         with pytest.raises(ValueError, match='dt_0'):
             project.set_trials(trials)
         assert project.trials.get_by_name('dt_1') is None
@@ -335,10 +341,57 @@ class TestSetTrialStampsTheVersion:
 
     def test_a_sweep_can_be_authored_against_one_version(self, project, builder):
         builder.build()
-        trials = make_trials('dt', processor=TREE, edges=EDGES,
-                             param_grid={'max_depth': [3, 5]}, pipeline_version=0)
-        project.set_trials(trials)
+        gen = GridTrials(processor=TREE, edges=EDGES, param_grid={'max_depth': [3, 5]})
+        project.make_trials('dt', gen, pipeline_version=0)
         assert [t.pipeline_version for t in project.trials.list_trials()] == [0, 0]
+
+
+class TestMakeTrials:
+    """Project.make_trials — a generator's combos, named and registered.
+
+    The naming defect this replaces: the old free-function make_trials
+    derived names from grid position (index + a count-dependent zero-pad
+    width), so growing a sweep silently renamed every sibling, or worse,
+    repointed a name at a different combo. Assign-based naming
+    (TrialStore.next_name) makes that structurally impossible — a name is
+    never a function of anything but "give me the next one."
+    """
+
+    def test_registers_every_combo(self, project):
+        gen = GridTrials(processor=TREE, edges=EDGES, param_grid={'max_depth': [3, 5]})
+        names = project.make_trials('dt', gen)
+        assert len(names) == 2
+        assert {project.trials.get_by_name(n).params['max_depth'] for n in names} == {3, 5}
+
+    def test_names_are_minted_not_derived(self, project):
+        gen = GridTrials(processor=TREE, edges=EDGES, param_grid={'max_depth': [3, 5]})
+        names = project.make_trials('dt', gen)
+        assert all(n.startswith('dt') for n in names)
+        assert len(set(names)) == 2
+
+    def test_growing_the_grid_never_touches_earlier_names(self, project):
+        first = project.make_trials(
+            'dt', GridTrials(processor=TREE, edges=EDGES, param_grid={'max_depth': [3, 5]}))
+        project.trials.record(first[0], 'run_a', 0, 0, status='built')
+        before = project.trials.get_by_name(first[0]).params
+
+        project.make_trials(
+            'dt', GridTrials(processor=TREE, edges=EDGES, param_grid={'max_depth': [3, 5, 7]}))
+
+        assert project.trials.get_by_name(first[0]).params == before
+        assert project.trials.get_hist(trial_name=first[0], status='built')
+
+    def test_pipeline_version_applied_to_every_trial(self, project, builder):
+        builder.build()
+        gen = GridTrials(processor=TREE, edges=EDGES, param_grid={'max_depth': [3, 5]})
+        names = project.make_trials('dt', gen, pipeline_version=0)
+        assert {project.trials.get_by_name(n).pipeline_version for n in names} == {0}
+
+    def test_unstamped_pipeline_version_gets_latest_published(self, project, builder):
+        builder.build()
+        gen = GridTrials(processor=TREE, edges=EDGES, param_grid={'max_depth': [3, 5]})
+        names = project.make_trials('dt', gen)
+        assert {project.trials.get_by_name(n).pipeline_version for n in names} == {1}
 
 
 class TestChainTrial:
@@ -410,8 +463,7 @@ class TestTrialRegistration:
         assert len(store.list_trials()) == 2
 
     def test_register_all_registers_every_trial(self, store):
-        trials = make_trials('dt', processor=TREE, edges=EDGES,
-                             param_grid={'max_depth': [3, 5]})
+        trials = _named_grid(['dt_0', 'dt_1'], param_grid={'max_depth': [3, 5]})
         store.register_all(trials)
         assert {t.name for t in store.list_trials()} == {'dt_0', 'dt_1'}
 
@@ -783,8 +835,7 @@ class TestExperimenterUnderProject:
     def test_trials_run_and_land_in_hist(self, project, builder, sample_data):
         e = self._exp(project, builder, sample_data)
         e.build()
-        trial = make_trials('dt', processor=TREE, edges=EDGES,
-                             params={'max_depth': 3, 'random_state': 0})[0]
+        trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0})
         assert project.set_trial(trial) == 'dt'
         e.exp(['dt'])
         assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built', (1, 0): 'built'}
