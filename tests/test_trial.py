@@ -1,7 +1,7 @@
 import pytest
 
 from mllabs import CollectorStore, Collectors, Connector, PipelineBuilder
-from mllabs import Trial, make_trials
+from mllabs import Trial, GridTrials, compare_specs
 
 
 LGBM = 'lightgbm.LGBMClassifier'
@@ -20,105 +20,112 @@ def pipeline():
 
 
 @pytest.fixture
-def swept():
-    return make_trials(
-        'lgbm', processor=LGBM, edges=EDGES,
+def swept_combos():
+    return GridTrials(
+        processor=LGBM, edges=EDGES,
         params={'random_state': 42},
         param_grid={'max_depth': [3, 5], 'learning_rate': [0.05, 0.1]},
-    )
+    ).combos()
 
 
-class TestMakeTrialsGrid:
-    def test_trial_count_is_cartesian_product(self, swept):
-        assert len(swept) == 4
+@pytest.fixture
+def swept(swept_combos):
+    """Combos wrapped into named Trials, for tests that need real Trial
+    objects — naming here is just an arbitrary index, not a claim about how
+    GridTrials/Project.make_trials names anything (see TestMakeTrials in
+    test_project.py for that)."""
+    return [Trial(name=f'lgbm_{i}', **combo) for i, combo in enumerate(swept_combos)]
 
-    def test_no_grid_yields_single_trial(self):
-        trials = make_trials('one', processor=TREE, edges=EDGES, params={'max_depth': 3})
-        assert len(trials) == 1
-        assert trials[0].name == 'one'
 
-    def test_fixed_params_merged_into_every_trial(self, swept):
-        assert all(t.params['random_state'] == 42 for t in swept)
+class TestGridTrials:
+    def test_combo_count_is_cartesian_product(self, swept_combos):
+        assert len(swept_combos) == 4
 
-    def test_grid_params_cover_all_combinations(self, swept):
-        combos = {(t.params['max_depth'], t.params['learning_rate'])
-                  for t in swept}
+    def test_no_grid_yields_single_combo(self):
+        combos = GridTrials(processor=TREE, edges=EDGES, params={'max_depth': 3}).combos()
+        assert len(combos) == 1
+        assert combos[0]['params'] == {'max_depth': 3}
+
+    def test_fixed_params_merged_into_every_combo(self, swept_combos):
+        assert all(c['params']['random_state'] == 42 for c in swept_combos)
+
+    def test_grid_params_cover_all_combinations(self, swept_combos):
+        combos = {(c['params']['max_depth'], c['params']['learning_rate'])
+                  for c in swept_combos}
         assert combos == {(3, 0.05), (3, 0.1), (5, 0.05), (5, 0.1)}
 
     def test_grid_overrides_fixed_param(self):
-        trials = make_trials('x', processor=TREE, edges=EDGES,
-                             params={'max_depth': 1}, param_grid={'max_depth': [7]})
-        assert trials[0].params['max_depth'] == 7
+        combos = GridTrials(processor=TREE, edges=EDGES,
+                            params={'max_depth': 1}, param_grid={'max_depth': [7]}).combos()
+        assert combos[0]['params']['max_depth'] == 7
 
-    def test_shared_fields_are_identical(self, swept):
-        for t in swept:
-            assert t.processor == LGBM
-            assert t.method == 'predict'
-            assert t.edges == EDGES
+    def test_shared_fields_are_identical(self, swept_combos):
+        for c in swept_combos:
+            assert c['processor'] == LGBM
+            assert c['method'] == 'predict'
+            assert c['edges'] == EDGES
 
-    def test_edges_not_shared_between_trials(self, swept):
-        a, b = swept[:2]
-        a.edges['X'] = 'mutated'
-        assert b.edges['X'] == 'scaler:(*)'
+    def test_edges_not_shared_between_combos(self, swept_combos):
+        a, b = swept_combos[:2]
+        a['edges']['X'] = 'mutated'
+        assert b['edges']['X'] == 'scaler:(*)'
 
-    def test_names_are_unique_and_padded(self, swept):
-        assert [t.name for t in swept] == ['lgbm_0', 'lgbm_1', 'lgbm_2', 'lgbm_3']
-
-    def test_wide_index_padding(self):
-        trials = make_trials('w', processor=TREE, edges=EDGES,
-                             param_grid={'max_depth': list(range(12))})
-        assert trials[0].name == 'w_00'
+    def test_combos_carry_no_name(self, swept_combos):
+        """Naming is Project.make_trials's job, not this class's — a combo
+        is content only, so growing/shrinking the grid never has a name to
+        rename in the first place."""
+        assert all('name' not in c for c in swept_combos)
 
     def test_order_is_deterministic(self):
         def mk():
-            return make_trials('d', processor=TREE, edges=EDGES,
-                               param_grid={'b': [1, 2], 'a': ['x', 'y']})
-        assert [t.params for t in mk()] == [t.params for t in mk()]
+            return GridTrials(processor=TREE, edges=EDGES,
+                              param_grid={'b': [1, 2], 'a': ['x', 'y']}).combos()
+        assert [c['params'] for c in mk()] == [c['params'] for c in mk()]
 
-    def test_tags_propagate_to_trials(self):
-        trials = make_trials('t', processor=TREE, edges=EDGES,
-                             param_grid={'max_depth': [1, 2]}, tags=['final'])
-        assert all(t.tag == ['final'] for t in trials)
+    def test_tags_propagate_to_combos(self):
+        combos = GridTrials(processor=TREE, edges=EDGES,
+                            param_grid={'max_depth': [1, 2]}, tags=['final']).combos()
+        assert all(c['tag'] == ['final'] for c in combos)
 
 
-class TestMakeTrialsValidation:
+class TestGridTrialsValidation:
     def test_processor_class_rejected(self):
         from sklearn.tree import DecisionTreeClassifier
         with pytest.raises(TypeError, match='processor must be'):
-            make_trials('x', processor=DecisionTreeClassifier, edges=EDGES)
+            GridTrials(processor=DecisionTreeClassifier, edges=EDGES)
 
     def test_adapter_instance_rejected(self):
         from mllabs.adapter import DefaultAdapter
         with pytest.raises(TypeError, match='adapter must be'):
-            make_trials('x', processor=TREE, edges=EDGES, adapter=DefaultAdapter())
+            GridTrials(processor=TREE, edges=EDGES, adapter=DefaultAdapter())
 
     def test_live_object_in_params_rejected(self):
         from mllabs import ColSelector
         with pytest.raises(TypeError, match='must be plain data'):
-            make_trials('x', processor=TREE, edges=EDGES,
-                             params={'cat_features': ColSelector('*')})
+            GridTrials(processor=TREE, edges=EDGES,
+                      params={'cat_features': ColSelector('*')})
 
     def test_live_object_in_grid_rejected(self):
         from mllabs import ColSelector
         with pytest.raises(TypeError, match='must be plain data'):
-            make_trials('x', processor=TREE, edges=EDGES,
-                             param_grid={'cat_features': [ColSelector('*')]})
+            GridTrials(processor=TREE, edges=EDGES,
+                      param_grid={'cat_features': [ColSelector('*')]})
 
     def test_empty_edges_rejected(self):
         with pytest.raises(ValueError, match='non-empty'):
-            make_trials('x', processor=TREE, edges={})
+            GridTrials(processor=TREE, edges={})
 
     def test_non_string_edge_rejected(self):
         with pytest.raises(TypeError, match='DSL string'):
-            make_trials('x', processor=TREE, edges={'X': ['a', 'b']})
+            GridTrials(processor=TREE, edges={'X': ['a', 'b']})
 
     def test_scalar_grid_value_rejected(self):
         with pytest.raises(TypeError, match='must be a list'):
-            make_trials('x', processor=TREE, edges=EDGES, param_grid={'max_depth': 3})
+            GridTrials(processor=TREE, edges=EDGES, param_grid={'max_depth': 3})
 
     def test_empty_grid_value_rejected(self):
         with pytest.raises(ValueError, match='is empty'):
-            make_trials('x', processor=TREE, edges=EDGES, param_grid={'max_depth': []})
+            GridTrials(processor=TREE, edges=EDGES, param_grid={'max_depth': []})
 
 
 class TestTrialSpec:
@@ -161,6 +168,185 @@ class TestTrialSpec:
     def test_node_names_spans_every_edge_key(self):
         trial = Trial('a', TREE, {'X': 'scaler:(*)', 'y': 'labeller:(*)'})
         assert trial.node_names() == {'scaler', 'labeller'}
+
+
+class TestTrialChain:
+    """Trial.chain — deriving a new Trial, with the source recorded."""
+
+    def _src(self, **kw):
+        base = dict(name='lgb5', processor=LGBM, edges=EDGES,
+                    method='predict_proba', adapter=None,
+                    params={'max_depth': 3, 'random_state': 42},
+                    desc='round 5', tag=['final'], pipeline_version=2)
+        base.update(kw)
+        return Trial(**base)
+
+    def test_src_trial_records_the_source_name(self):
+        chained = self._src().chain('lgb5_stk')
+        assert chained.src_trial == 'lgb5'
+
+    def test_unspecified_fields_inherit(self):
+        src = self._src()
+        chained = src.chain('lgb5_stk')
+        assert chained.processor == src.processor
+        assert chained.method == src.method
+        assert chained.adapter == src.adapter
+        assert chained.desc == src.desc
+        assert chained.tag == src.tag
+
+    def test_named_override_replaces_the_field(self):
+        chained = self._src().chain('lgb5_stk', method='predict', desc='fixed rounds')
+        assert chained.method == 'predict'
+        assert chained.desc == 'fixed rounds'
+
+    def test_adapter_none_override_clears_it(self):
+        """A plain keyword default of None could not tell 'clear it' apart
+        from 'not given' — this is why overrides are read by presence."""
+        src = self._src(adapter='mllabs.adapter.LightGBMAdapter')
+        chained = src.chain('lgb5_stk', adapter=None)
+        assert chained.adapter is None
+
+    def test_params_merge_only_overrides_given_keys(self):
+        chained = self._src().chain('lgb5_stk', params={'max_depth': 7})
+        assert chained.params == {'max_depth': 7, 'random_state': 42}
+
+    def test_params_not_shared_with_the_source(self):
+        src = self._src()
+        chained = src.chain('lgb5_stk', params={'max_depth': 7})
+        chained.params['random_state'] = 0
+        assert src.params['random_state'] == 42
+
+    def test_edges_unspecified_key_inherits(self):
+        chained = self._src().chain('lgb5_stk', edges={'X': 'newnode:(*)'})
+        assert chained.edges['y'] == EDGES['y']
+
+    def test_edges_plain_value_replaces(self):
+        chained = self._src().chain('lgb5_stk', edges={'X': 'newnode:(*)'})
+        assert chained.edges['X'] == 'newnode:(*)'
+
+    def test_edges_plus_prefix_extends_the_source(self):
+        chained = self._src().chain('lgb5_stk', edges={'X': '+ extra:(*)'})
+        assert chained.edges['X'] == 'scaler:(*) + extra:(*)'
+
+    def test_pipeline_version_default_is_unstamped(self):
+        chained = self._src().chain('lgb5_stk')
+        assert chained.pipeline_version is None
+
+    def test_pipeline_version_minus_one_inherits_the_source(self):
+        chained = self._src().chain('lgb5_stk', pipeline_version=-1)
+        assert chained.pipeline_version == 2
+
+    def test_pipeline_version_explicit_value_is_used_as_given(self):
+        chained = self._src().chain('lgb5_stk', pipeline_version=5)
+        assert chained.pipeline_version == 5
+
+    def test_unknown_override_is_rejected(self):
+        with pytest.raises(TypeError, match='unexpected keyword'):
+            self._src().chain('lgb5_stk', pipeline_version=-1, tag=['x'], bogus=1)
+
+
+class TestCompareSpecs:
+    """compare_specs — common/diff across a group of ProcessorSpecs.
+
+    Replaces compare_nodes (a leftover from when models were still Pipeline
+    nodes, pre-#123). Trial is the intended caller:
+    compare_specs({t.name: t.get_spec() for t in trials}).
+    """
+
+    def _spec(self, name, processor=LGBM, edges=None, method='predict_proba',
+              adapter=None, params=None):
+        return Trial(name, processor, edges or dict(EDGES), method=method,
+                     adapter=adapter, params=params or {}).get_spec()
+
+    def test_groups_by_processor(self):
+        specs = {'a': self._spec('a'),
+                 'b': self._spec('b', processor=TREE)}
+        result = compare_specs(specs)
+        assert set(result) == {LGBM, TREE}
+
+    def test_uniform_method_is_common_not_diff(self):
+        specs = {'a': self._spec('a', method='predict_proba'),
+                 'b': self._spec('b', method='predict_proba')}
+        result = compare_specs(specs)[LGBM]
+        assert result['common']['method'] == 'predict_proba'
+        assert 'method' not in result['diff']
+
+    def test_differing_method_is_diff_not_common(self):
+        specs = {'a': self._spec('a', method='predict'),
+                 'b': self._spec('b', method='predict_proba')}
+        result = compare_specs(specs)[LGBM]
+        assert 'method' not in result['common']
+        assert dict(result['diff']['method']) == {'a': 'predict', 'b': 'predict_proba'}
+
+    def test_uniform_adapter_is_common_even_when_none(self):
+        """None is a legitimate shared value, not 'nothing to report' — this
+        is why presence (not a None sentinel) is what common/diff read."""
+        specs = {'a': self._spec('a'), 'b': self._spec('b')}
+        result = compare_specs(specs)[LGBM]
+        assert 'adapter' in result['common'] and result['common']['adapter'] is None
+        assert 'adapter' not in result['diff']
+
+    def test_params_common_key_excluded_from_diff_columns(self):
+        specs = {'a': self._spec('a', params={'random_state': 42, 'max_depth': 3}),
+                 'b': self._spec('b', params={'random_state': 42, 'max_depth': 5})}
+        result = compare_specs(specs)[LGBM]
+        assert result['common']['params'] == {'random_state': 42}
+        assert list(result['diff']['params'].columns) == ['max_depth']
+
+    def test_params_diff_holds_each_own_value(self):
+        specs = {'a': self._spec('a', params={'max_depth': 3}),
+                 'b': self._spec('b', params={'max_depth': 5})}
+        df = compare_specs(specs)[LGBM]['diff']['params']
+        assert df.loc['a', 'max_depth'] == 3
+        assert df.loc['b', 'max_depth'] == 5
+
+    def test_params_and_edges_keys_always_present(self):
+        """Unlike method/adapter, params/edges never disappear from either
+        side — callers never need to guard access with .get()."""
+        specs = {'a': self._spec('a'), 'b': self._spec('b')}
+        result = compare_specs(specs)[LGBM]
+        assert 'params' in result['common'] and 'params' in result['diff']
+        assert 'edges' in result['common'] and 'edges' in result['diff']
+        assert hasattr(result['diff']['params'], 'columns')
+        assert hasattr(result['diff']['edges'], 'columns')
+
+    def test_identical_edge_segments_are_fully_common_no_diff_column(self):
+        specs = {'a': self._spec('a', edges={'X': 'scaler:(*)', 'y': '{target}'}),
+                 'b': self._spec('b', edges={'X': 'scaler:(*)', 'y': '{target}'})}
+        result = compare_specs(specs)[LGBM]
+        assert result['common']['edges']['X']['scaler'] == ['*']
+        assert result['common']['edges']['y'][None] == ['{target}']
+        assert result['diff']['edges'].shape[1] == 0
+
+    def test_atomic_set_literal_difference_has_no_partial_overlap(self):
+        """The DSL string is the comparison unit — {f1,f2} vs {f1,f2,f3}
+        does not surface f1/f2 as shared. Simple by design: under one
+        pipeline_version a matching string always means a matching variable
+        set, but the reverse (two different strings, same variables) is a
+        case this deliberately does not chase."""
+        specs = {'a': self._spec('a', edges={'X': '{f1, f2}', 'y': '{target}'}),
+                 'b': self._spec('b', edges={'X': '{f1, f2, f3}', 'y': '{target}'})}
+        result = compare_specs(specs)[LGBM]
+        assert 'X' not in result['common']['edges']
+        col = result['diff']['edges'][('X', None)]
+        assert col['a'] == ['{f1, f2}']
+        assert col['b'] == ['{f1, f2, f3}']
+
+    def test_plus_joined_segments_do_show_the_shared_atom(self):
+        """Writing edges as '+'-joined atoms is how a caller opts into
+        finer-grained overlap detection — each atom compares on its own."""
+        specs = {'a': self._spec('a', edges={'X': '{f1} + {f2}', 'y': '{target}'}),
+                 'b': self._spec('b', edges={'X': '{f1} + {f3}', 'y': '{target}'})}
+        result = compare_specs(specs)[LGBM]
+        assert result['common']['edges']['X'][None] == ['{f1}']
+        assert result['diff']['edges'].loc['a', ('X', None)] == ['{f2}']
+        assert result['diff']['edges'].loc['b', ('X', None)] == ['{f3}']
+
+    def test_missing_edge_key_is_treated_as_empty_not_an_error(self):
+        specs = {'a': self._spec('a', edges={'X': 'scaler:(*)', 'y': '{target}'}),
+                 'b': self._spec('b', edges={'X': 'scaler:(*)'})}
+        result = compare_specs(specs)[LGBM]
+        assert ('y', None) in result['diff']['edges'].columns
 
 
 class TestCollectorsRegistry:

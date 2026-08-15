@@ -229,7 +229,9 @@ The two sides answer under separate keys because `exp/{name}` and `trainers/{nam
 p.get_node_names()                   # every node
 p.get_node_names('tgt_.*')           # by regex
 p.get_node_spec('scale')             # the resolved ProcessorSpec
-p.compare_nodes(['m1', 'm2'])        # per-processor DataFrames of the differences
+
+from mllabs import compare_specs
+compare_specs({n: p.get_node_spec(n) for n in ['n1', 'n2']})  # common vs. differing, per processor
 
 from IPython.display import Markdown, display
 display(Markdown(p.desc_pipeline()))     # Mermaid diagram of the graph

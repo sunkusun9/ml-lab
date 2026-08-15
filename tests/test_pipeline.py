@@ -921,51 +921,6 @@ class TestCopyNodes:
         assert None in cp.nodes
 
 
-class TestCompareNodes:
-    def test_param_differences(self, p):
-        p.set_grp('g1', processor=DummyHead, method='predict',
-                  edges={'X': '{x1}', 'y': '{target}'})
-        p.set_node('n1', grp='g1', params={'a': 1, 'b': 2})
-        p.set_node('n2', grp='g1', params={'a': 1, 'b': 3})
-        result = p.compare_nodes(['n1', 'n2'])
-        df = result[DummyHead]
-        assert ('params', 'b') in df.columns
-        assert ('params', 'a') not in df.columns
-
-    def test_groups_by_processor(self, p):
-        p.set_grp('g1', processor=DummyHead, method='predict',
-                  edges={'X': '{x1}', 'y': '{target}'})
-        p.set_node('n1', grp='g1', params={'a': 1})
-        p.set_grp('g2', processor=AnotherProcessor, method='predict',
-                  edges={'X': '{x1}', 'y': '{target}'})
-        p.set_node('n2', grp='g2', params={'a': 2})
-        result = p.compare_nodes(['n1', 'n2'])
-        assert DummyHead in result
-        assert AnotherProcessor in result
-
-    def test_edge_differences(self, p):
-        p.set_grp('g1', processor=DummyStage, method='transform',
-                  edges={'X': '{x1}'})
-        p.set_node('s1', grp='g1')
-        p.set_grp('g2', processor=DummyHead, method='predict',
-                  edges={'y': '{target}'})
-        p.set_node('n1', grp='g2', edges={'X': 's1:({a, b})'})
-        p.set_node('n2', grp='g2', edges={'X': 's1:({a, c})'})
-        result = p.compare_nodes(['n1', 'n2'])
-        df = result[DummyHead]
-        x_cols = [c for c in df.columns if c[0] == 'X']
-        assert len(x_cols) > 0
-
-    def test_identical_nodes_empty_columns(self, p):
-        p.set_grp('g1', processor=DummyHead, method='predict',
-                  edges={'X': '{x1}', 'y': '{target}'})
-        p.set_node('n1', grp='g1', params={'a': 1})
-        p.set_node('n2', grp='g1', params={'a': 1})
-        result = p.compare_nodes(['n1', 'n2'])
-        df = result[DummyHead]
-        assert len(df.columns) == 0
-
-
 class TestParamsEqual:
     """params/adapter hold plain data or ref specs only, so comparison is ``==``."""
 

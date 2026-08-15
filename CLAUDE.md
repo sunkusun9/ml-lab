@@ -49,7 +49,7 @@ Project(path, data, aug_data, cache_maxsize)   경로·데이터·캐시 소유 
 
 - **Project** (`_project.py`): 디렉토리 레이아웃 + 데이터셋 + `pipeline`/`TrialStore`/`ProjectStore`/`cache`, 그리고 자기가 내준 Experimenter/Trainer를 이름으로 들고 있음(같은 이름은 같은 객체). 별도 `save()`는 없다 — 각 컴포넌트가 이미 write-through
 - **PipelineBuilder / Pipeline** (`_pipeline.py`): 가변 빌더 + `build()`가 만드는 불변 **노드 전용** 그래프
-- **Trial / make_trials** (`_trial.py`): 평가할 구성 하나. Pipeline 밖에 있음
+- **Trial / GridTrials** (`_trial.py`): 평가할 구성 하나 / 그 구성들을 만들어내는 생성기 하나. Pipeline 밖에 있음
 - **TrialStore** (`_trial_store.py`): `trials`(정의) + `experiment_hist`(fold별 실행 이력). 저작은 `Project.set_trial`, 실행은 `Experimenter.exp`가 **이름으로** 꺼내 씀
 - **Predictor** (`_predictor.py`): Trainer가 학습하는 끝지점 출력 노드. Trial과 같은 실행 정의 + 출처(`src_trial`/`src_experimenter`)
 - **PredictorStore** (`_predictor_store.py`): `predictors`(정의 + `status`) 하나뿐 — fold별 이력은 Trainer의 두 번째 `NodeStore`가 가짐
@@ -114,8 +114,8 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 - `sync()`: DB가 source of truth. 그룹/노드 필드를 직접 값 비교(`diff()`)해 갱신하고, **그룹이 바뀌면 그 그룹(+자식 그룹) 소속 노드들의 attrs 캐시도 함께 무효화**해 `changes['nodes']['updated']`에 포함시킴(노드 자신의 행은 안 바뀌었어도 상속받는 값이 바뀌었으므로)
 - **`serial` 없음** — 정의 변경을 표시하는 전역 신호를 두지 않는다. staleness는 `Pipeline.diff_from`의 값 비교, 버전은 `PipelineStore`의 단순 `max+1` 카운터가 담당(해시/dedup 없음)
 - `copy()`, `copy_nodes(node_names)` — 선택적 복사 (builder→builder)
-- `compare_nodes(nodes)` → `{processor_name: DataFrame}` (params 차이 + edges['X'] 노드별 변수 차이)
 - `desc_pipeline(max_depth, direction)`, `desc_node(node_name, direction, show_params)`: Mermaid 다이어그램 — grp 계층이 필요하므로 **builder 전용**
+- **노드 비교 메소드는 없다** — `compare_nodes`가 있었지만, 모델이 `role='head'` 노드였던 시절(#123 이전)에나 유의미했던 도구였다. 지금 비교할 가치가 있는 건 전처리 노드가 아니라 Trial이라, `compare_specs`(아래 "compare_specs" 섹션)를 `{t.name: t.get_spec() for t in trials}`로 직접 부르면 된다 — Pipeline 노드를 비교하고 싶으면 `{n: pipeline.get_node_spec(n) for n in names}`로 같은 함수를 쓸 수 있어 wrapper가 따로 필요 없다
 
 #### Pipeline (빌드 결과)
 - `nodes`: `{name: _BuiltNode}` — `None` 키는 `_BuiltDataSource` (builder와 동일한 관례)
@@ -167,19 +167,33 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 ### Trial (`_trial.py`)
 평가할 구성 하나. **Experiment 클래스는 없음** — Trial 리스트를 직접 넘긴다.
 
-- **`Trial`**: `name`, `processor`, `method`, `adapter`, `params`, `edges`, `desc`, `tag`, `pipeline_version`
+- **`Trial`**: `name`, `processor`, `method`, `adapter`, `params`, `edges`, `desc`, `tag`, `pipeline_version`, `src_trial`
   - `desc`: 순수 표시용 설명 문자열 — `PipelineBuilder`의 `desc`와 같은 역할(매칭/diff/저장 식별에 전혀 관여 안 함). 안 주면 `None`
   - **`pipeline_version`은 정의의 일부다** — 어느 Pipeline 버전에 대한 후보인지. `None`이면 미스탬프이고 `Project.set_trial`이 최신 published로 채운다. `TrialStore.has()`가 이걸 비교하고 `exp()`가 채택 버전과 대조한다("Trial/Predictor 버전 스탬프" 섹션)
   - `get_spec()`: 노드의 `Pipeline.get_node_spec()`과 **똑같은 `ProcessorSpec`** 반환 — `pipeline_version`은 안 들어간다. 실행 입력이 아니라 게이트라서 `desc`/`tag`와 같은 자리다
   - **이름이 식별자**. `TrialStore`(`trials` 테이블 PK)의 키이자 `experiment_hist`가 매다는 것이고, `exp()`가 참조하는 것도 이 이름 — Trial 객체는 프로젝트에 등록될 때만 등장하고 실행 경로엔 이름만 다닌다
   - 정의를 값으로 비교하는 별도 유틸(content_key 류)은 없다 — `TrialStore.has()`가 필드별로 직접 비교. 이 비교가 `Project.set_trial`의 문지기(변경 여부 + 성공 이력 있는 이름 동결)를 떠받침
+  - **`src_trial`**: 이 Trial이 어디서 파생됐는지, 참고용 — `Predictor.src_trial`과 같은 정책(FK 없음, 검증 없음, staleness 없음. `has()`도 desc/tag처럼 비교 대상에서 제외). `chain()`이 채우는 것 외엔 아무도 안 건드린다
   - `node_names()`: edges가 참조하는 노드 이름 집합
+  - **`chain(name, pipeline_version=None, **overrides)`** → `Trial`: 자신에서 파생된 새 Trial. `name`은 **필수**(같은 `TrialStore`에 들어가므로 `self.name` 재사용은 자기 자신의 행을 덮어씀). 지정 안 한 필드는 상속하되 `params`는 `self.params` 위에 partial merge, `edges`는 키별로 `_combine_edges`(그룹/노드 상속과 같은 `+`/`-` 관례)로 결합 — 완전 대체가 아님. override는 **존재 여부로 읽는다**(`adapter=None`은 명시적으로 지우는 것과 미지정 상속을 구분해야 해서 `**overrides`를 씀, 단순 키워드 기본값 `None`으로는 둘을 못 가른다). `pipeline_version`은 `None`(기본, unstamped — `Project.set_trial`이 최신 published로 채움) / `-1`(`self.pipeline_version` 상속) / 그 외 정수(그대로 사용). `src_trial=self.name` 자동 세팅
+  - **자동 이름은 여기서 안 만든다** — `Trial`은 store 참조가 없는 순수 데이터라 "전역에서 유일한 다음 번호"를 스스로 답할 수 없다. 그건 `TrialStore.next_name`이 맡고, `Project.chain_trial`이 이름 채우기 + `chain()` + 등록을 한 호출로 묶는다
 
-- **`make_trials(name, processor, edges, method, adapter, params, param_grid, tags, pipeline_version)`** → `list[Trial]`
-  - 프로젝트를 모르는 순수 빌더라 `pipeline_version`은 그냥 통과시킬 뿐 — 안 주면 `set_trial`이 채운다. 받는 이유는 스윕 전체를 옛 버전에 대고 저작할 수 있어야 해서(`desc`를 안 받는 것과 다른 점: 저건 표시용, 이건 실행을 가른다)
-  - `params`(전 trial 공통) + `param_grid`(`{param: [values]}`) 카테시안 곱, grid 키 정렬 기준 결정적 순서
-  - 이름: 단일이면 `{name}`, 복수면 `{name}_{idx}` (0 패딩)
-  - `_validate_processor`/`_validate_adapter`/`_validate_params`로 spec 검증 (Pipeline과 동일 규칙)
+- **`GridTrials(processor, edges, method, adapter, params, param_grid, tags)`** — `Project.make_trials`용 생성기. `combos() -> list[dict]`가 전부(각 dict는 `processor`/`edges`/`method`/`adapter`/`params`/`tag` — `Trial(name=..., **combo)`의 `name` 뺀 나머지)
+  - **이름을 전혀 안 만든다** — 예전 자유함수 `make_trials`가 `{name}_{idx}`를 combo 개수 기반 zero-pad로 파생시켰던 게 결함이었다(#132): 1개→2개면 원래 이름이 사라지고, 10개→11개면 자릿수가 늘어 **전부** 밀리고, grid 값이 하나 늘면 같은 idx가 다른 조합을 가리키게 됐다. `GridTrials`는 애초에 이름 개념이 없어서 이 결함이 구조적으로 불가능하다 — 이름은 순전히 `Project.make_trials` 쪽(`TrialStore.next_name`) 책임
+  - `params`(전 combo 공통) + `param_grid`(`{param: [values]}`) 카테시안 곱, grid 키 정렬 기준 결정적 순서
+  - `_validate_processor`/`_validate_adapter`/`_validate_params`로 생성자에서 spec 검증 (Pipeline과 동일 규칙)
+  - **`GridTrials` 하나만이 아니다** — `combos() -> list[dict]`만 지키면 다른 생성기도 같은 자리에 낄 수 있다(모델 계열 bake-off, edges 스윕 등). 지금은 `GridTrials`만 구현, 나머지는 실제로 필요해지면
+
+### compare_specs (`_describer.py`)
+여러 `ProcessorSpec`의 공통점/차이점을 분석하는 도구. `{name: spec}`을 받는다 — Trial이면
+`{t.name: t.get_spec() for t in trials}`, Pipeline 노드면 `{n: pipeline.get_node_spec(n) for n in names}`.
+`compare_nodes`(Pipeline 전용, 모델이 아직 `role='head'` 노드였던 #123 이전 유물)를 대체했다 — **wrapper 없이 하나로 통일**.
+
+- `processor`로 그룹핑 후, 그룹마다 `{'common': {...}, 'diff': {...}}` 반환
+- **`method`/`adapter`는 이진(binary)이다** — 그룹 전원이 같으면 `common`에, 하나라도 다르면 `diff`에 `pd.Series`(이름 keyed)로 — **둘 중 정확히 하나에만** 나타난다(둘 다도, 둘 다 아닌 것도 없음)
+- **`params`는 key 단위로 갈린다** — 전원 값이 같은 key는 `common['params']`로, 하나라도 다르면 그 key가 `diff['params']`(DataFrame, index=name)의 컬럼이 되어 각자의 값을 담는다
+- **`edges`는 `(edge key, source-node segment)` 단위로 갈리는데, DSL 문자열을 원자 단위로 비교한다** — 개별 컬럼명으로 분해하지 않는다. 같은 pipeline_version 안에서는 DSL 문자열이 같으면 반드시 같은 변수셋을 가리키므로(구조가 고정돼 있어서) 문자열 동등비교로 충분하고, `{a,b}`처럼 세트 리터럴로 뭉쳐 쓰면 부분 겹침은 안 잡힌다(`{a} + {b}`처럼 `+`로 쪼개 써야 개별 단위로 잡힌다) — 이건 단순함을 위해 받아들인 근사치다. segment가 그룹 전원 동일하면 `common['edges'][key][source]`(변수 리스트)로 통째로 가고 `diff`엔 컬럼 자체가 안 생긴다; 일부만 겹치면 교집합이 `common`에, 각자의 나머지(교집합을 뺀 것)가 `diff['edges']`(DataFrame, MultiIndex 컬럼 `(key, source)`)에 들어간다
+- `params`/`edges`는 `common`/`diff` 양쪽에 **항상 존재**한다(값이 비어있을 수는 있어도 key 자체는 안 빠짐) — `method`/`adapter`처럼 "둘 중 하나에만" 나타나는 게 아니라서, 호출부가 매번 존재 여부를 체크할 필요가 없다
 
 ### Project (`_project.py`)
 디렉토리 레이아웃 + **데이터셋** + 프로젝트 전역인 것 소유, 그리고 **자기가 내준 것을 들고 있음**.
@@ -217,6 +231,8 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   - 스탬프가 동결과 맞물린다: 파이프라인이 넘어간 뒤 성공 이력 있는 이름을 다시 등록하면 **버전이 달라져서 "변경"으로 잡히고** 그대로 `ValueError`. 옛 결과가 그걸 만든 적 없는 버전을 설명하게 되는 걸 관례가 아니라 기계가 막는다
   - `set_trials`는 **전부 검사한 뒤에 쓴다** — 하나가 얼려 있으면 아무것도 안 바뀐다(절반만 등록되면 반환한 작업 목록이 거짓이 됨). **스탬프가 먼저** 도는 이유는 미스탬프 Trial은 저장된 것과 필드가 하나 달라서, 찍기 전에 비교하면 전부 "변경"으로 나오기 때문
   - 문지기 없는 저수준 경로는 `trials.register()` — 테스트가 재정의 동작을 직접 확인할 때 씀(스탬프도 안 찍히므로 `exp()`가 거부한다. 테스트 헬퍼들이 직접 채워 넣는 이유)
+- **`make_trials(name, generator, pipeline_version=None)`**: `generator.combos()`(예: `GridTrials`)가 내놓은 각 combo에 `self.trials.next_name(name)`으로 이름을 채번해 `Trial`을 만들고 `self.set_trials(...)`로 등록까지 한 호출로. `pipeline_version`은 배치 전체에 동일 적용(안 주면 combo마다 `set_trial`이 최신 published로 채움). `chain_trial`과 같은 자리 — "채번 + 구성 + 등록"을 한데 묶어서, 스윕을 키워도 이미 등록된 이름은 절대 안 건드린다(매 호출이 항상 새 이름만 만들어내므로)
+- **`chain_trial(src_name, name=None, pipeline_version=None, **overrides)`**: 등록된 Trial 하나에서 파생시켜 바로 등록. `self.trials.get_by_name(src_name)`으로 원본을 찾고(없으면 `KeyError`), `name`이 없으면 `self.trials.next_name(src_name)`으로 채운 뒤 `Trial.chain(...)` → `self.set_trial(...)`로 넘긴다 — freeze gate와 버전 스탬핑이 여느 저작과 똑같이 적용됨. 이름 충돌을 막는 별도 로직은 없다: `next_name`이 이미 등록된 걸 피해가지 않고, `set_trial`의 freeze gate가 유일한 안전망(성공 이력 없는 이름끼리 겹치면 조용히 덮어써진다 — 손으로 지은 이름이 겹칠 때와 같은 리스크)
 - **`error_trials(experimenter=None)`**: Trial 실행 실패를 fold당 dict 하나로 — `trial_name`/`experimenter`/`outer_idx`/`inner_idx`/`pipeline_version` + 평탄화된 `type`/`message`/`traceback`. `Experimenter.error_nodes`의 Trial판이고 **여기 있는 이유는 이력의 주인이 여기라서**(노드 이력은 Experimenter, Trial 이력은 프로젝트). 깨끗하면 `[]`
 - **`pending_trials(experimenter=None)`**: 등록된 Trial 중 **에러났거나 이력이 아예 없는** 이름 목록. 둘 다 "아직 돌려야 할 것"이라 한 목록으로 낸다 — 손으로 쓰면 후자만 잡아서 실패한 게 조용히 빠진다(#130이 노트북에서 지목한 실제 버그)
   - **일부러 거칠다**: fold 일부만 돌다 끊긴 건 안 잡는다 — 그걸 판정하려면 fold 그리드와 대조해야 하는데 이 store는 그걸 모른다. 반환된 이름을 그냥 돌려도 안전하다(`exp()`가 끝난 fold를 건너뜀)
@@ -245,9 +261,10 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 ### TrialStore (`_trial_store.py`)
 ```sql
 trials(name PK, desc, processor, method, adapter, params, edges, tag,
-       pipeline_version)
+       pipeline_version, src_trial)
 experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
                 pipeline_version, status)
+trial_seq(id)  -- 오토인크리먼트뿐, next_name()의 전역 카운터
 ```
 - **`pipeline_version`이 양쪽에 다 있는데 뜻이 다르다** — `trials`의 것은 *요구* 버전(정의의 일부, 게이트가 대조하는 값), `experiment_hist`의 것은 *실제로 돈* 버전. 게이트가 있어서 새로 쓰이는 행은 항상 둘이 같지만, 게이트 이전에 기록된 행은 아니고 `get_hist(pipeline_version=)`과 `error_trials()` 반환 dict가 이 컬럼을 쓴다 — 중복이라 지우기엔 비용이 더 크다
 - **인조식별자도 content hash도 없다.** 두 테이블 다 **이름이 PK**(`trials`는 trial 이름, 이력은 trial 이름 + experimenter 이름). `pipeline_version`은 해시가 아니라 **정수**로, 그 실행의 `Experimenter.pipeline_version`을 그대로 기록
@@ -255,10 +272,12 @@ experiment_hist(trial_name, experimenter, outer_idx, inner_idx,  -- PK
 - 정의 일치 여부는 값 비교 하나로 충분해서(`has()`) 해시 컬럼을 두지 않는다. `experiment_hist`는 실행 로그일 뿐 정의의 출처가 아니므로, 이름이 재정의되면 예전 정의를 복원하는 기능은 없다
 - **재실행 여부는 `experiment_hist`가 판정한다** — `Experimenter._make_jobs`는 `experiment_hist`의 fold별 `status`만 본다: `'built'`면 스킵, `'error'`거나 기록이 없으면 job 생성. **디스크에 이와 어긋날 것이 애초에 없어서**(Trial은 아티팩트를 안 남김) 이게 유일하게 가능한 판정이고, 다시 돌리려면 `e.remove_trial_result(name)` 하나면 된다. 재정의해도 이미 `'built'`인 fold는 자동 재실행되지 않으며, **애초에 그런 재정의가 `Project.set_trial`에서 막힌다**
 - `register(trial)`/`register_all(trials)`: 이름 기준 upsert — **문지기가 없는 저수준 API**. 성공 이력 검사를 거치는 저작 진입점은 `Project.set_trial`/`set_trials`
-- `has(trial)`: 그 이름에 저장된 게 **지금** 이 정의와 같은지 필드별 비교. 저장된 게 아예 없으면 `False`(호출부가 부재를 따로 안 봐도 되게). `desc`/`tag`는 비교 대상이 아님 — 표시·선택용이라 실행이 달라지지 않음. **`pipeline_version`은 비교 대상**이다 — 어디서 돌 수 있는지를 가르므로, 같은 필드라도 다른 버전이면 다른 정의다. 파이프라인이 바뀐 뒤 같은 이름을 다시 등록하면 이게 "변경"으로 잡혀서 `set_trial`의 동결에 걸린다
+- `has(trial)`: 그 이름에 저장된 게 **지금** 이 정의와 같은지 필드별 비교. 저장된 게 아예 없으면 `False`(호출부가 부재를 따로 안 봐도 되게). `desc`/`tag`/`src_trial`은 비교 대상이 아님 — 표시·provenance용이라 실행이 달라지지 않음. **`pipeline_version`은 비교 대상**이다 — 어디서 돌 수 있는지를 가르므로, 같은 필드라도 다른 버전이면 다른 정의다. 파이프라인이 바뀐 뒤 같은 이름을 다시 등록하면 이게 "변경"으로 잡혀서 `set_trial`의 동결에 걸린다
 - `get_by_name(name)`/`list_trials()`: **`Trial` 객체**를 반환(`PredictorStore`와 같음). `exp()`가 이름으로 받아 여기서 정의를 꺼내 실행하므로, 넣은 것과 같은 것이 나와야 함
 - `remove(name)`: **정의만** 삭제 — `experiment_hist`는 그대로 두어 "정의가 사라진 뒤에도 무엇이 돌았는지는 읽힌다". 프로젝트에서 통째로 걷어내는 건 여러 store에 걸친 일이라 `Project.remove_trial(name)`
 - `record(trial_name, experimenter, outer_idx, inner_idx, pipeline_version, status)`, `get_hist(trial_name=, experimenter=, pipeline_version=, status=)`, `get_status(...)`, `remove_hist(...)`
+- **`next_seq()`**: `trial_seq`에 빈 행을 하나 insert하고 그 rowid를 반환하는, 영속되는 단순 증가 카운터 — `PipelineStore`의 `MAX(version)+1`과 같은 자리지만, 기존 행에서 유도하지 않고 자기만의 테이블로 둔다(Pipeline 버전과 달리 Trial 이름은 재사용되지 않아서 유도할 "기존 최댓값"이라는 개념 자체가 신뢰할 수 없음)
+- **`next_name(name_or_prefix)`**: 이름 또는 prefix를 주면 앞쪽 비숫자 부분을 prefix로 뽑아 `next_seq()`와 이어붙인 `{prefix}{seq}`를 반환. 번호는 **전역**(전 prefix 공유)이고 그 prefix 아래 뭐가 등록돼 있는지는 안 본다 — "assign, never derive"(#132)를 그대로 구현한 것. 충돌 방지 로직은 없음 — 겹치면 `set_trial`의 freeze gate가 안전망
 
 ### Experimenter (`_experimenter.py`)
 - **Project 의존성 없음. 주입받는 건 `cache` 하나** — 생성자: `Experimenter(path, name, data, data_names=, sp=, sp_v=, splitter_params=, title=, data_key=, aug_data=, cache=)`. store는 `ExperimenterStore(self.path)`로 **자기가 만들고**, Pipeline은 `set_pipeline()`으로만 채택
@@ -741,7 +760,7 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
 - **_trainer_store.py**: `TrainerStore(path)` — Trainer판 동형. `{path}/__trainer.db`, `trainer(name PK, pipeline_version, splits BLOB)`. Experimenter판과 다른 점 둘: splits 블롭에 **`split_indices`가 같이** 들어감(splitter가 없을 수도 있고, 학습된 fold와 정확히 같아야 해서), `data_key`/`title`이 **없음**(다른 Trainer와 비교할 일이 없어 라벨도 mismatch 가드도 불필요)
   - **`save(meta)`가 `INSERT OR IGNORE` + `UPDATE`인 이유**(양쪽 store 공통): meta 컬럼만 나열한 `INSERT OR REPLACE`는 같은 행의 BLOB(splitters/splits)을 NULL로 날려버린다
 - **_common.py**: Experimenter/Trainer 공용 — `require_built_pipeline`, `require_published_pipeline`(양쪽 공용 채택 게이트 — draft만 거부), `resolve_common_status`, `save_pipeline(path, pipeline)`/`load_pipeline(path)`(`{path}/pipeline.pkl`, 없으면 `None`), `error_payload`
-- **_describer.py**: desc_spec, desc_pipeline, desc_node, compare_nodes
+- **_describer.py**: desc_spec, desc_pipeline, desc_node, compare_specs
 - **_logger.py**: BaseLogger, DefaultLogger (start/update/end_progress, adhoc_progress, rename_progress)
 - **col.py / _connector.py / collector/ / filter/ / adapter/ / processor/**: 해당 섹션 참조
 - **filter/**: DataFilter, RandomFilter(n/frac/random_state), IndexFilter(index)

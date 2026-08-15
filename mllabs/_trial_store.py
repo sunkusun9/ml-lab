@@ -42,6 +42,7 @@ across folds and Experimenters without walking directories. See
 sits beside artifacts rather than standing in for them.
 """
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -58,7 +59,8 @@ _SCHEMA_SQL = """
         params           TEXT,
         edges            TEXT,
         tag              TEXT,
-        pipeline_version INTEGER
+        pipeline_version INTEGER,
+        src_trial        TEXT
     );
     CREATE TABLE IF NOT EXISTS experiment_hist (
         trial_name       TEXT NOT NULL,
@@ -72,7 +74,12 @@ _SCHEMA_SQL = """
     );
     CREATE INDEX IF NOT EXISTS idx_hist_experimenter
         ON experiment_hist (experimenter);
+    CREATE TABLE IF NOT EXISTS trial_seq (
+        id INTEGER PRIMARY KEY AUTOINCREMENT
+    );
 """
+
+_PREFIX_RE = re.compile(r'^\D*')
 
 
 class TrialStore(ArtifactStore):
@@ -112,17 +119,46 @@ class TrialStore(ArtifactStore):
             conn.execute(
                 "INSERT OR REPLACE INTO trials "
                 "(name, desc, processor, method, adapter, params, edges, tag, "
-                "pipeline_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "pipeline_version, src_trial) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (trial.name, trial.desc, trial.processor,
                  trial.method, json.dumps(trial.adapter), json.dumps(trial.params),
                  json.dumps(trial.edges), json.dumps(trial.tag),
-                 trial.pipeline_version),
+                 trial.pipeline_version, trial.src_trial),
             )
 
     def register_all(self, trials):
         """Register every Trial in *trials*."""
         for t in trials:
             self.register(t)
+
+    def next_seq(self):
+        """This TrialStore's next global naming sequence value.
+
+        A plain persisted auto-increment counter — the same role
+        ``PipelineStore``'s ``MAX(version) + 1`` plays for Pipeline versions,
+        just backed by its own table rather than derived from the rows it
+        names, since a Trial name (unlike a version) is never reused.
+        """
+        with sqlite3.connect(str(self.db_path)) as conn:
+            cur = conn.execute("INSERT INTO trial_seq DEFAULT VALUES")
+            return cur.lastrowid
+
+    def next_name(self, name_or_prefix):
+        """A fresh ``{prefix}{seq}`` name derived from *name_or_prefix*.
+
+        *name_or_prefix* may be a bare prefix (``'lgb'``) or an existing
+        Trial's own name (``'lgb5'``) — either way, the prefix is its
+        leading non-digit run. The number is this store's next global
+        sequence value (see :meth:`next_seq`), never derived from what
+        already exists under that prefix, so it stays stable even after a
+        prefix's highest existing number is removed.
+
+        Two calls never collide with each other, though a caller is still
+        free to hand-pick a name that does — ``Project.set_trial``'s freeze
+        gate is what would catch that, the same as any other redefinition.
+        """
+        prefix = _PREFIX_RE.match(name_or_prefix).group()
+        return f"{prefix}{self.next_seq()}"
 
     def remove(self, name):
         """Delete the definition stored under *name*.
@@ -141,8 +177,9 @@ class TrialStore(ArtifactStore):
 
         ``False`` when nothing is stored under the name at all, so a caller
         guarding a redefinition does not have to check for absence separately.
-        Compares what execution depends on; ``desc``/``tag`` are display and
-        selection metadata and do not make a definition a different one.
+        Compares what execution depends on; ``desc``/``tag``/``src_trial`` are
+        display and provenance metadata and do not make a definition a
+        different one.
 
         ``pipeline_version`` *is* compared. It decides where the Trial is
         allowed to run, so the same fields against a different version are a
@@ -193,6 +230,7 @@ class TrialStore(ArtifactStore):
             desc=row['desc'],
             tag=json.loads(row['tag']) if row['tag'] else [],
             pipeline_version=row['pipeline_version'],
+            src_trial=row['src_trial'],
         )
 
     # ------------------------------------------------------------------
