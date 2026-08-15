@@ -1,7 +1,7 @@
 import re
 import uuid
 from pathlib import Path
-from ._describer import desc_pipeline, desc_node, compare_nodes
+from ._describer import desc_pipeline, desc_node
 from ._pipeline_store import PipelineStore, DRAFT, PUBLISHED
 from ._edge_dsl import referenced_nodes, validate_edges, iter_segments, eval_expr
 
@@ -1748,19 +1748,6 @@ class PipelineBuilder:
             direction: 그래프 방향 ('TD': Top-Down, 'LR': Left-Right)
         """
         return desc_pipeline(self, max_depth, direction)
-
-    def compare_nodes(self, nodes):
-        """Compare params and X-edges across nodes that share the same processor.
-
-        Args:
-            nodes (list[str]): Node names to compare.
-
-        Returns:
-            dict[str, pd.DataFrame]: ``{processor_name: DataFrame}`` where the
-            DataFrame index is node names and columns are a MultiIndex of
-            ``('params', param_key)`` and ``('X', stage_label)``.
-        """
-        return compare_nodes(self, nodes)
 
     def desc_node(self, node_name, direction='TD', show_params=False):
         """특정 노드까지의 연결 구조를 Mermaid Markdown으로 반환

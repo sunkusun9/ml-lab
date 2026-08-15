@@ -6,6 +6,7 @@ from ._trainer import Trainer
 from ._inferencer import Inferencer
 from ._connector import Connector
 from ._pipeline import ColSelector, Pipeline, PipelineBuilder, ProcessorSpec
+from ._describer import compare_specs
 from ._trial import Trial, make_trials
 from ._trial_store import TrialStore
 from ._predictor import Predictor
@@ -38,6 +39,7 @@ __all__ = [
     'Pipeline',
     'PipelineBuilder',
     'ProcessorSpec',
+    'compare_specs',
     'Trial',
     'make_trials',
     'TrialStore',

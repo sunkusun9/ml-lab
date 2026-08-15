@@ -1,7 +1,7 @@
 import pytest
 
 from mllabs import CollectorStore, Collectors, Connector, PipelineBuilder
-from mllabs import Trial, make_trials
+from mllabs import Trial, make_trials, compare_specs
 
 
 LGBM = 'lightgbm.LGBMClassifier'
@@ -236,6 +236,110 @@ class TestTrialChain:
     def test_unknown_override_is_rejected(self):
         with pytest.raises(TypeError, match='unexpected keyword'):
             self._src().chain('lgb5_stk', pipeline_version=-1, tag=['x'], bogus=1)
+
+
+class TestCompareSpecs:
+    """compare_specs — common/diff across a group of ProcessorSpecs.
+
+    Replaces compare_nodes (a leftover from when models were still Pipeline
+    nodes, pre-#123). Trial is the intended caller:
+    compare_specs({t.name: t.get_spec() for t in trials}).
+    """
+
+    def _spec(self, name, processor=LGBM, edges=None, method='predict_proba',
+              adapter=None, params=None):
+        return Trial(name, processor, edges or dict(EDGES), method=method,
+                     adapter=adapter, params=params or {}).get_spec()
+
+    def test_groups_by_processor(self):
+        specs = {'a': self._spec('a'),
+                 'b': self._spec('b', processor=TREE)}
+        result = compare_specs(specs)
+        assert set(result) == {LGBM, TREE}
+
+    def test_uniform_method_is_common_not_diff(self):
+        specs = {'a': self._spec('a', method='predict_proba'),
+                 'b': self._spec('b', method='predict_proba')}
+        result = compare_specs(specs)[LGBM]
+        assert result['common']['method'] == 'predict_proba'
+        assert 'method' not in result['diff']
+
+    def test_differing_method_is_diff_not_common(self):
+        specs = {'a': self._spec('a', method='predict'),
+                 'b': self._spec('b', method='predict_proba')}
+        result = compare_specs(specs)[LGBM]
+        assert 'method' not in result['common']
+        assert dict(result['diff']['method']) == {'a': 'predict', 'b': 'predict_proba'}
+
+    def test_uniform_adapter_is_common_even_when_none(self):
+        """None is a legitimate shared value, not 'nothing to report' — this
+        is why presence (not a None sentinel) is what common/diff read."""
+        specs = {'a': self._spec('a'), 'b': self._spec('b')}
+        result = compare_specs(specs)[LGBM]
+        assert 'adapter' in result['common'] and result['common']['adapter'] is None
+        assert 'adapter' not in result['diff']
+
+    def test_params_common_key_excluded_from_diff_columns(self):
+        specs = {'a': self._spec('a', params={'random_state': 42, 'max_depth': 3}),
+                 'b': self._spec('b', params={'random_state': 42, 'max_depth': 5})}
+        result = compare_specs(specs)[LGBM]
+        assert result['common']['params'] == {'random_state': 42}
+        assert list(result['diff']['params'].columns) == ['max_depth']
+
+    def test_params_diff_holds_each_own_value(self):
+        specs = {'a': self._spec('a', params={'max_depth': 3}),
+                 'b': self._spec('b', params={'max_depth': 5})}
+        df = compare_specs(specs)[LGBM]['diff']['params']
+        assert df.loc['a', 'max_depth'] == 3
+        assert df.loc['b', 'max_depth'] == 5
+
+    def test_params_and_edges_keys_always_present(self):
+        """Unlike method/adapter, params/edges never disappear from either
+        side — callers never need to guard access with .get()."""
+        specs = {'a': self._spec('a'), 'b': self._spec('b')}
+        result = compare_specs(specs)[LGBM]
+        assert 'params' in result['common'] and 'params' in result['diff']
+        assert 'edges' in result['common'] and 'edges' in result['diff']
+        assert hasattr(result['diff']['params'], 'columns')
+        assert hasattr(result['diff']['edges'], 'columns')
+
+    def test_identical_edge_segments_are_fully_common_no_diff_column(self):
+        specs = {'a': self._spec('a', edges={'X': 'scaler:(*)', 'y': '{target}'}),
+                 'b': self._spec('b', edges={'X': 'scaler:(*)', 'y': '{target}'})}
+        result = compare_specs(specs)[LGBM]
+        assert result['common']['edges']['X']['scaler'] == ['*']
+        assert result['common']['edges']['y'][None] == ['{target}']
+        assert result['diff']['edges'].shape[1] == 0
+
+    def test_atomic_set_literal_difference_has_no_partial_overlap(self):
+        """The DSL string is the comparison unit — {f1,f2} vs {f1,f2,f3}
+        does not surface f1/f2 as shared. Simple by design: under one
+        pipeline_version a matching string always means a matching variable
+        set, but the reverse (two different strings, same variables) is a
+        case this deliberately does not chase."""
+        specs = {'a': self._spec('a', edges={'X': '{f1, f2}', 'y': '{target}'}),
+                 'b': self._spec('b', edges={'X': '{f1, f2, f3}', 'y': '{target}'})}
+        result = compare_specs(specs)[LGBM]
+        assert 'X' not in result['common']['edges']
+        col = result['diff']['edges'][('X', None)]
+        assert col['a'] == ['{f1, f2}']
+        assert col['b'] == ['{f1, f2, f3}']
+
+    def test_plus_joined_segments_do_show_the_shared_atom(self):
+        """Writing edges as '+'-joined atoms is how a caller opts into
+        finer-grained overlap detection — each atom compares on its own."""
+        specs = {'a': self._spec('a', edges={'X': '{f1} + {f2}', 'y': '{target}'}),
+                 'b': self._spec('b', edges={'X': '{f1} + {f3}', 'y': '{target}'})}
+        result = compare_specs(specs)[LGBM]
+        assert result['common']['edges']['X'][None] == ['{f1}']
+        assert result['diff']['edges'].loc['a', ('X', None)] == ['{f2}']
+        assert result['diff']['edges'].loc['b', ('X', None)] == ['{f3}']
+
+    def test_missing_edge_key_is_treated_as_empty_not_an_error(self):
+        specs = {'a': self._spec('a', edges={'X': 'scaler:(*)', 'y': '{target}'}),
+                 'b': self._spec('b', edges={'X': 'scaler:(*)'})}
+        result = compare_specs(specs)[LGBM]
+        assert ('y', None) in result['diff']['edges'].columns
 
 
 class TestCollectorsRegistry:

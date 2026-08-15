@@ -114,8 +114,8 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 - `sync()`: DB가 source of truth. 그룹/노드 필드를 직접 값 비교(`diff()`)해 갱신하고, **그룹이 바뀌면 그 그룹(+자식 그룹) 소속 노드들의 attrs 캐시도 함께 무효화**해 `changes['nodes']['updated']`에 포함시킴(노드 자신의 행은 안 바뀌었어도 상속받는 값이 바뀌었으므로)
 - **`serial` 없음** — 정의 변경을 표시하는 전역 신호를 두지 않는다. staleness는 `Pipeline.diff_from`의 값 비교, 버전은 `PipelineStore`의 단순 `max+1` 카운터가 담당(해시/dedup 없음)
 - `copy()`, `copy_nodes(node_names)` — 선택적 복사 (builder→builder)
-- `compare_nodes(nodes)` → `{processor_name: DataFrame}` (params 차이 + edges['X'] 노드별 변수 차이)
 - `desc_pipeline(max_depth, direction)`, `desc_node(node_name, direction, show_params)`: Mermaid 다이어그램 — grp 계층이 필요하므로 **builder 전용**
+- **노드 비교 메소드는 없다** — `compare_nodes`가 있었지만, 모델이 `role='head'` 노드였던 시절(#123 이전)에나 유의미했던 도구였다. 지금 비교할 가치가 있는 건 전처리 노드가 아니라 Trial이라, `compare_specs`(아래 "compare_specs" 섹션)를 `{t.name: t.get_spec() for t in trials}`로 직접 부르면 된다 — Pipeline 노드를 비교하고 싶으면 `{n: pipeline.get_node_spec(n) for n in names}`로 같은 함수를 쓸 수 있어 wrapper가 따로 필요 없다
 
 #### Pipeline (빌드 결과)
 - `nodes`: `{name: _BuiltNode}` — `None` 키는 `_BuiltDataSource` (builder와 동일한 관례)
@@ -183,6 +183,17 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   - `params`(전 trial 공통) + `param_grid`(`{param: [values]}`) 카테시안 곱, grid 키 정렬 기준 결정적 순서
   - 이름: 단일이면 `{name}`, 복수면 `{name}_{idx}` (0 패딩)
   - `_validate_processor`/`_validate_adapter`/`_validate_params`로 spec 검증 (Pipeline과 동일 규칙)
+
+### compare_specs (`_describer.py`)
+여러 `ProcessorSpec`의 공통점/차이점을 분석하는 도구. `{name: spec}`을 받는다 — Trial이면
+`{t.name: t.get_spec() for t in trials}`, Pipeline 노드면 `{n: pipeline.get_node_spec(n) for n in names}`.
+`compare_nodes`(Pipeline 전용, 모델이 아직 `role='head'` 노드였던 #123 이전 유물)를 대체했다 — **wrapper 없이 하나로 통일**.
+
+- `processor`로 그룹핑 후, 그룹마다 `{'common': {...}, 'diff': {...}}` 반환
+- **`method`/`adapter`는 이진(binary)이다** — 그룹 전원이 같으면 `common`에, 하나라도 다르면 `diff`에 `pd.Series`(이름 keyed)로 — **둘 중 정확히 하나에만** 나타난다(둘 다도, 둘 다 아닌 것도 없음)
+- **`params`는 key 단위로 갈린다** — 전원 값이 같은 key는 `common['params']`로, 하나라도 다르면 그 key가 `diff['params']`(DataFrame, index=name)의 컬럼이 되어 각자의 값을 담는다
+- **`edges`는 `(edge key, source-node segment)` 단위로 갈리는데, DSL 문자열을 원자 단위로 비교한다** — 개별 컬럼명으로 분해하지 않는다. 같은 pipeline_version 안에서는 DSL 문자열이 같으면 반드시 같은 변수셋을 가리키므로(구조가 고정돼 있어서) 문자열 동등비교로 충분하고, `{a,b}`처럼 세트 리터럴로 뭉쳐 쓰면 부분 겹침은 안 잡힌다(`{a} + {b}`처럼 `+`로 쪼개 써야 개별 단위로 잡힌다) — 이건 단순함을 위해 받아들인 근사치다. segment가 그룹 전원 동일하면 `common['edges'][key][source]`(변수 리스트)로 통째로 가고 `diff`엔 컬럼 자체가 안 생긴다; 일부만 겹치면 교집합이 `common`에, 각자의 나머지(교집합을 뺀 것)가 `diff['edges']`(DataFrame, MultiIndex 컬럼 `(key, source)`)에 들어간다
+- `params`/`edges`는 `common`/`diff` 양쪽에 **항상 존재**한다(값이 비어있을 수는 있어도 key 자체는 안 빠짐) — `method`/`adapter`처럼 "둘 중 하나에만" 나타나는 게 아니라서, 호출부가 매번 존재 여부를 체크할 필요가 없다
 
 ### Project (`_project.py`)
 디렉토리 레이아웃 + **데이터셋** + 프로젝트 전역인 것 소유, 그리고 **자기가 내준 것을 들고 있음**.
@@ -748,7 +759,7 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
 - **_trainer_store.py**: `TrainerStore(path)` — Trainer판 동형. `{path}/__trainer.db`, `trainer(name PK, pipeline_version, splits BLOB)`. Experimenter판과 다른 점 둘: splits 블롭에 **`split_indices`가 같이** 들어감(splitter가 없을 수도 있고, 학습된 fold와 정확히 같아야 해서), `data_key`/`title`이 **없음**(다른 Trainer와 비교할 일이 없어 라벨도 mismatch 가드도 불필요)
   - **`save(meta)`가 `INSERT OR IGNORE` + `UPDATE`인 이유**(양쪽 store 공통): meta 컬럼만 나열한 `INSERT OR REPLACE`는 같은 행의 BLOB(splitters/splits)을 NULL로 날려버린다
 - **_common.py**: Experimenter/Trainer 공용 — `require_built_pipeline`, `require_published_pipeline`(양쪽 공용 채택 게이트 — draft만 거부), `resolve_common_status`, `save_pipeline(path, pipeline)`/`load_pipeline(path)`(`{path}/pipeline.pkl`, 없으면 `None`), `error_payload`
-- **_describer.py**: desc_spec, desc_pipeline, desc_node, compare_nodes
+- **_describer.py**: desc_spec, desc_pipeline, desc_node, compare_specs
 - **_logger.py**: BaseLogger, DefaultLogger (start/update/end_progress, adhoc_progress, rename_progress)
 - **col.py / _connector.py / collector/ / filter/ / adapter/ / processor/**: 해당 섹션 참조
 - **filter/**: DataFilter, RandomFilter(n/frac/random_state), IndexFilter(index)

@@ -460,83 +460,122 @@ def desc_node(pipeline, node_name, direction='TD', show_params=False):
 
     return "\n".join(lines)
 
-def compare_nodes(pipeline, nodes):
-    """Compare params and X-edges across nodes that share the same processor.
+def compare_specs(specs):
+    """Common and differing elements across a group of ProcessorSpecs.
 
-    Nodes are grouped by processor class. Within each group, only columns
-    that differ between nodes are included.
+    Specs are grouped by processor (same processor = comparable apples to
+    apples). Within each group:
+
+    - ``method``/``adapter`` are binary — a scalar value either agrees
+      everywhere or it does not. It lands in ``common`` under that name when
+      every spec agrees, otherwise in ``diff`` as a ``pd.Series`` keyed by
+      name — present in exactly one of the two, never both, never neither.
+    - ``params`` splits per key: a key whose value is identical across the
+      whole group joins ``common['params']``; any other key becomes a column
+      of ``diff['params']`` (a DataFrame, index=name), holding each spec's
+      own value for it.
+    - ``edges`` splits the same way, but per ``(edge key, source-node
+      segment)`` rather than per whole-key, and unlike a scalar param the
+      overlap can be partial: the intersection of variables — even when it
+      is not everyone's whole set — goes into ``common['edges'][key][source]``,
+      and each spec's *remaining* variables (the intersection subtracted
+      out) become a column of ``diff['edges']``. A segment identical
+      everywhere ends up entirely in ``common``, with no column in ``diff``
+      at all — nothing left over once the shared part is subtracted.
 
     Args:
-        pipeline (Pipeline): Pipeline defining the node graph.
-        nodes (list[str]): Node names to compare.
+        specs (dict[str, ProcessorSpec]): ``{name: spec}`` to compare —
+            typically ``{n: pipeline.get_node_spec(n) for n in names}`` or
+            ``{t.name: t.get_spec() for t in trials}``.
 
     Returns:
-        dict[str, pd.DataFrame]: ``{processor_name: DataFrame}`` where the
-        DataFrame index is node names and columns are a MultiIndex of
-        ``('params', param_key)`` and ``('X', stage_label)``.
+        dict[str, dict]: ``{processor_name: {'common': {...}, 'diff': {...}}}``.
+        Both ``common`` and ``diff`` always carry ``'params'`` (dict) and
+        ``'edges'`` (dict of ``{key: {source: [vars]}}``/DataFrame
+        respectively) even when empty; ``'method'``/``'adapter'`` appear in
+        whichever of the two actually has something to say.
     """
-    spec_map = {n: pipeline.get_node_spec(n) for n in nodes}
-
     groups = {}
-    for name in nodes:
-        proc = spec_map[name].processor
-        proc_name = proc if proc is not None else 'None'
+    for name, spec in specs.items():
+        proc_name = spec.processor if spec.processor is not None else 'None'
         groups.setdefault(proc_name, []).append(name)
 
     result = {}
-    for proc_name, group_nodes in groups.items():
-        rows = {name: {} for name in group_nodes}
+    for proc_name, group_names in groups.items():
+        group_specs = {n: specs[n] for n in group_names}
+        common, diff = {}, {}
 
-        # params
-        all_param_keys = sorted({k for n in group_nodes for k in spec_map[n].params})
-        for name in group_nodes:
-            params = spec_map[name].params
-            for k in all_param_keys:
-                rows[name][('params', k)] = params.get(k, None)
+        for field in ('method', 'adapter'):
+            values = {n: getattr(s, field) for n, s in group_specs.items()}
+            if len({repr(v) for v in values.values()}) == 1:
+                common[field] = next(iter(values.values()))
+            else:
+                diff[field] = pd.Series(values)
 
-        # edges (X only) - stage node별 변수 비교
+        common['params'], diff['params'] = _compare_params(group_names, group_specs)
+        common['edges'], diff['edges'] = _compare_edges(group_names, group_specs)
+
+        result[proc_name] = {'common': common, 'diff': diff}
+
+    return result
+
+
+def _compare_params(names, group_specs):
+    all_keys = sorted({k for s in group_specs.values() for k in s.params})
+    common = {}
+    diff_rows = {n: {} for n in names}
+    for k in all_keys:
+        values = {n: group_specs[n].params.get(k, None) for n in names}
+        if len({repr(v) for v in values.values()}) == 1:
+            common[k] = next(iter(values.values()))
+        else:
+            for n in names:
+                diff_rows[n][k] = values[n]
+    return common, pd.DataFrame.from_dict(diff_rows, orient='index')
+
+
+def _compare_edges(names, group_specs):
+    all_edge_keys = sorted({k for s in group_specs.values() for k in s.edges})
+    common = {}
+    diff_rows = {n: {} for n in names}
+
+    for ek in all_edge_keys:
         source_vars = {}
-        for name in group_nodes:
-            x_entries = spec_map[name].edges.get('X')
-            if x_entries is None:
+        for n in names:
+            dsl = group_specs[n].edges.get(ek)
+            if dsl is None:
                 continue
-            for sn, expr in iter_segments(x_entries):
-                source_vars.setdefault(sn, {}).setdefault(name, []).append(unparse(expr))
+            for sn, expr in iter_segments(dsl):
+                source_vars.setdefault(sn, {}).setdefault(n, []).append(unparse(expr))
 
         for sn, node_vars in source_vars.items():
-            sn_str = str(sn) if sn is not None else 'DataSource'
-            for name in group_nodes:
-                if name not in node_vars:
-                    node_vars[name] = []
+            for n in names:
+                node_vars.setdefault(n, [])
 
-            repr_map = {}
-            var_sets = {}
-            for name in group_nodes:
+            repr_map, var_sets = {}, {}
+            for n in names:
                 s = set()
-                for v in node_vars[name]:
+                for v in node_vars[n]:
                     r = repr(v)
                     s.add(r)
                     repr_map[r] = v
-                var_sets[name] = s
-
-            if len({frozenset(s) for s in var_sets.values()}) <= 1:
-                continue
+                var_sets[n] = s
 
             non_empty = [s for s in var_sets.values() if s]
             common_reprs = set.intersection(*non_empty) if non_empty else set()
             common_vars = sorted([repr_map[r] for r in common_reprs], key=repr)
-            col_2 = f"{sn_str} [{', '.join(str(v) for v in common_vars)}]" if common_vars else sn_str
+            if common_vars:
+                common.setdefault(ek, {})[sn] = common_vars
 
-            for name in group_nodes:
-                diff_reprs = var_sets[name] - common_reprs
-                diff_vars = sorted([repr_map[r] for r in diff_reprs], key=repr)
-                rows[name][('X', col_2)] = diff_vars if diff_vars else []
+            if len({frozenset(s) for s in var_sets.values()}) <= 1:
+                continue  # identical everywhere -- nothing left for diff
 
-        df = pd.DataFrame.from_dict(rows, orient='index')
-        if len(df.columns) > 0:
-            df.columns = pd.MultiIndex.from_tuples(df.columns)
-            diff_cols = [c for c in df.columns if len({repr(v) for v in df[c]}) > 1]
-            df = df[diff_cols]
-        result[proc_name] = df
+            for n in names:
+                extra_reprs = var_sets[n] - common_reprs
+                extra_vars = sorted([repr_map[r] for r in extra_reprs], key=repr)
+                diff_rows[n][(ek, sn)] = extra_vars
 
-    return result
+    diff = pd.DataFrame.from_dict(diff_rows, orient='index')
+    if len(diff.columns) > 0:
+        diff.columns = pd.MultiIndex.from_tuples(diff.columns)
+    return common, diff
