@@ -1,6 +1,7 @@
 import pytest
+import pandas as pd
 
-from mllabs import Resolver, ExtDataProvider, Collectors, Connector
+from mllabs import Resolver, ExtDataProvider, Collectors, Connector, Experimenter, PipelineBuilder
 
 
 class TestResolverProcessorAndInstance:
@@ -101,3 +102,49 @@ class TestCollectorsWithResolver:
         provider.register('x', 'second')
         reopened = Collectors(tmp_path / 'collectors', resolver=Resolver(ext_data=provider))
         assert reopened.get_collector('m').payload == 'second'
+
+
+class TestResolverThroughExperimenterBuild:
+    """The point of threading Resolver into _executor._process: an
+    '@ext:name' param resolves for a Pipeline node exactly the same way it
+    already does for a Collector."""
+
+    def test_ext_reference_resolves_for_a_pipeline_node(self, tmp_path):
+        provider = ExtDataProvider(tmp_path / 'ext')
+        provider.register('greeting', 'hello')
+
+        p = PipelineBuilder(path=tmp_path / 'pipeline')
+        p.set_datasource({'f1': 'numerical', 'target': 'binary'})
+        p.set_grp('echo', processor='mock.EchoStage', method='fit_transform',
+                  edges={'X': '{f1}'}, params={'payload': '@ext:greeting'})
+        p.set_node('echo_node', grp='echo')
+        pipeline = p.build()
+
+        data = pd.DataFrame({'f1': [1.0, 2.0, 3.0, 4.0], 'target': [0, 1, 0, 1]})
+        e = Experimenter(tmp_path / 'exp', 'run', data,
+                         resolver=Resolver(ext_data=provider))
+        e.set_pipeline(pipeline)
+        e.build()
+
+        obj, _ = e.get_objs('echo_node')
+        assert obj.obj.payload == 'hello'
+
+    def test_no_resolver_leaves_an_ext_reference_unresolved(self, tmp_path):
+        """No resolver injected -> the default bare Resolver() has no
+        ext_data, so an '@ext:' param raises instead of silently carrying
+        the literal string through to the estimator."""
+        p = PipelineBuilder(path=tmp_path / 'pipeline')
+        p.set_datasource({'f1': 'numerical', 'target': 'binary'})
+        p.set_grp('echo', processor='mock.EchoStage', method='fit_transform',
+                  edges={'X': '{f1}'}, params={'payload': '@ext:greeting'})
+        p.set_node('echo_node', grp='echo')
+        pipeline = p.build()
+
+        data = pd.DataFrame({'f1': [1.0, 2.0, 3.0, 4.0], 'target': [0, 1, 0, 1]})
+        e = Experimenter(tmp_path / 'exp', 'run', data)
+        e.set_pipeline(pipeline)
+        e.build()
+
+        errors = e.error_nodes(['echo_node'])
+        assert len(errors) == 1
+        assert 'ExtDataProvider' in errors[0]['message']

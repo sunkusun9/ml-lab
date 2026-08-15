@@ -25,15 +25,17 @@ Git 관련 내용(커밋 메시지, PR, 이슈 코멘트)은 영어로 작성한
 
 ## 아키텍처 개요
 ```
-Project(path, data, aug_data, cache_maxsize)   경로·데이터·캐시 소유 + 관리 목록
-  ├─ data / aug_data                데이터셋 (data.pkl / aug_data.pkl, 지연 로드)
+Project(path, data, cache_maxsize)   경로·데이터·캐시·resolver 소유 + 관리 목록
+  ├─ data                            메인 데이터셋 (data.pkl, 지연 로드)
+  ├─ ext_data ──ExtDataProvider──►    이름별 외부 데이터(aug_data 포함) — 캐싱 없이 매번 디스크에서
+  ├─ resolver ──Resolver──►           spec을 실제 값으로: '@ext:name'은 ext_data에서, 나머지는 기존 resolve_* 재사용
   ├─ pipeline ──build()──► Pipeline 프로젝트당 하나. 빌더가 워킹카피, build가 publish
   │              draft()──► Pipeline 같은 스냅샷, 등록 안 함 (채택 불가)
   ├─ TrialStore                     Trial 정의 + 실행 이력 (프로젝트 전역 — 결과 비교가 목적)
   ├─ ProjectStore                   이름 목록만 (experimenters / trainers)
   ├─ experimenters{name: Experimenter}   CV 실험 (exp/{name}/) — Trial을 평가
   │    ├─ ExperimenterStore         meta + splitter + pipeline.pkl (이 Experimenter만)
-  │    └─ Collectors ──CollectorStore──► Collector 정의(entity 행 + params pkl) → 재조립
+  │    └─ Collectors(resolver=) ──CollectorStore──► Collector 정의(entity 행 + params TEXT) → resolver로 재조립
   │         └─ CollectHist          수집 이력 (이 Experimenter만)
   └─ trainers{name: Trainer}        전체 데이터 학습 (trainers/{name}/) — Predictor를 학습
        ├─ TrainerStore              meta + splits + pipeline.pkl (이 Trainer만)
@@ -205,14 +207,17 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 **모든 컴포넌트가 단독 동작 가능**한 건 그대로 — 단 데이터셋만은 Project에 있어야
 "프로젝트에 뭐가 있나"를 데이터 없이 물을 수 있다.
 
-- `Project(path, data=None, aug_data=None, cache_maxsize=4GB)` — `DataCache`를 소유하고 모든 Experimenter/Trainer가 공유
-- **데이터셋**: `data`/`aug_data` property(첫 접근에 `data.pkl`/`aug_data.pkl`에서 읽음 — 이름·이력 조회는 데이터를 안 건드림), `set_data(data)`/`set_aug_data(aug_data)`로 저장. 형식은 pkl(pandas/polars/cudf/numpy 다 되고 프로젝트가 이미 pipeline/splitter를 피클로 저장). 없으면 `_resolve_data`가 `ValueError`로 안내
-- **`ext_data`**: `ExtDataProvider`(`{path}/ext_data/`) — `data`/`aug_data`와 달리 **여러 개**를 이름으로 등록해두는 자리라 메모리에 캐싱 안 하고 요청마다 디스크에서 새로 읽음. 자세한 내용은 "ExtDataProvider" 섹션
+- `Project(path, data=None, cache_maxsize=4GB)` — `DataCache`를 소유하고 모든 Experimenter/Trainer가 공유
+- **데이터셋**: `data` property(첫 접근에 `data.pkl`에서 읽음 — 이름·이력 조회는 데이터를 안 건드림), `set_data(data)`로 저장. 형식은 pkl(pandas/polars/cudf/numpy 다 되고 프로젝트가 이미 pipeline/splitter를 피클로 저장). 없으면 `_resolve_data`가 `ValueError`로 안내
+- **`ext_data`**: `ExtDataProvider`(`{path}/ext_data/`) — `data`와 달리 **여러 개**를 이름으로 등록해두는 자리라 메모리에 캐싱 안 하고 요청마다 디스크에서 새로 읽음. 자세한 내용은 "ExtDataProvider" 섹션
+- **`aug_data`는 이제 Project가 안 갖고 있다** — `project.ext_data.register(name, df)`로 등록해두고, `add_experimenter(..., aug_data='@ext:name')`처럼 참조 문자열로 넘긴다. `Project.__init__`에도 `aug_data` 파라미터가 없다 — 관리할 별도 상태가 아니라 `ext_data`의 이름 있는 항목 하나일 뿐이라서
+- **`resolver`**: `Resolver(ext_data=self.ext_data)` — `add_experimenter`/`add_trainer`가 만드는 Experimenter/Trainer에 그대로 주입돼, Collector 구성과 Processor 실행 양쪽에서 `'@ext:name'`을 같은 방식으로 푼다("Resolver" 섹션 참조)
 - 경로: `pipeline_path`(property), `exp_path(name)`, `trainer_path(name)` — **collector 경로 없음**(레지스트리는 Experimenter 소유), **inferencer 경로도 없음**(아래 "Inferencer는 프로젝트 밖")
 - **레지스트리**: `experimenters`/`trainers` — `{name: 객체}`. 접근할 때마다 `list_*()`를 훑어 **아직 안 들고 있는 이름만** 연다(그래서 데이터셋이 필요). `list_experimenters()`/`list_trainers()`는 이름만 답하는 싼 질문이라 별개로 남는다
   - **`add_*`가 만든 객체가 곧 레지스트리가 돌려주는 객체다** — "안 들고 있는 것만 연다"의 요점이 이것. 한 디렉토리에 살아있는 인스턴스가 둘이면 각자 자기 Collectors와 노드 캐시를 들고 있어서, 한쪽으로 가한 변경이 다른 쪽엔 안 보인다(`Project.pipeline`이 builder 하나를 고수하는 것과 같은 이유)
   - 그래서 "다 훑었나" 플래그가 없다 — dict는 **내가 든 것** 하나만 뜻하고, 접근당 비용은 sqlite 쿼리 하나
 - **`add_experimenter(name, data=None, pipeline_version=None, aug_data=None, **kw)` / `add_trainer(...)`**: **추가 전용** — 이미 있는 이름이면 `ValueError`. 생성은 split을 다시 계산하고 provenance를 리셋하므로 기존 것 위에 하면 재개가 아니라 피해다(#128). 기존 것은 `project.experimenters[name]`으로
+  - `aug_data`는 그대로 Experimenter/Trainer에 전달만 한다(project 레벨 기본값으로의 폴백 없음) — 산 데이터셋이든 `'@ext:name'` 문자열이든 상관없이. 재오픈(`experimenters`/`trainers` property → `_open_experimenter`/`_open_trainer`)은 애초에 `aug_data`를 안 넘긴다 — 원래 미퍼시스트였던 값이라 project가 대신 기억해줄 방법이 없다(#131)
   - **존재 판정이 두 질문이다**: `ProjectStore`가 "이 프로젝트가 무엇을 관리하나"(멤버십), `ExperimenterStore.stored_at`/`TrainerStore.stored_at`이 "그 디렉토리가 이미 찼나"(점유). 색인엔 없는데 디스크엔 있는 건 모순이 아니라 "우리 것은 아니지만 자리는 찼다"는 정확한 사실이고, `add_*`는 둘 다 거부한다
   - `pipeline_version` 기본값은 **양쪽 다 최신 published** — 채택 가능한 게 published뿐이라 게이트를 그냥 통과하고, 아직 아무것도 빌드 안 했으면 v0(빈 Pipeline)라 특수 케이스가 없다. 빌더에 편집만 해두고 빌드 안 한 상태로 추가하면 **그 편집은 안 들어간다** — 채택하려면 `build()`가 먼저
 - **`remove_experimenter(name)` / `remove_trainer(name)`**: 디렉토리 삭제 + 색인 해제 + 레지스트리에서 제거. **Experimenter는 `experiment_hist` 행까지** 지운다 — 이름이 그 이력의 키라서, 남겨두면 다음에 같은 이름으로 추가한 것이 물려받고 `exp()`가 돌린 적 없는 fold를 건너뛴다. Trial *정의*는 프로젝트 소유라 안 건드림. Trainer는 프로젝트 전역 이력이 없어 디렉토리뿐
@@ -282,10 +287,11 @@ trial_seq(id)  -- 오토인크리먼트뿐, next_name()의 전역 카운터
 - **`next_name(name_or_prefix)`**: 이름 또는 prefix를 주면 앞쪽 비숫자 부분을 prefix로 뽑아 `next_seq()`와 이어붙인 `{prefix}{seq}`를 반환. 번호는 **전역**(전 prefix 공유)이고 그 prefix 아래 뭐가 등록돼 있는지는 안 본다 — "assign, never derive"(#132)를 그대로 구현한 것. 충돌 방지 로직은 없음 — 겹치면 `set_trial`의 freeze gate가 안전망
 
 ### Experimenter (`_experimenter.py`)
-- **Project 의존성 없음. 주입받는 건 `cache` 하나** — 생성자: `Experimenter(path, name, data, data_names=, sp=, sp_v=, splitter_params=, title=, data_key=, aug_data=, cache=)`. store는 `ExperimenterStore(self.path)`로 **자기가 만들고**, Pipeline은 `set_pipeline()`으로만 채택
+- **Project 의존성 없음. 주입받는 건 `cache`와 `resolver` 둘** — 생성자: `Experimenter(path, name, data, data_names=, sp=, sp_v=, splitter_params=, title=, data_key=, aug_data=, cache=, resolver=)`. store는 `ExperimenterStore(self.path)`로 **자기가 만들고**, Pipeline은 `set_pipeline()`으로만 채택
   - `data`는 native/`DataWrapper` 아무거나 — `self.data = wrap(data)`, splitter에는 `unwrap(data)`를 넘김
+  - `aug_data`는 산 데이터셋이든 `'@ext:name'` 문자열이든 상관없다 — 생성자가 `resolver.value(aug_data)`로 즉시 푼 뒤 `wrap()`한다(`resolver` 생략 시 `ext_data` 없는 기본 `Resolver()`라 `'@ext:'` 값이면 그 자리에서 에러). 안 정해지면 `None`
   - **생성자 = 신규 생성**. split을 다시 계산하고 상태를 새로 씀 → 기존 디렉토리에 대고 부르면 재개가 아니라 처음부터 다시 시작
-  - 복원은 **`Experimenter.load_experimenter(path, data, data_key=None, aug_data=None, cache=None)`** staticmethod. `{path}/__exp.db`가 없으면 `KeyError` — store를 만들기 **전에** 검사한다(안 그러면 없는 Experimenter의 디렉토리와 빈 db를 만들어놓고 실패함)
+  - 복원은 **`Experimenter.load_experimenter(path, data, data_key=None, aug_data=None, cache=None, trial_store=None, resolver=None)`** staticmethod. `{path}/__exp.db`가 없으면 `KeyError` — store를 만들기 **전에** 검사한다(안 그러면 없는 Experimenter의 디렉토리와 빈 db를 만들어놓고 실패함). `aug_data`는 **미퍼시스트**라 여기서도 다시 넘겨야 하고(저장된 Experimenter가 대신 기억해주지 않음), 넘긴다면 `resolver`도 같이 넘겨야 `'@ext:name'`이 풀린다
   - `Project.experimenter(...)`가 하는 일은 경로 + `cache` + ProjectStore 이름 등록 + (버전을 줬으면) `set_pipeline` 뿐
 - **이름이 식별자**: 경로는 `{project}/exp/{name}`, `TrialStore` 이력의 키도 이 이름. UUID 없음
 - **Pipeline은 객체로 지정** — `set_pipeline(pipeline)`이 이미 로드된 `Pipeline`을 받아 채택하며 **`require_published_pipeline`으로 draft를 거부**(Trainer와 같은 게이트, 버전 제한은 없음). 예전엔 아무 status나 받았는데 — 편집 중인 정의로 실험하는 게 실험의 목적이라는 근거였다 — Trial이 버전을 들고 오면서 무너졌다: 채택한 draft는 대조할 번호가 없다. 이 클래스는 버전으로 파이프라인을 **로드할 방법 자체가 없다**(project 참조가 없음) — 번호로 지정하려면 `Project.add_experimenter(..., pipeline_version=)`. `pipeline_version`은 **property**로 `self.pipeline`에서 읽는다(복사본을 두지 않으므로 어긋날 값이 없음)
@@ -333,7 +339,7 @@ trial_seq(id)  -- 오토인크리먼트뿐, next_name()의 전역 카운터
   - `sys.stdout`/`stderr`는 원본 fd의 dup으로 rebind되므로 `DefaultLogger`의 진행률 등 Python 레벨 출력은 콘솔에 그대로 보인다 — dup2로 fd 1/2만 돌리기 때문에 native(C-level) 직접 write만 잡힘
   - `get_worker_logs(worker=None)`: 캡처된 네이티브 출력 — `{worker_idx: text, 'master': text}`. 매 실행마다 덮어씀
 - `get_train_data(edges, o_idx=0, i_idx=0)` / `get_valid_data(...)` / `get_test_data(...)`: 출력 추출 헬퍼
-- `aug_data`: 외부 데이터를 DataSource 수준에서 inner train split에 append — 미퍼시스트
+- `aug_data`: 외부 데이터를 DataSource 수준에서 inner train split에 append — 미퍼시스트, `'@ext:name'`이면 `resolver`로 풀림
 - 저장/로드: meta/splitter는 **그 Experimenter의 `{exp_path}/__exp.db`**(`_experimenter_store.py`) — `experimenter(name PK, data_key, title, pipeline_version, splitters BLOB)`. 프로젝트 전역 experimenter db는 없다
   - **`pipeline_version`이 NULL인 경우는 채택 전(`Pipeline.empty()`)뿐이다.** draft는 이제 채택 자체가 안 되고, 프로젝트 안에서는 `add_*`가 곧바로 v0 published를 채택시켜서 이 상태가 관측되지 않는다 — standalone에서 `set_pipeline` 없이 돌릴 때만 남는다(그때는 Trial 스탬프도 `None`이라 게이트가 공허 통과한다)
   - splitter 객체(`sp, sp_v, splitter_params`)는 ref-직렬화 불가라 컬럼이 아니라 **BLOB**(pickle)
@@ -348,14 +354,26 @@ trial_seq(id)  -- 오토인크리먼트뿐, next_name()의 전역 카운터
 - `clear_nodes(nodes)`: 특정 노드들의 캐시 삭제(이름만 매칭 — scope 무관하게 지움. 여러 Experimenter/Trainer가 같은 노드 이름을 쓰면 서로의 캐시까지 같이 지워짐. 안전하지만 낭비 — 미해결)
 
 ### ExtDataProvider (`_ext_data.py`)
-메인 `data`/`aug_data` 외의 외부 데이터를 이름으로 등록해두는 레지스트리. `Project`가 소유(`project.ext_data`, `{project.path}/ext_data/`).
-`Collector`(예: `ProcessCollector`의 `ext_data`)처럼 정의로 표현 못 하는 산 데이터를 params에 직접 pickle해 넣는 대신, **이름(문자열)만 정의에 남기고 실제 데이터는 여기서 요청 시점에 받아오게** 하려는 게 동기(#131 — Collector params가 유일하게 JSON-순수 데이터 규칙을 못 따르는 자리였음). 아직 Collector 쪽 적용은 안 했고, provider 자체만 구현된 상태.
+메인 `data` 외의 외부 데이터를 이름으로 등록해두는 레지스트리. `Project`가 소유(`project.ext_data`, `{project.path}/ext_data/`).
+`Collector`(예: `ProcessCollector`의 `ext_data`)처럼 정의로 표현 못 하는 산 데이터를 params에 직접 pickle해 넣는 대신, **이름(문자열)만 정의에 남기고 실제 데이터는 여기서 요청 시점에 받아오게** 하려는 게 동기(#131 — Collector params가 유일하게 JSON-순수 데이터 규칙을 못 따르는 자리였음). `Collector` params뿐 아니라 `Experimenter`/`Trainer`의 `aug_data`도 이걸 이름으로 참조한다 — **`aug_data`는 이제 여기 등록된 항목 하나일 뿐, Project가 따로 관리하는 두 번째 파일이 아니다**("Resolver" 섹션의 `'@ext:name'` 참조).
 
 - `register(name, data)`/`get(name)`/`remove(name)`/`names()`/`name in provider`/`size(name)`/`sizes()`
 - **`DataCache`와 다르게 캐시가 아니다** — `get()`이 항상 디스크에서 새로 읽고, 메모리에 아무것도 안 들고 있는다. 그래서 용량 상한/eviction 정책이 필요 없다: ext_data는 계산 결과가 아니라 호출자가 준 원본이라 evict되면 재계산으로 복구할 방법이 없기 때문. `DataCache`의 "예산 넘으면 LRU로 밀어낸다"가 이 데이터엔 안전하지 않다는 게 이 클래스가 캐시가 아닌 이유
-- 그 대신 매 `get()`마다 디스크 I/O가 드는데, 감내 가능한 트레이드오프로 봄 — Collector가 이걸 읽는 빈도는 fold당 1회지 hot loop가 아니라서
-- `data.pkl`/`aug_data.pkl`과 달리 **여러 개**를 이름으로 구분해 들고 있어야 해서(메인 데이터는 하나뿐이라 `Project._data`처럼 메모리에 캐싱해도 안전하지만, 이건 개수가 안 정해져 있어 전부 캐싱하면 메모리를 예측 불가능하게 먹음) — 아예 캐싱을 안 하는 쪽을 택함
+- 그 대신 매 `get()`마다 디스크 I/O가 드는데, 감내 가능한 트레이드오프로 봄 — Collector/aug_data가 이걸 읽는 빈도는 생성·재오픈 시점 1회지 hot loop가 아니라서
+- `data.pkl`과 달리 **여러 개**를 이름으로 구분해 들고 있어야 해서(메인 데이터는 하나뿐이라 `Project._data`처럼 메모리에 캐싱해도 안전하지만, 이건 개수가 안 정해져 있어 전부 캐싱하면 메모리를 예측 불가능하게 먹음) — 아예 캐싱을 안 하는 쪽을 택함
 - 파일 하나당 하나의 pickle(`{path}/{name}.pkl`) — `CollectorStore`의 `params.pkl`과 달리 이 provider 자체는 ref-spec 검증이나 구조 강제가 없다. 순수 pickle in/out
+
+### Resolver (`_resolver.py`)
+spec을 실제 값으로 푸는 지점을 하나로 모은 것. `_serialize.py`의 `resolve_processor`/`resolve_instance`/`resolve_ref_values`는 순수 함수라 spec만으로 답이 나오지만, `'@ext:name'` 값은 그 프로젝트의 `ExtDataProvider`를 알아야 풀리므로 순수 함수로 못 둔다 — `Resolver`가 그 함수들을 감싸고 상태(`ext_data`) 하나를 더한 게 전부다.
+
+- `Resolver(ext_data=None)` — `ext_data`가 없으면 `'@ext:'` 값을 만났을 때 조용히 통과시키지 않고 즉시 `ValueError`
+- `processor(processor)`: `"module.ClassName"` → 클래스 (`resolve_processor` 그대로)
+- `instance(spec)`: 문자열 ref / `{'__ref__': ...}` → 인스턴스 (adapter, connector에 사용, `resolve_instance` 그대로)
+- `params(params)`: dict의 각 값을 `value()`로 재귀적으로 품
+- **`value(value)`**: 값 하나를 푸는 공개 메소드 — `params()`가 여기에 맵핑하고, params dict 밖에서 `'@ext:name'` 하나만 필요한 자리(`aug_data`)도 직접 이걸 부른다. 문자열이 `'@ext:name'` 패턴이면 `ext_data.get(name)`, `{'__ref__'/'__callable__': ...}` dict는 `resolve_ref_values`에 그대로 넘김, 그 외 dict/list는 재귀, 나머지는 그대로 통과
+- **쓰는 곳 셋**: `Collectors._build`(collector/connector/params), `_executor.py`의 `_process()`(processor/adapter/params — spec에서 Processor를 만드는 유일한 지점), `Experimenter`/`Trainer` 생성자·`load_*`의 `aug_data`(`resolver.value(aug_data)`)
+- **`resolve_node_adapter`(`adapter/__init__.py`)는 의도적으로 밖에 남아 있다** — `adapter_spec`이 `None`일 때 processor 클래스명 기반 기본 adapter를 찾는 실질적인 로직이 있어서(순수 통과가 아님), `TransformProcessor`/`PredictProcessor.__init__` 안에 그대로 남고 `spec.adapter` 자체는 `_process()`에서 미리 `Resolver.instance()`로 풀어 인스턴스로 건넨다 — processor/params와 같은 자리에서 같은 방식으로 풀리는 게 일관돼서
+- **넘기지 않으면 기본 `Resolver()`**(`ext_data=None`) — `_process()`/`Experimenter`/`Trainer` 전부 `resolver` 인자가 없으면 이걸로 대체하므로, `'@ext:'` 참조가 없는 한 동작이 이전(직접 resolve하던 시절)과 같다
 
 ### NodeStore (`_store.py`)
 - `ArtifactStore`를 상속해 아티팩트 메소드를 전부 구현
@@ -389,9 +407,10 @@ trial_seq(id)  -- 오토인크리먼트뿐, next_name()의 전역 카운터
   - **게시(`set_objs`)는 없다** — 빌드는 아티팩트를 쓰고 끝, 다음에 읽는 쪽이 디스크에서 가져간다. 그래서 `node_objs`의 모든 항목은 버려도 안전하다
 
 ### Trainer (`_trainer.py`)
-- **Project 의존성 없음. 주입받는 건 `cache` 하나**(Experimenter와 동형) — 생성자: `Trainer(path, name, data, splitter=None, splitter_params=None, aug_data=None, cache=None)`. store(`TrainerStore(self.path)`)는 자기가 만들고, Pipeline은 `set_pipeline()`으로만
+- **Project 의존성 없음. 주입받는 건 `cache`와 `resolver` 둘**(Experimenter와 동형) — 생성자: `Trainer(path, name, data, splitter=None, splitter_params=None, aug_data=None, cache=None, resolver=None)`. store(`TrainerStore(self.path)`)는 자기가 만들고, Pipeline은 `set_pipeline()`으로만
   - `data`는 native/`DataWrapper` 아무거나 — 생성자와 `load_trainer()` 둘 다 `wrap(data)`
-  - **생성자 = 신규 생성**, 복원은 **`Trainer.load_trainer(path, data, aug_data=None, cache=None)`** staticmethod. `{path}/__trainer.db`가 없으면 `KeyError`이고, Experimenter와 같은 이유로 **store를 만들기 전에** 검사
+  - `aug_data`는 Experimenter와 동일 — 산 데이터셋이든 `'@ext:name'`이든, 생성자가 `resolver.value(aug_data)`로 즉시 풀고 `wrap()`한다
+  - **생성자 = 신규 생성**, 복원은 **`Trainer.load_trainer(path, data, aug_data=None, cache=None, resolver=None)`** staticmethod. `{path}/__trainer.db`가 없으면 `KeyError`이고, Experimenter와 같은 이유로 **store를 만들기 전에** 검사. `aug_data`는 미퍼시스트라 여기서도 다시 넘겨야 하고, `resolver`도 같이 넘겨야 `'@ext:name'`이 풀린다
   - 복원 시 split은 **재계산이 아니라 저장된 `split_indices`를 그대로** 씀 — splitter가 아예 없는 Trainer(단일 full-data fold)도 있고, 학습된 fold와 정확히 같아야 하므로
 - 경로 `{project}/trainers/{name}`
 - **`set_pipeline(pipeline)`**: 이미 로드된 `Pipeline` 객체를 받되 **`require_published_pipeline`으로 draft를 거부**(Experimenter와 같은 게이트, 버전 제한 없음 — 옛 버전을 채택하는 게 옛 정의로 평가한 Predictor를 학습하는 방법이다) — `pipeline_version`은 property로 `pipeline.version`에서 읽음. 버전 전환 시 `diff_from`으로 stale 제거(Experimenter와 같이, 지금 것이 비어 있으면 건너뜀). 미채택 기본값도 `Pipeline.empty()`이고 이건 생성자가 직접 넣으므로 게이트를 안 거친다
@@ -842,8 +861,7 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
                                     # 이 프로젝트가 무엇을 관리하나(멤버십). 나머지는 각자 디렉토리에
   trials.db                         # trials + experiment_hist
   data.pkl                          # 프로젝트 데이터셋 — 각자 디렉토리에서 복원 못 하는 유일한 것
-  aug_data.pkl                      # inner train split에 덧붙일 데이터 (있으면)
-  ext_data/                         # ExtDataProvider — 이름별 외부 데이터
+  ext_data/                         # ExtDataProvider — 이름별 외부 데이터. aug_data도 여기 이름 하나일 뿐
     {name}.pkl                      #   등록마다 하나. get()이 매번 여기서 새로 읽음(캐싱 없음)
 
   pipeline/                         # 프로젝트당 하나

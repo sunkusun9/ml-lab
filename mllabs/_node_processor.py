@@ -1,5 +1,4 @@
 from .adapter import resolve_node_adapter
-from ._serialize import resolve_processor, resolve_ref_values
 from collections.abc import Iterable
 
 
@@ -22,22 +21,19 @@ def _resolve_col_selectors(params, data):
     return resolved
 
 
-def _resolve_params(params):
-    """Resolve {'__ref__':...}/{'__callable__':...} entries (e.g. ColSelector,
-    a metric function) at point of use — params is stored as a raw spec on
-    the Pipeline node/group, never eagerly resolved (see Pipeline.set_grp/
-    set_node)."""
-    if not params:
-        return params
-    return {k: resolve_ref_values(v) for k, v in params.items()}
-
-
 class TransformProcessor():
     def __init__(self, name, transformer, adapter = None, params = {}):
+        """*transformer* and *params* arrive already resolved — a live class
+        and plain-data-or-live-object params — the caller's job now
+        (``_executor._process`` via ``Resolver``, e.g.), not this
+        constructor's. *adapter* is the one exception: ``resolve_node_adapter``
+        stays here because its ``adapter=None`` default-lookup is genuine
+        work (picks an adapter from *transformer*'s class name), not a
+        passthrough resolve() would make idempotent."""
         self.name = name
-        self.params = _resolve_params(params)
+        self.params = params
         self.adapter = resolve_node_adapter(transformer, adapter)
-        self.transformer = resolve_processor(transformer)  # only place processor becomes a real class
+        self.transformer = transformer
         self.output_vars = None
 
     def fit(self, train_data, valid_data=None, gpu_id_list=None, monitor=None, single_worker=False):
@@ -163,12 +159,15 @@ class TransformProcessor():
 
 class PredictProcessor():
     def __init__(self, name, estimator, method='predict', adapter = None, params = {}):
+        """*estimator* and *params* arrive already resolved — see
+        ``TransformProcessor.__init__`` for why, and why *adapter* is the
+        exception that stays resolved here."""
         self.name = name
-        self.params = _resolve_params(params)
+        self.params = params
         self.method = method
         self.output_vars = None
         self.adapter = resolve_node_adapter(estimator, adapter)
-        self.estimator = resolve_processor(estimator)
+        self.estimator = estimator
         self.y_columns = None
 
     def fit(self, train_data, valid_data=None, gpu_id_list=None, monitor=None, single_worker=True):

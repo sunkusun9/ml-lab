@@ -83,6 +83,24 @@ class NativeChatterStage:
         return X
 
 
+class EchoStage:
+    """Stores whatever constructor params it was given (as a Processor's
+    'payload' param, not a Collector's) — for asserting on what actually
+    reached the constructor after Resolver resolution."""
+    __name__ = 'EchoStage'
+    def __init__(self, payload=None, **kwargs):
+        self.payload = payload
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        return X
+
+    def fit_transform(self, X, y=None):
+        return self.fit(X, y).transform(X)
+
+
 class WarnStage:
     """Emits a Python warning during fit (captured into info['warnings'])."""
     __name__ = 'WarnStage'

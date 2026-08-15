@@ -35,7 +35,7 @@ class Resolver:
         return resolve_instance(spec)
 
     def params(self, params):
-        """Every value in *params*, resolved.
+        """Every value in *params*, resolved via :meth:`value`.
 
         ``{'__ref__': ...}``/``{'__callable__': ...}`` specs resolve via
         ``resolve_ref_values`` exactly as they do for a Processor.
@@ -47,9 +47,14 @@ class Resolver:
         """
         if not params:
             return params
-        return {k: self._resolve_value(v) for k, v in params.items()}
+        return {k: self.value(v) for k, v in params.items()}
 
-    def _resolve_value(self, value):
+    def value(self, value):
+        """One value, resolved — what :meth:`params` maps over a dict with,
+        and what anything holding a bare ``'@ext:name'`` outside of a params
+        dict (``Experimenter``/``Trainer``'s ``aug_data``, say) calls
+        directly instead of hand-rolling the same ``@ext:`` check.
+        """
         if isinstance(value, str):
             m = _EXT_RE.match(value)
             if m:
@@ -64,7 +69,7 @@ class Resolver:
         if isinstance(value, dict):
             if '__callable__' in value or '__ref__' in value:
                 return resolve_ref_values(value)
-            return {k: self._resolve_value(v) for k, v in value.items()}
+            return {k: self.value(v) for k, v in value.items()}
         if isinstance(value, list):
-            return [self._resolve_value(v) for v in value]
+            return [self.value(v) for v in value]
         return value
