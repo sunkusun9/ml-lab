@@ -346,8 +346,8 @@ class TestExp:
     def test_exp_with_collector(self, exp, pipeline, project):
         trial = _dt()
         mc = exp.collectors.set_collector(
-            'acc', MetricCollector, Connector(),
-            params={'output_var': None, 'metric_func': accuracy_metric},
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+            params={'output_var': None, 'metric_func': {'__callable__': 'test_experimenter.accuracy_metric'}},
         )
         exp.exp(_folds(trial, exp), collectors=['acc'])
         assert mc.has_node('dt')
@@ -356,7 +356,7 @@ class TestExp:
         from sklearn.metrics import balanced_accuracy_score
         trial = _dt()
         mc = exp.collectors.set_collector(
-            'bacc', MetricCollector, Connector(),
+            'bacc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
             params={'output_var': None,
                     'metric_func': {'__callable__': 'sklearn.metrics.balanced_accuracy_score'}},
         )
@@ -368,8 +368,8 @@ class TestExp:
         """The registry is the run's, so reopening it brings the Collectors
         back — a standalone Experimenter is complete on its own directory."""
         exp.collectors.set_collector(
-            'acc', MetricCollector, Connector(),
-            params={'output_var': None, 'metric_func': accuracy_metric},
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+            params={'output_var': None, 'metric_func': {'__callable__': 'test_experimenter.accuracy_metric'}},
         )
         reopened = Experimenter.load_experimenter(exp.path, sample_data)
         assert reopened.collectors.names() == ['acc']
@@ -382,27 +382,27 @@ class TestCollectorsRegistry:
 
     def test_set_collector(self, tmp_path):
         registry = Collectors(tmp_path / 'coll')
-        mc = registry.set_collector('acc', MetricCollector, Connector(),
-                                    params={'output_var': None, 'metric_func': dummy_metric})
+        mc = registry.set_collector('acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+                                    params={'output_var': None, 'metric_func': {'__callable__': 'test_experimenter.dummy_metric'}})
         assert registry.get_collector('acc') is not None
         assert mc.path is not None
 
     def test_set_collector_skip(self, tmp_path):
         registry = Collectors(tmp_path / 'coll')
-        mc1 = registry.set_collector('acc', MetricCollector, Connector(),
-                                     params={'output_var': None, 'metric_func': dummy_metric})
-        result = registry.set_collector('acc', MetricCollector, Connector(),
-                                        params={'output_var': None, 'metric_func': dummy_metric},
+        mc1 = registry.set_collector('acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+                                     params={'output_var': None, 'metric_func': {'__callable__': 'test_experimenter.dummy_metric'}})
+        result = registry.set_collector('acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+                                        params={'output_var': None, 'metric_func': {'__callable__': 'test_experimenter.dummy_metric'}},
                                         exist='skip')
         assert result is mc1
 
     def test_set_collector_error(self, tmp_path):
         registry = Collectors(tmp_path / 'coll')
-        registry.set_collector('acc', MetricCollector, Connector(),
-                               params={'output_var': None, 'metric_func': dummy_metric})
+        registry.set_collector('acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+                               params={'output_var': None, 'metric_func': {'__callable__': 'test_experimenter.dummy_metric'}})
         with pytest.raises(RuntimeError):
-            registry.set_collector('acc', MetricCollector, Connector(),
-                                   params={'output_var': None, 'metric_func': dummy_metric},
+            registry.set_collector('acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+                                   params={'output_var': None, 'metric_func': {'__callable__': 'test_experimenter.dummy_metric'}},
                                    exist='error')
 
 

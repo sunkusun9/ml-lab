@@ -1,7 +1,9 @@
 from pathlib import Path
 
 from ._collect_hist import CollectHist
-from ._store import CollectorEntity, CollectorStore, build_collector
+from ._store import CollectorEntity, CollectorStore, _validate_collector, _validate_connector
+from .._resolver import Resolver
+from .._pipeline import _validate_params
 
 
 class Collectors:
@@ -27,17 +29,39 @@ class Collectors:
     no ``experimenter`` column because the registry holding it already belongs
     to one.
 
+    Turning a stored ``CollectorEntity``/params pair into a live instance is
+    this class's job, not the store's — ``_build`` is the one place that
+    happens, using an injected :class:`~mllabs.Resolver`. ``CollectorStore``
+    only ever hands back entities and params, never an instance.
+
     Args:
         path (str | Path, optional): Base directory. A Collector registered
             without an explicit ``path`` gets ``{path}/{name}``. Without a path
             the registry is memory-only — nothing is persisted, history included.
+        resolver (Resolver, optional): Turns a stored spec into live objects.
+            Defaults to a bare ``Resolver()`` (no ``ExtDataProvider``, so an
+            ``'@ext:name'`` param would raise) — pass one with ``ext_data``
+            set to resolve those.
     """
 
-    def __init__(self, path=None):
+    def __init__(self, path=None, resolver=None):
         self.path = Path(path) if path is not None else None
         self._store = CollectorStore(self.path) if self.path is not None else None
-        self.collectors = {c.name: c for c in self._store.load_all()} if self._store else {}
+        self.resolver = resolver if resolver is not None else Resolver()
+        self.collectors = (
+            {e.name: self._build(e, self._store.get_params(e.name))
+             for e in self._store.list_entities()}
+            if self._store is not None else {}
+        )
         self.hist = CollectHist(self.path) if self.path is not None else None
+
+    def _build(self, entity, params):
+        """A live Collector from *entity*/*params*, via :attr:`resolver`."""
+        cls = self.resolver.processor(entity.collector)
+        obj = cls(entity.name, self.resolver.instance(entity.connector),
+                  **self.resolver.params(params or {}))
+        obj.path = Path(entity.path) if entity.path is not None else None
+        return obj
 
     # ------------------------------------------------------------------
     # registration
@@ -48,21 +72,36 @@ class Collectors:
 
         Args:
             name (str): Collector name — what an Experiment refers to it by.
-            collector: Collector class, or ``"module.ClassName"`` string reference.
-            connector: :class:`~mllabs.Connector` instance, or
-                ``{"__ref__": ..., "__params__": {...}}`` spec.
+            collector (str): ``"module.ClassName"`` reference — never a class
+                or instance, same rule ``PipelineBuilder`` enforces for a
+                node's processor.
+            connector: ``None`` / ``"module.ClassName"`` string / ``{"__ref__":
+                ..., "__params__": {...}}`` spec — never a live
+                :class:`~mllabs.Connector` instance, same rule for a node's
+                adapter.
             path (str | Path, optional): Storage directory. Defaults to
                 ``{registry path}/{name}``; required if the registry has no path.
             params (dict): Remaining constructor parameters (everything after
                 ``name``/``connector``). ``{"__callable__": "mod.fn"}`` resolves
                 to the referenced object (not called); ``{"__ref__": "mod.Cls",
-                "__params__": {...}}`` is instantiated.
+                "__params__": {...}}`` is instantiated; ``"@ext:name"`` resolves
+                against the registry's ``Resolver.ext_data``. Live objects are
+                rejected — same rule ``PipelineBuilder.set_grp``/``set_node``
+                enforce for a node's params, checked the same way.
             exist (str): ``'skip'`` (default) returns the existing collector;
                 ``'error'`` raises; ``'replace'`` drops and rebuilds it.
 
         Returns:
             Collector: The registered collector.
+
+        Raises:
+            TypeError: If *collector*/*connector*/*params* hold a live object
+                rather than plain data or a ref spec.
         """
+        where = f"set_collector({name!r})"
+        _validate_collector(collector, where)
+        _validate_connector(connector, where)
+        _validate_params(params, where)
         if name in self.collectors:
             if exist == 'skip':
                 return self.collectors[name]
@@ -80,7 +119,7 @@ class Collectors:
             path = self.path / name
 
         entity = CollectorEntity.of(name, collector, connector, path)
-        obj = build_collector(entity, params)
+        obj = self._build(entity, params)
         self.collectors[name] = obj
         if self._store is not None:
             self._store.register(entity, params)

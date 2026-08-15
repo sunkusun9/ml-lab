@@ -154,6 +154,12 @@ class Experimenter():
             is not persisted: a ``TrialStore`` is project-level, and an
             Experimenter reopened from its own directory has no way to find one
             that would not amount to guessing at the layout above it.
+        resolver (Resolver, optional): Passed straight to ``Collectors`` —
+            turns a Collector's stored spec into live objects at construction.
+            Same injection story as *cache*: a project has exactly one, and
+            it is not persisted (a ``Resolver`` may hold an ``ExtDataProvider``,
+            itself project-scoped). Omitted, ``Collectors`` falls back to a
+            bare ``Resolver()`` with no ``ExtDataProvider``.
 
     Attributes:
         cache (DataCache): Shared LRU cache, or ``None``.
@@ -179,7 +185,7 @@ class Experimenter():
             self, path, name, data, data_names = None,
             sp = ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
             splitter_params=None, title=None, data_key=None,
-            aug_data=None, cache=None, trial_store=None
+            aug_data=None, cache=None, trial_store=None, resolver=None
         ):
         self.name = name
         self.trial_store = trial_store
@@ -219,7 +225,7 @@ class Experimenter():
 
         self.cache = cache
         self.node_store = NodeStore(self.path / '__folds')
-        self.collectors = Collectors(self.path / 'collectors')
+        self.collectors = Collectors(self.path / 'collectors', resolver=resolver)
 
         self.outer_folds = [
             OuterFold(
@@ -248,7 +254,7 @@ class Experimenter():
 
     @staticmethod
     def load_experimenter(path, data, data_key=None, aug_data=None, cache=None,
-                          trial_store=None):
+                          trial_store=None, resolver=None):
         """Reopen the Experimenter rooted at *path*.
 
         Everything comes out of that directory — meta and splitters from its
@@ -265,6 +271,9 @@ class Experimenter():
             cache (DataCache, optional): Shared LRU cache.
             trial_store (TrialStore, optional): Not saved on disk, so a
                 reopened Experimenter has one only if it is given one here.
+            resolver (Resolver, optional): Turns a Collector's stored spec
+                into live objects (see ``Collectors``) — not saved on disk
+                either, same reasoning as ``trial_store``.
 
         Returns:
             Experimenter: The reopened Experimenter.
@@ -294,7 +303,7 @@ class Experimenter():
         exp = Experimenter(
             path, meta['name'], data,
             title=meta.get('title'), data_key=saved_data_key,
-            aug_data=aug_data, cache=cache, trial_store=trial_store,
+            aug_data=aug_data, cache=cache, trial_store=trial_store, resolver=resolver,
             **split_kwargs,
         )
         pipeline = store.load_pipeline()

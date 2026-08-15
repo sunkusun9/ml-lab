@@ -207,6 +207,7 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 
 - `Project(path, data=None, aug_data=None, cache_maxsize=4GB)` — `DataCache`를 소유하고 모든 Experimenter/Trainer가 공유
 - **데이터셋**: `data`/`aug_data` property(첫 접근에 `data.pkl`/`aug_data.pkl`에서 읽음 — 이름·이력 조회는 데이터를 안 건드림), `set_data(data)`/`set_aug_data(aug_data)`로 저장. 형식은 pkl(pandas/polars/cudf/numpy 다 되고 프로젝트가 이미 pipeline/splitter를 피클로 저장). 없으면 `_resolve_data`가 `ValueError`로 안내
+- **`ext_data`**: `ExtDataProvider`(`{path}/ext_data/`) — `data`/`aug_data`와 달리 **여러 개**를 이름으로 등록해두는 자리라 메모리에 캐싱 안 하고 요청마다 디스크에서 새로 읽음. 자세한 내용은 "ExtDataProvider" 섹션
 - 경로: `pipeline_path`(property), `exp_path(name)`, `trainer_path(name)` — **collector 경로 없음**(레지스트리는 Experimenter 소유), **inferencer 경로도 없음**(아래 "Inferencer는 프로젝트 밖")
 - **레지스트리**: `experimenters`/`trainers` — `{name: 객체}`. 접근할 때마다 `list_*()`를 훑어 **아직 안 들고 있는 이름만** 연다(그래서 데이터셋이 필요). `list_experimenters()`/`list_trainers()`는 이름만 답하는 싼 질문이라 별개로 남는다
   - **`add_*`가 만든 객체가 곧 레지스트리가 돌려주는 객체다** — "안 들고 있는 것만 연다"의 요점이 이것. 한 디렉토리에 살아있는 인스턴스가 둘이면 각자 자기 Collectors와 노드 캐시를 들고 있어서, 한쪽으로 가한 변경이 다른 쪽엔 안 보인다(`Project.pipeline`이 builder 하나를 고수하는 것과 같은 이유)
@@ -236,6 +237,7 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 - **`error_trials(experimenter=None)`**: Trial 실행 실패를 fold당 dict 하나로 — `trial_name`/`experimenter`/`outer_idx`/`inner_idx`/`pipeline_version` + 평탄화된 `type`/`message`/`traceback`. `Experimenter.error_nodes`의 Trial판이고 **여기 있는 이유는 이력의 주인이 여기라서**(노드 이력은 Experimenter, Trial 이력은 프로젝트). 깨끗하면 `[]`
 - **`pending_trials(experimenter=None)`**: 등록된 Trial 중 **에러났거나 이력이 아예 없는** 이름 목록. 둘 다 "아직 돌려야 할 것"이라 한 목록으로 낸다 — 손으로 쓰면 후자만 잡아서 실패한 게 조용히 빠진다(#130이 노트북에서 지목한 실제 버그)
   - **일부러 거칠다**: fold 일부만 돌다 끊긴 건 안 잡는다 — 그걸 판정하려면 fold 그리드와 대조해야 하는데 이 store는 그걸 모른다. 반환된 이름을 그냥 돌려도 안전하다(`exp()`가 끝난 fold를 건너뜀)
+- **`set_collector(experimenter, name, collector, connector, path=None, params=None, exist='skip')`**: 지정한 Experimenter의 `collectors`(`Collectors.set_collector`)에 그대로 위임하는 얇은 대행 메소드. **소유가 아니다** — Project는 여전히 Collector 레지스트리를 안 갖는다(#136, "Project owns no collector registry" 그대로 유지). `project.experimenters[experimenter].collectors.set_collector(...)`를 손으로 안 써도 되게 해주는 편의일 뿐, `chain_trial`이 `self.trials`를 대신 만져주는 것과 같은 자리
 - **`collect_errors(experimenter=None, collectors=None)`**: 수집 실패를 fold당 dict 하나로. 세 번째 에러 읽기이고(노드는 `Experimenter.error_nodes`, Trial은 위 `error_trials`), **유일하게 Experimenter를 거쳐야 읽는다** — Collector 이력은 레지스트리 소유고 레지스트리는 Experimenter별이라, 자기 store가 없어 `Experimenter.collect_errors`에 묻는다
   - 팬아웃하면서 **`experimenter` 키를 얹는다** — `collect_hist`엔 그 컬럼이 일부러 없고(어느 것이냐는 db가 어디 있느냐로 답한다), 여러 레지스트리를 가로지를 때만 필요해지는 값이라
 - **`stale_nodes(pipeline=None, experimenter=None, trainer=None)`**: 그 정의를 채택하면 어느 노드의 아티팩트가 날아가는지를 **채택 전에** 본다 → `{'experimenters': {name: [노드...]}, 'trainers': {name: [노드...]}}`. `Experimenter.stale_nodes`/`Trainer.stale_nodes` 위임
@@ -344,6 +346,16 @@ trial_seq(id)  -- 오토인크리먼트뿐, next_name()의 전역 카운터
   - 트레이드오프: 리로드하면(새 Python 인스턴스 = 새 scope id) 이전 인스턴스가 캐싱해둔 항목은 다시 못 만남 — cache miss일 뿐 잘못된 값이 나오는 게 아니라 허용 가능한 손실로 판단
 - `get_data(scope, node, typ)`, `put_data(scope, node, typ, data)`
 - `clear_nodes(nodes)`: 특정 노드들의 캐시 삭제(이름만 매칭 — scope 무관하게 지움. 여러 Experimenter/Trainer가 같은 노드 이름을 쓰면 서로의 캐시까지 같이 지워짐. 안전하지만 낭비 — 미해결)
+
+### ExtDataProvider (`_ext_data.py`)
+메인 `data`/`aug_data` 외의 외부 데이터를 이름으로 등록해두는 레지스트리. `Project`가 소유(`project.ext_data`, `{project.path}/ext_data/`).
+`Collector`(예: `ProcessCollector`의 `ext_data`)처럼 정의로 표현 못 하는 산 데이터를 params에 직접 pickle해 넣는 대신, **이름(문자열)만 정의에 남기고 실제 데이터는 여기서 요청 시점에 받아오게** 하려는 게 동기(#131 — Collector params가 유일하게 JSON-순수 데이터 규칙을 못 따르는 자리였음). 아직 Collector 쪽 적용은 안 했고, provider 자체만 구현된 상태.
+
+- `register(name, data)`/`get(name)`/`remove(name)`/`names()`/`name in provider`/`size(name)`/`sizes()`
+- **`DataCache`와 다르게 캐시가 아니다** — `get()`이 항상 디스크에서 새로 읽고, 메모리에 아무것도 안 들고 있는다. 그래서 용량 상한/eviction 정책이 필요 없다: ext_data는 계산 결과가 아니라 호출자가 준 원본이라 evict되면 재계산으로 복구할 방법이 없기 때문. `DataCache`의 "예산 넘으면 LRU로 밀어낸다"가 이 데이터엔 안전하지 않다는 게 이 클래스가 캐시가 아닌 이유
+- 그 대신 매 `get()`마다 디스크 I/O가 드는데, 감내 가능한 트레이드오프로 봄 — Collector가 이걸 읽는 빈도는 fold당 1회지 hot loop가 아니라서
+- `data.pkl`/`aug_data.pkl`과 달리 **여러 개**를 이름으로 구분해 들고 있어야 해서(메인 데이터는 하나뿐이라 `Project._data`처럼 메모리에 캐싱해도 안전하지만, 이건 개수가 안 정해져 있어 전부 캐싱하면 메모리를 예측 불가능하게 먹음) — 아예 캐싱을 안 하는 쪽을 택함
+- 파일 하나당 하나의 pickle(`{path}/{name}.pkl`) — `CollectorStore`의 `params.pkl`과 달리 이 provider 자체는 ref-spec 검증이나 구조 강제가 없다. 순수 pickle in/out
 
 ### NodeStore (`_store.py`)
 - `ArtifactStore`를 상속해 아티팩트 메소드를 전부 구현
@@ -831,6 +843,8 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
   trials.db                         # trials + experiment_hist
   data.pkl                          # 프로젝트 데이터셋 — 각자 디렉토리에서 복원 못 하는 유일한 것
   aug_data.pkl                      # inner train split에 덧붙일 데이터 (있으면)
+  ext_data/                         # ExtDataProvider — 이름별 외부 데이터
+    {name}.pkl                      #   등록마다 하나. get()이 매번 여기서 새로 읽음(캐싱 없음)
 
   pipeline/                         # 프로젝트당 하나
     pipeline.db                     # PipelineBuilder 노드/그룹 정의(= open 버전)

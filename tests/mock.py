@@ -152,3 +152,14 @@ class CountingCollector(Collector):
     """Returns a result for every fold, so every fold gets a 'collected' row."""
     def collect(self, context):
         return (context['outer_idx'], context['inner_idx'])
+
+
+class EchoCollector(Collector):
+    """Stores whatever constructor params it was given, for asserting on
+    what actually reached the constructor (e.g. after Resolver resolution)."""
+    def __init__(self, name, connector, payload=None):
+        super().__init__(name, connector)
+        self.payload = payload
+
+    def collect(self, context):
+        return None

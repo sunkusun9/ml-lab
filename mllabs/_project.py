@@ -15,6 +15,8 @@ import shutil
 from pathlib import Path
 
 from ._cache import DataCache
+from ._ext_data import ExtDataProvider
+from ._resolver import Resolver
 from ._trial import Trial
 from ._trial_store import TrialStore
 from ._project_store import ProjectStore
@@ -34,6 +36,7 @@ class Project:
           trials.db           TrialStore (definitions + execution history)
           data.pkl            the dataset everything here is built against
           aug_data.pkl        data appended to inner train splits, if any
+          ext_data/           named external data (ExtDataProvider) — {name}.pkl each
           pipeline/           pipeline.db — the working copy, which is the
                                builder itself and never a version — plus
                                v{n}.pkl and v{n}_builder.pkl per published one
@@ -73,6 +76,8 @@ class Project:
         self.path.mkdir(parents=True, exist_ok=True)
         self.trials = TrialStore(self.path)
         self.store = ProjectStore(self.path)
+        self.ext_data = ExtDataProvider(self.path / 'ext_data')
+        self.resolver = Resolver(ext_data=self.ext_data)
         self._data = None
         self._aug_data = None
         self._pipeline = None
@@ -236,7 +241,7 @@ class Project:
         exp = Experimenter(
             self.exp_path(name), name, self._resolve_data(data),
             aug_data=aug_data if aug_data is not None else self.aug_data,
-            cache=self.cache, trial_store=self.trials, **kwargs,
+            cache=self.cache, trial_store=self.trials, resolver=self.resolver, **kwargs,
         )
         exp.set_pipeline(self.load_pipeline(pipeline_version))
         self.store.register_experimenter(name)
@@ -330,7 +335,7 @@ class Project:
         from ._experimenter import Experimenter
         return Experimenter.load_experimenter(
             self.exp_path(name), self._resolve_data(None), aug_data=self.aug_data,
-            cache=self.cache, trial_store=self.trials,
+            cache=self.cache, trial_store=self.trials, resolver=self.resolver,
         )
 
     def _open_trainer(self, name):
@@ -545,6 +550,34 @@ class Project:
             if not rows or any(r['status'] == 'error' for r in rows):
                 pending.append(trial.name)
         return pending
+
+    def set_collector(self, experimenter, name, collector, connector, path=None,
+                      params=None, exist='skip'):
+        """Register a Collector on *experimenter*'s own registry.
+
+        A thin proxy, not ownership — Project holds no Collector registry of
+        its own (a Collectors registry has to stay per-Experimenter, since
+        everything it writes is keyed by node name only; see
+        ``Experimenter.collectors``). This just saves the caller from reaching
+        through ``project.experimenters[experimenter].collectors`` by hand for
+        the common case of registering one by name, the same way
+        :meth:`chain_trial` saves a reach through ``self.trials``.
+
+        Args:
+            experimenter (str): Name of the Experimenter to register it on.
+            name, collector, connector, path, params, exist: Passed straight
+                to ``Collectors.set_collector`` — see there for what each
+                means and what gets validated.
+
+        Returns:
+            Collector: The registered collector.
+
+        Raises:
+            KeyError: If this project manages no Experimenter named
+                *experimenter*.
+        """
+        return self.experimenters[experimenter].collectors.set_collector(
+            name, collector, connector, path=path, params=params, exist=exist)
 
     def collect_errors(self, experimenter=None, collectors=None):
         """Collection failures across the project, one dict each.

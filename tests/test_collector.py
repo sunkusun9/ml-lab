@@ -67,6 +67,15 @@ def _register(trial, e):
     return trial.name
 
 
+def _ext(built, data, name='ext'):
+    """Registers *data* into *built*'s Project.ext_data and returns the
+    '@ext:name' reference a Collector's params should hold instead of the
+    live object — set_collector's _validate_params gate now rejects a raw
+    DataFrame there, same rule PipelineBuilder enforces for node params."""
+    built.project.ext_data.register(name, data)
+    return f'@ext:{name}'
+
+
 def _run(built, *trials, collectors=None, n_jobs=1):
     """Runs every fold of the given trials (default: the fixture's own).
 
@@ -179,13 +188,13 @@ class TestConnector:
 class TestMetricCollector:
     def test_collect_basic(self, built_exp):
         mc = built_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp, collectors=[mc.name])
         assert mc.has_node('dt')
 
     def test_get_metric(self, built_exp):
         mc = built_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp, collectors=[mc.name])
         result = mc.get_metric('dt')
         assert isinstance(result, pd.Series)
@@ -195,7 +204,7 @@ class TestMetricCollector:
 
     def test_get_metrics(self, multi_head_exp):
         mc = multi_head_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[mc.name])
         result = mc.get_metrics()
         assert isinstance(result, pd.DataFrame)
@@ -204,7 +213,7 @@ class TestMetricCollector:
 
     def test_get_metrics_with_node_filter(self, multi_head_exp):
         mc = multi_head_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[mc.name])
         result = mc.get_metrics(nodes=['dt1'])
         assert 'dt1' in result.index.get_level_values(0)
@@ -212,14 +221,14 @@ class TestMetricCollector:
 
     def test_get_metrics_regex(self, multi_head_exp):
         mc = multi_head_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[mc.name])
         result = mc.get_metrics(nodes='dt1')
         assert len(result) > 0
 
     def test_get_metrics_agg(self, built_exp):
         mc = built_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp, collectors=[mc.name])
         mean, std = mc.get_metrics_agg()
         assert isinstance(mean, pd.DataFrame)
@@ -227,7 +236,7 @@ class TestMetricCollector:
 
     def test_get_metrics_agg_with_std(self, built_exp):
         mc = built_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp, collectors=[mc.name])
         mean, std = mc.get_metrics_agg(include_std=True)
         assert isinstance(mean, pd.DataFrame)
@@ -235,51 +244,52 @@ class TestMetricCollector:
 
     def test_get_metrics_agg_inner_only(self, built_exp_inner):
         mc = built_exp_inner.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp_inner, collectors=[mc.name])
         mean, std = mc.get_metrics_agg(inner_fold=True, outer_fold=False)
         assert isinstance(mean, pd.DataFrame)
 
     def test_get_metrics_agg_no_fold(self, built_exp):
         mc = built_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp, collectors=[mc.name])
         result = mc.get_metrics_agg(inner_fold=False, outer_fold=False)
         assert isinstance(result, pd.DataFrame)
 
     def test_get_metrics_agg_invalid(self, built_exp):
         mc = built_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp, collectors=[mc.name])
         with pytest.raises(ValueError):
             mc.get_metrics_agg(inner_fold=False, outer_fold=True)
 
     def test_include_train(self, built_exp):
         mc = built_exp.e.collectors.set_collector(
-            'acc_train', MetricCollector, Connector(),
-            params={'output_var': None, 'metric_func': accuracy_metric, 'include_train': True})
+            'acc_train', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+            params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}, 'include_train': True})
         _run(built_exp, collectors=[mc.name])
         result = mc.get_metric('dt')
         assert 'train' in result.index.get_level_values(-1)
 
     def test_inner_split_metrics(self, built_exp_inner):
         mc = built_exp_inner.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp_inner, collectors=[mc.name])
         result = mc.get_metric('dt')
         assert len(result) > 2
 
     def test_connector_filter(self, multi_head_exp):
         mc = multi_head_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(node_query=['dt1']),
-            params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector',
+            {'__ref__': 'mllabs._connector.Connector', '__params__': {'node_query': ['dt1']}},
+            params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[mc.name])
         assert mc.has_node('dt1')
         assert not mc.has_node('dt2')
 
     def test_reset_nodes(self, built_exp):
         mc = built_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp, collectors=[mc.name])
         assert mc.has_node('dt')
         mc.reset_nodes(['dt'])
@@ -287,7 +297,7 @@ class TestMetricCollector:
 
     def test_save_load(self, built_exp):
         mc = built_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp, collectors=[mc.name])
         loaded = built_exp.e.collectors.get_collector('acc')
         assert loaded.has_node('dt')
@@ -305,12 +315,12 @@ class TestMetricCollector:
         entry itself once it decides a job is needed."""
         collectors = built_exp.e.collectors
         mc = collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp, collectors=[mc.name])
         assert mc.has_node('dt')
 
         mc2 = collectors.set_collector(
-            'acc2', MetricCollector, Connector(), params={'output_var': None, 'metric_func': dummy_metric})
+            'acc2', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.dummy_metric'}})
         built_exp.project.trials.remove_hist(trial_name='dt', experimenter=built_exp.e.name)
         _run(built_exp, collectors=[mc2.name])
         assert mc2.has_node('dt')
@@ -351,13 +361,13 @@ class TestProbToLabel:
 
 class TestStackingCollector:
     def test_collect_basic(self, built_exp):
-        sc = built_exp.e.collectors.set_collector('stk', StackingCollector, Connector(), params={'output_var': None})
+        sc = built_exp.e.collectors.set_collector('stk', 'mllabs.StackingCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(built_exp, collectors=[sc.name])
         assert sc.has_node('dt')
 
     def test_get_dataset(self, built_exp):
         sc = built_exp.e.collectors.set_collector(
-            'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
+            'stk', 'mllabs.StackingCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'edges': {'y': '{target}'}}}, params={'output_var': None})
         _run(built_exp, collectors=[sc.name])
         ds = sc.get_dataset(built_exp.e)
         assert isinstance(ds, pd.DataFrame)
@@ -365,7 +375,7 @@ class TestStackingCollector:
         assert 'target' in ds.columns
 
     def test_get_dataset_no_target(self, built_exp):
-        sc = built_exp.e.collectors.set_collector('stk', StackingCollector, Connector(), params={'output_var': None})
+        sc = built_exp.e.collectors.set_collector('stk', 'mllabs.StackingCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(built_exp, collectors=[sc.name])
         ds = sc.get_dataset(built_exp.e, include_target=False)
         assert isinstance(ds, pd.DataFrame)
@@ -373,26 +383,26 @@ class TestStackingCollector:
 
     def test_get_dataset_multi_nodes(self, multi_head_exp):
         sc = multi_head_exp.e.collectors.set_collector(
-            'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
+            'stk', 'mllabs.StackingCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'edges': {'y': '{target}'}}}, params={'output_var': None})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[sc.name])
         ds = sc.get_dataset(multi_head_exp.e)
         assert ds.shape[1] > 2
 
     def test_get_dataset_node_filter(self, multi_head_exp):
         sc = multi_head_exp.e.collectors.set_collector(
-            'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
+            'stk', 'mllabs.StackingCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'edges': {'y': '{target}'}}}, params={'output_var': None})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[sc.name])
         ds = sc.get_dataset(multi_head_exp.e, nodes=['dt1'])
         assert isinstance(ds, pd.DataFrame)
 
     def test_method_mean(self, built_exp_inner):
         sc = built_exp_inner.e.collectors.set_collector(
-            'stk_mean', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None, 'method': 'mean'})
+            'stk_mean', 'mllabs.StackingCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'edges': {'y': '{target}'}}}, params={'output_var': None, 'method': 'mean'})
         _run(built_exp_inner, collectors=[sc.name])
         assert sc.has_node('dt')
 
     def test_reset_nodes(self, built_exp):
-        sc = built_exp.e.collectors.set_collector('stk', StackingCollector, Connector(), params={'output_var': None})
+        sc = built_exp.e.collectors.set_collector('stk', 'mllabs.StackingCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(built_exp, collectors=[sc.name])
         assert sc.has_node('dt')
         sc.reset_nodes(['dt'])
@@ -400,7 +410,7 @@ class TestStackingCollector:
 
     def test_save_load(self, built_exp):
         sc = built_exp.e.collectors.set_collector(
-            'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
+            'stk', 'mllabs.StackingCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'edges': {'y': '{target}'}}}, params={'output_var': None})
         _run(built_exp, collectors=[sc.name])
         loaded = built_exp.e.collectors.get_collector('stk')
         assert loaded.has_node('dt')
@@ -410,7 +420,7 @@ class TestStackingCollector:
 
     def test_index_preserved(self, built_exp):
         sc = built_exp.e.collectors.set_collector(
-            'stk', StackingCollector, Connector(edges={'y': '{target}'}), params={'output_var': None})
+            'stk', 'mllabs.StackingCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'edges': {'y': '{target}'}}}, params={'output_var': None})
         _run(built_exp, collectors=[sc.name])
         ds = sc.get_dataset(built_exp.e)
         all_valid_idx = np.concatenate([
@@ -423,92 +433,82 @@ class TestStackingCollector:
 
 class TestModelAttrCollector:
     def test_collect_basic(self, built_exp):
-        from mllabs.adapter import DecisionTreeAdapter
         mac = built_exp.e.collectors.set_collector(
-            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
-            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+            'fi', 'mllabs.ModelAttrCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'processor': 'sklearn.tree.DecisionTreeClassifier'}},
+            params={'result_key': 'feature_importances', 'adapter': {'__ref__': 'mllabs.adapter._sklearn.DecisionTreeAdapter'}})
         _run(built_exp, collectors=[mac.name])
         assert mac.has_node('dt')
 
     def test_get_attr(self, built_exp):
-        from mllabs.adapter import DecisionTreeAdapter
         mac = built_exp.e.collectors.set_collector(
-            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
-            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+            'fi', 'mllabs.ModelAttrCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'processor': 'sklearn.tree.DecisionTreeClassifier'}},
+            params={'result_key': 'feature_importances', 'adapter': {'__ref__': 'mllabs.adapter._sklearn.DecisionTreeAdapter'}})
         _run(built_exp, collectors=[mac.name])
         result = mac.get_attr('dt')
         assert isinstance(result, list)
         assert len(result) == 2
 
     def test_get_attr_idx(self, built_exp):
-        from mllabs.adapter import DecisionTreeAdapter
         mac = built_exp.e.collectors.set_collector(
-            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
-            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+            'fi', 'mllabs.ModelAttrCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'processor': 'sklearn.tree.DecisionTreeClassifier'}},
+            params={'result_key': 'feature_importances', 'adapter': {'__ref__': 'mllabs.adapter._sklearn.DecisionTreeAdapter'}})
         _run(built_exp, collectors=[mac.name])
         result = mac.get_attr('dt', idx=0)
         assert isinstance(result, list)
 
     def test_get_attrs(self, multi_head_exp):
-        from mllabs.adapter import DecisionTreeAdapter
         mac = multi_head_exp.e.collectors.set_collector(
-            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
-            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+            'fi', 'mllabs.ModelAttrCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'processor': 'sklearn.tree.DecisionTreeClassifier'}},
+            params={'result_key': 'feature_importances', 'adapter': {'__ref__': 'mllabs.adapter._sklearn.DecisionTreeAdapter'}})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[mac.name])
         result = mac.get_attrs()
         assert 'dt1' in result
         assert 'dt2' in result
 
     def test_get_attrs_agg(self, built_exp):
-        from mllabs.adapter import DecisionTreeAdapter
         mac = built_exp.e.collectors.set_collector(
-            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
-            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+            'fi', 'mllabs.ModelAttrCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'processor': 'sklearn.tree.DecisionTreeClassifier'}},
+            params={'result_key': 'feature_importances', 'adapter': {'__ref__': 'mllabs.adapter._sklearn.DecisionTreeAdapter'}})
         _run(built_exp, collectors=[mac.name])
         result = mac.get_attrs_agg('dt')
         assert isinstance(result, pd.Series)
 
     def test_get_attrs_agg_inner_only(self, built_exp):
-        from mllabs.adapter import DecisionTreeAdapter
         mac = built_exp.e.collectors.set_collector(
-            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
-            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+            'fi', 'mllabs.ModelAttrCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'processor': 'sklearn.tree.DecisionTreeClassifier'}},
+            params={'result_key': 'feature_importances', 'adapter': {'__ref__': 'mllabs.adapter._sklearn.DecisionTreeAdapter'}})
         _run(built_exp, collectors=[mac.name])
         result = mac.get_attrs_agg('dt', agg_inner=True, agg_outer=False)
         assert isinstance(result, pd.DataFrame)
 
     def test_get_attrs_agg_invalid(self, built_exp):
-        from mllabs.adapter import DecisionTreeAdapter
         mac = built_exp.e.collectors.set_collector(
-            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
-            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+            'fi', 'mllabs.ModelAttrCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'processor': 'sklearn.tree.DecisionTreeClassifier'}},
+            params={'result_key': 'feature_importances', 'adapter': {'__ref__': 'mllabs.adapter._sklearn.DecisionTreeAdapter'}})
         _run(built_exp, collectors=[mac.name])
         with pytest.raises(ValueError):
             mac.get_attrs_agg('dt', agg_inner=False, agg_outer=True)
 
     def test_not_mergeable(self, built_exp):
-        from mllabs.adapter import DecisionTreeAdapter
         mac = built_exp.e.collectors.set_collector(
-            'tree', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
-            params={'result_key': 'tree', 'adapter': DecisionTreeAdapter()})
+            'tree', 'mllabs.ModelAttrCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'processor': 'sklearn.tree.DecisionTreeClassifier'}},
+            params={'result_key': 'tree', 'adapter': {'__ref__': 'mllabs.adapter._sklearn.DecisionTreeAdapter'}})
         _run(built_exp, collectors=[mac.name])
         with pytest.raises(ValueError, match='not mergeable'):
             mac.get_attrs_agg('dt')
 
     def test_reset_nodes(self, built_exp):
-        from mllabs.adapter import DecisionTreeAdapter
         mac = built_exp.e.collectors.set_collector(
-            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
-            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+            'fi', 'mllabs.ModelAttrCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'processor': 'sklearn.tree.DecisionTreeClassifier'}},
+            params={'result_key': 'feature_importances', 'adapter': {'__ref__': 'mllabs.adapter._sklearn.DecisionTreeAdapter'}})
         _run(built_exp, collectors=[mac.name])
         mac.reset_nodes(['dt'])
         assert not mac.has_node('dt')
 
     def test_save_load(self, built_exp):
-        from mllabs.adapter import DecisionTreeAdapter
         mac = built_exp.e.collectors.set_collector(
-            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
-            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+            'fi', 'mllabs.ModelAttrCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'processor': 'sklearn.tree.DecisionTreeClassifier'}},
+            params={'result_key': 'feature_importances', 'adapter': {'__ref__': 'mllabs.adapter._sklearn.DecisionTreeAdapter'}})
         _run(built_exp, collectors=[mac.name])
         loaded = built_exp.e.collectors.get_collector('fi')
         assert loaded.has_node('dt')
@@ -526,12 +526,12 @@ class TestModelAttrCollector:
 
 class TestOutputCollector:
     def test_collect_basic(self, built_exp):
-        oc = built_exp.e.collectors.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        oc = built_exp.e.collectors.set_collector('out', 'mllabs.OutputCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(built_exp, collectors=[oc.name])
         assert oc.has_node('dt')
 
     def test_get_output(self, built_exp):
-        oc = built_exp.e.collectors.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        oc = built_exp.e.collectors.set_collector('out', 'mllabs.OutputCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(built_exp, collectors=[oc.name])
         result = oc.get_output('dt', 0, 0)
         assert 'output_test' in result
@@ -539,7 +539,7 @@ class TestOutputCollector:
         assert 'columns' in result
 
     def test_get_output_structure(self, built_exp):
-        oc = built_exp.e.collectors.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        oc = built_exp.e.collectors.set_collector('out', 'mllabs.OutputCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(built_exp, collectors=[oc.name])
         result = oc.get_output('dt', 0, 0)
         assert isinstance(result['output_test'], np.ndarray)
@@ -547,7 +547,7 @@ class TestOutputCollector:
         assert result['output_valid'] is None or isinstance(result['output_valid'], np.ndarray)
 
     def test_get_outputs(self, built_exp):
-        oc = built_exp.e.collectors.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        oc = built_exp.e.collectors.set_collector('out', 'mllabs.OutputCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(built_exp, collectors=[oc.name])
         results = oc.get_outputs('dt')
         assert isinstance(results, dict)
@@ -557,31 +557,31 @@ class TestOutputCollector:
             assert len(key) == 2
 
     def test_get_outputs_inner_split(self, built_exp_inner):
-        oc = built_exp_inner.e.collectors.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        oc = built_exp_inner.e.collectors.set_collector('out', 'mllabs.OutputCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(built_exp_inner, collectors=[oc.name])
         results = oc.get_outputs('dt')
         n_expected = built_exp_inner.e.get_n_splits() * built_exp_inner.e.get_n_splits_inner()
         assert len(results) == n_expected
 
     def test_get_output_not_found(self, built_exp):
-        oc = built_exp.e.collectors.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        oc = built_exp.e.collectors.set_collector('out', 'mllabs.OutputCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(built_exp, collectors=[oc.name])
         assert oc.get_output('dt', 99, 99) is None
 
     def test_get_outputs_node_not_found(self, built_exp):
-        oc = built_exp.e.collectors.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        oc = built_exp.e.collectors.set_collector('out', 'mllabs.OutputCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(built_exp, collectors=[oc.name])
         assert oc.get_outputs('nonexistent') == {}
 
     def test_reset_nodes(self, built_exp):
-        oc = built_exp.e.collectors.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        oc = built_exp.e.collectors.set_collector('out', 'mllabs.OutputCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(built_exp, collectors=[oc.name])
         assert oc.has_node('dt')
         oc.reset_nodes(['dt'])
         assert not oc.has_node('dt')
 
     def test_save_load(self, built_exp):
-        oc = built_exp.e.collectors.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        oc = built_exp.e.collectors.set_collector('out', 'mllabs.OutputCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(built_exp, collectors=[oc.name])
         loaded = built_exp.e.collectors.get_collector('out')
         assert loaded.has_node('dt')
@@ -591,7 +591,7 @@ class TestOutputCollector:
                                       result_loaded['output_valid'])
 
     def test_saved_nodes(self, multi_head_exp):
-        oc = multi_head_exp.e.collectors.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        oc = multi_head_exp.e.collectors.set_collector('out', 'mllabs.OutputCollector', 'mllabs._connector.Connector', params={'output_var': None})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[oc.name])
         saved = oc._get_saved_nodes()
         assert 'dt1' in saved
@@ -605,7 +605,7 @@ class TestCollectorWithExperimenter:
         result unchanged — this is exp()'s own skip logic, not a separate
         exist='skip' collect() call (which no longer exists)."""
         mc = built_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp, collectors=[mc.name])
         metric_before = mc.get_metric('dt').copy()
         _run(built_exp, collectors=[mc.name])
@@ -617,7 +617,7 @@ class TestCollectorWithExperimenter:
         Experimenter. Registration writes through, so there is nothing to save."""
         collectors = built_exp.e.collectors
         mc = collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp, collectors=[mc.name])
 
         reloaded = built_exp.e.collectors
@@ -634,7 +634,7 @@ class TestCollectorWithExperimenter:
         (NodeStore + cache only) has no way to cascade into one. Clearing a
         Collector's own state is a separate, explicit reset_nodes call on it."""
         mc = built_exp.e.collectors.set_collector(
-            'acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp, collectors=[mc.name])
         assert mc.has_node('dt')
         built_exp.e.reset_nodes(['dt'])
@@ -643,13 +643,12 @@ class TestCollectorWithExperimenter:
         assert not mc.has_node('dt')
 
     def test_multiple_collectors(self, built_exp):
-        from mllabs.adapter import DecisionTreeAdapter
         collectors = built_exp.e.collectors
-        mc = collectors.set_collector('acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
-        oc = collectors.set_collector('out', OutputCollector, Connector(), params={'output_var': None})
+        mc = collectors.set_collector('acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
+        oc = collectors.set_collector('out', 'mllabs.OutputCollector', 'mllabs._connector.Connector', params={'output_var': None})
         mac = collectors.set_collector(
-            'fi', ModelAttrCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'),
-            params={'result_key': 'feature_importances', 'adapter': DecisionTreeAdapter()})
+            'fi', 'mllabs.ModelAttrCollector', {'__ref__': 'mllabs._connector.Connector', '__params__': {'processor': 'sklearn.tree.DecisionTreeClassifier'}},
+            params={'result_key': 'feature_importances', 'adapter': {'__ref__': 'mllabs.adapter._sklearn.DecisionTreeAdapter'}})
         _run(built_exp, collectors=[mc.name, oc.name, mac.name])
         assert mc.has_node('dt')
         assert oc.has_node('dt')
@@ -664,7 +663,8 @@ class TestSHAPCollector:
     def _make_sc(self, built):
         from mllabs import SHAPCollector
         sc = built.e.collectors.set_collector(
-            'shap', SHAPCollector, Connector(processor='sklearn.tree.DecisionTreeClassifier'))
+            'shap', 'mllabs.SHAPCollector',
+            {'__ref__': 'mllabs._connector.Connector', '__params__': {'processor': 'sklearn.tree.DecisionTreeClassifier'}})
         _run(built, collectors=[sc.name])
         return sc
 
@@ -766,7 +766,7 @@ class TestCollectorErrorHandling:
 
     def test_collect_error_is_recorded_with_its_traceback(self, built_exp):
         collectors = built_exp.e.collectors
-        collectors.set_collector('broken', 'mock.BrokenCollector', Connector())
+        collectors.set_collector('broken', 'mock.BrokenCollector', 'mllabs._connector.Connector')
         _run(built_exp)
 
         rows = collectors.hist.get_hist(collector_name='broken')
@@ -778,8 +778,8 @@ class TestCollectorErrorHandling:
 
     def test_exp_continues_other_collectors_after_error(self, built_exp):
         collectors = built_exp.e.collectors
-        collectors.set_collector('broken', 'mock.BrokenCollector', Connector())
-        mc = collectors.set_collector('acc', MetricCollector, Connector(), params={'output_var': None, 'metric_func': accuracy_metric})
+        collectors.set_collector('broken', 'mock.BrokenCollector', 'mllabs._connector.Connector')
+        mc = collectors.set_collector('acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         _run(built_exp)
 
         assert mc.has_node('dt')
@@ -790,7 +790,7 @@ class TestCollectorErrorHandling:
         """A Collector whose collect() works but whose store step blows up —
         the fold that triggered the flush is the one that carries the error."""
         collectors = built_exp.e.collectors
-        collectors.set_collector('badpush', 'mock.BrokenPushCollector', Connector())
+        collectors.set_collector('badpush', 'mock.BrokenPushCollector', 'mllabs._connector.Connector')
         _run(built_exp)
 
         rows = collectors.hist.get_hist(collector_name='badpush')
@@ -811,7 +811,7 @@ class TestCollectHist:
 
     def test_a_row_per_collector_and_fold(self, built_exp_inner):
         collectors = built_exp_inner.e.collectors
-        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        collectors.set_collector('count', 'mock.CountingCollector', 'mllabs._connector.Connector')
         _run(built_exp_inner)
 
         rows = collectors.hist.get_hist(collector_name='count')
@@ -820,7 +820,7 @@ class TestCollectHist:
 
     def test_row_carries_the_stamp_of_the_run(self, built_exp):
         collectors = built_exp.e.collectors
-        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        collectors.set_collector('count', 'mock.CountingCollector', 'mllabs._connector.Connector')
         _run(built_exp)
 
         row = collectors.hist.get_hist(collector_name='count')[0]
@@ -838,7 +838,7 @@ class TestCollectHist:
         """The base Collector returns None — that used to be indistinguishable
         from a failed collect, since both produced None."""
         collectors = built_exp.e.collectors
-        collectors.set_collector('noop', 'mllabs.Collector', Connector())
+        collectors.set_collector('noop', 'mllabs.Collector', 'mllabs._connector.Connector')
         _run(built_exp)
 
         rows = collectors.hist.get_hist(collector_name='noop')
@@ -846,8 +846,10 @@ class TestCollectHist:
 
     def test_only_matched_collectors_get_rows(self, built_exp):
         collectors = built_exp.e.collectors
-        collectors.set_collector('count', 'mock.CountingCollector', Connector(node_query='^dt'))
-        collectors.set_collector('other', 'mock.CountingCollector', Connector(node_query='^nope'))
+        collectors.set_collector('count', 'mock.CountingCollector',
+                                 {'__ref__': 'mllabs._connector.Connector', '__params__': {'node_query': '^dt'}})
+        collectors.set_collector('other', 'mock.CountingCollector',
+                                 {'__ref__': 'mllabs._connector.Connector', '__params__': {'node_query': '^nope'}})
         _run(built_exp)
 
         assert collectors.hist.get_hist(collector_name='count')
@@ -855,7 +857,7 @@ class TestCollectHist:
 
     def test_get_status_is_keyed_by_node_and_fold(self, built_exp_inner):
         collectors = built_exp_inner.e.collectors
-        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        collectors.set_collector('count', 'mock.CountingCollector', 'mllabs._connector.Connector')
         _run(built_exp_inner)
 
         status = collectors.hist.get_status('count')
@@ -866,7 +868,7 @@ class TestCollectHist:
         """_run_collectors runs in the worker, so the outcome has to travel
         back over the pipe — only the parent ever writes the hist."""
         collectors = built_exp.e.collectors
-        collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        collectors.set_collector('count', 'mock.CountingCollector', 'mllabs._connector.Connector')
         _run(built_exp, n_jobs=2)
 
         rows = collectors.hist.get_hist(collector_name='count')
@@ -875,7 +877,7 @@ class TestCollectHist:
 
     def test_multi_worker_records_a_collect_error(self, built_exp):
         collectors = built_exp.e.collectors
-        collectors.set_collector('broken', 'mock.BrokenCollector', Connector())
+        collectors.set_collector('broken', 'mock.BrokenCollector', 'mllabs._connector.Connector')
         _run(built_exp, n_jobs=2)
 
         rows = collectors.hist.get_hist(collector_name='broken')
@@ -886,7 +888,7 @@ class TestCollectHist:
         """Narrowing to a list is a choice about this call, not about where the
         history goes — that is the run's, whichever form is passed."""
         collectors = built_exp.e.collectors
-        c = collectors.set_collector('count', 'mock.CountingCollector', Connector())
+        c = collectors.set_collector('count', 'mock.CountingCollector', 'mllabs._connector.Connector')
         _run(built_exp, collectors=[c.name])
 
         assert collectors.hist.get_hist(collector_name='count')
@@ -897,8 +899,8 @@ class TestCollectorSelection:
     is the run's, so anything it does not know has no place here to write."""
 
     def test_none_uses_every_collector_registered_on_the_run(self, built_exp):
-        c1 = built_exp.e.collectors.set_collector('c1', 'mock.CountingCollector', Connector())
-        c2 = built_exp.e.collectors.set_collector('c2', 'mock.CountingCollector', Connector())
+        c1 = built_exp.e.collectors.set_collector('c1', 'mock.CountingCollector', 'mllabs._connector.Connector')
+        c2 = built_exp.e.collectors.set_collector('c2', 'mock.CountingCollector', 'mllabs._connector.Connector')
         _run(built_exp)
 
         hist = built_exp.e.collectors.hist
@@ -906,8 +908,8 @@ class TestCollectorSelection:
         assert hist.get_hist(collector_name=c2.name)
 
     def test_a_name_selects_only_that_one(self, built_exp):
-        built_exp.e.collectors.set_collector('c1', 'mock.CountingCollector', Connector())
-        built_exp.e.collectors.set_collector('c2', 'mock.CountingCollector', Connector())
+        built_exp.e.collectors.set_collector('c1', 'mock.CountingCollector', 'mllabs._connector.Connector')
+        built_exp.e.collectors.set_collector('c2', 'mock.CountingCollector', 'mllabs._connector.Connector')
         _run(built_exp, collectors=['c1'])
 
         hist = built_exp.e.collectors.hist
@@ -915,7 +917,7 @@ class TestCollectorSelection:
         assert hist.get_hist(collector_name='c2') == []
 
     def test_empty_list_collects_nothing(self, built_exp):
-        built_exp.e.collectors.set_collector('c1', 'mock.CountingCollector', Connector())
+        built_exp.e.collectors.set_collector('c1', 'mock.CountingCollector', 'mllabs._connector.Connector')
         _run(built_exp, collectors=[])
 
         assert built_exp.e.collectors.hist.get_hist() == []
@@ -926,7 +928,7 @@ class TestCollectorSelection:
             _run(built_exp, collectors=['nope'])
 
     def test_an_instance_is_rejected(self, built_exp):
-        c = built_exp.e.collectors.set_collector('c1', 'mock.CountingCollector', Connector())
+        c = built_exp.e.collectors.set_collector('c1', 'mock.CountingCollector', 'mllabs._connector.Connector')
         with pytest.raises(TypeError, match='names'):
             _run(built_exp, collectors=[c])
 
@@ -946,8 +948,8 @@ class TestRegistryIsPerRun:
             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42), pipeline_version=version)
         e.build()
         mc = e.collectors.set_collector(
-            'acc', MetricCollector, Connector(),
-            params={'output_var': None, 'metric_func': accuracy_metric})
+            'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+            params={'output_var': None, 'metric_func': {'__callable__': 'test_collector.accuracy_metric'}})
         e.exp([_register(trial, e)])
         return e, mc
 
@@ -1008,25 +1010,25 @@ class TestProcessCollector:
         return sample_data.iloc[:20].reset_index(drop=True)
 
     def test_collect_basic(self, built_exp, ext_data):
-        pc = built_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = built_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(built_exp, ext_data)})
         _run(built_exp, collectors=[pc.name])
         assert pc.has_node('dt')
 
     def test_get_output_shape(self, built_exp, ext_data):
-        pc = built_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = built_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(built_exp, ext_data)})
         _run(built_exp, collectors=[pc.name])
         result = pc.get_output()
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_get_output_nodes_none(self, built_exp, ext_data):
-        pc = built_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = built_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(built_exp, ext_data)})
         _run(built_exp, collectors=[pc.name])
         result = pc.get_output(nodes=None)
         assert isinstance(result, pd.DataFrame)
 
     def test_get_output_nodes_list(self, multi_head_exp, ext_data):
-        pc = multi_head_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = multi_head_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(multi_head_exp, ext_data)})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[pc.name])
         result_dt1 = pc.get_output(nodes=['dt1'])
         result_all = pc.get_output(nodes=None)
@@ -1034,7 +1036,7 @@ class TestProcessCollector:
         assert result_dt1.shape[1] < result_all.shape[1]
 
     def test_get_output_nodes_regex(self, multi_head_exp, ext_data):
-        pc = multi_head_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = multi_head_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(multi_head_exp, ext_data)})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[pc.name])
         result = pc.get_output(nodes='dt1')
         assert isinstance(result, pd.DataFrame)
@@ -1042,41 +1044,41 @@ class TestProcessCollector:
 
     def test_with_upstream_stage(self, built_exp, ext_data):
         # built_exp: scaler(stage) -> dt(Trial), ext_data goes through scaler first
-        pc = built_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = built_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(built_exp, ext_data)})
         _run(built_exp, collectors=[pc.name])
         result = pc.get_output()
         assert len(result) == 20
 
     def test_agg_mean(self, built_exp, ext_data):
-        pc = built_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data, 'method': 'mean'})
+        pc = built_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(built_exp, ext_data), 'method': 'mean'})
         _run(built_exp, collectors=[pc.name])
         result = pc.get_output(agg='mean')
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_agg_mode(self, built_exp, ext_data):
-        pc = built_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = built_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(built_exp, ext_data)})
         _run(built_exp, collectors=[pc.name])
         result = pc.get_output(agg='mode')
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_agg_simple(self, built_exp, ext_data):
-        pc = built_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data, 'method': 'simple'})
+        pc = built_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(built_exp, ext_data), 'method': 'simple'})
         _run(built_exp, collectors=[pc.name])
         result = pc.get_output(agg='simple')
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_with_inner_splits(self, built_exp_inner, ext_data):
-        pc = built_exp_inner.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = built_exp_inner.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(built_exp_inner, ext_data)})
         _run(built_exp_inner, collectors=[pc.name])
         result = pc.get_output()
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 20
 
     def test_multi_head_columns_concat(self, multi_head_exp, ext_data):
-        pc = multi_head_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = multi_head_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(multi_head_exp, ext_data)})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[pc.name])
         result_all = pc.get_output(nodes=None)
         result_dt1 = pc.get_output(nodes=['dt1'])
@@ -1084,27 +1086,30 @@ class TestProcessCollector:
         assert result_all.shape[1] == result_dt1.shape[1] + result_dt2.shape[1]
 
     def test_connector_filter(self, multi_head_exp, ext_data):
-        pc = multi_head_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(node_query=['dt1']), params={'ext_data': ext_data})
+        pc = multi_head_exp.e.collectors.set_collector(
+            'proc', 'mllabs.ProcessCollector',
+            {'__ref__': 'mllabs._connector.Connector', '__params__': {'node_query': ['dt1']}},
+            params={'ext_data': _ext(multi_head_exp, ext_data)})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[pc.name])
         assert pc.has_node('dt1')
         assert not pc.has_node('dt2')
 
     def test_reset_nodes(self, built_exp, ext_data):
-        pc = built_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = built_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(built_exp, ext_data)})
         _run(built_exp, collectors=[pc.name])
         assert pc.has_node('dt')
         pc.reset_nodes(['dt'])
         assert not pc.has_node('dt')
 
     def test_get_saved_nodes(self, multi_head_exp, ext_data):
-        pc = multi_head_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = multi_head_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(multi_head_exp, ext_data)})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2, collectors=[pc.name])
         saved = pc._get_saved_nodes()
         assert 'dt1' in saved
         assert 'dt2' in saved
 
     def test_save_load(self, built_exp, ext_data):
-        pc = built_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = built_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(built_exp, ext_data)})
         _run(built_exp, collectors=[pc.name])
         loaded = built_exp.e.collectors.get_collector('proc')
         assert loaded.has_node('dt')
@@ -1113,7 +1118,7 @@ class TestProcessCollector:
         pd.testing.assert_frame_equal(result_orig, result_loaded)
 
     def test_invalid_agg(self, built_exp, ext_data):
-        pc = built_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data})
+        pc = built_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(built_exp, ext_data)})
         _run(built_exp, collectors=[pc.name])
         with pytest.raises(ValueError):
             pc.get_output(agg='invalid')
@@ -1129,20 +1134,20 @@ class TestProcessCollector:
         return Built(project=project, e=e, trial=trial)
 
     def test_output_var_none_returns_all_columns(self, proba_exp, ext_data):
-        pc = proba_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data, 'output_var': None})
+        pc = proba_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(proba_exp, ext_data), 'output_var': None})
         _run(proba_exp, collectors=[pc.name])
         result = pc.get_output()
         assert result.shape == (20, 2)
 
     def test_output_var_list_selects_column(self, proba_exp, ext_data):
-        pc = proba_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data, 'output_var': '{dt__target_0}'})
+        pc = proba_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(proba_exp, ext_data), 'output_var': '{dt__target_0}'})
         _run(proba_exp, collectors=[pc.name])
         result = pc.get_output()
         assert list(result.columns) == ['dt__target_0']
         assert result.shape == (20, 1)
 
     def test_output_var_regex_selects_column(self, proba_exp, ext_data):
-        pc = proba_exp.e.collectors.set_collector('proc', ProcessCollector, Connector(), params={'ext_data': ext_data, 'output_var': 'dt__target_1'})
+        pc = proba_exp.e.collectors.set_collector('proc', 'mllabs.ProcessCollector', 'mllabs._connector.Connector', params={'ext_data': _ext(proba_exp, ext_data), 'output_var': 'dt__target_1'})
         _run(proba_exp, collectors=[pc.name])
         result = pc.get_output()
         assert list(result.columns) == ['dt__target_1']
@@ -1154,8 +1159,9 @@ class TestCollectState:
 
     def _acc(self, e, name='acc', connector=None, metric=accuracy_metric):
         return e.collectors.set_collector(
-            name, MetricCollector, connector or Connector(),
-            params={'output_var': None, 'metric_func': metric})
+            name, 'mllabs.MetricCollector', connector or 'mllabs._connector.Connector',
+            params={'output_var': None,
+                    'metric_func': {'__callable__': f'test_collector.{metric.__name__}'}})
 
     def test_uncollected_empty_when_everything_collected(self, built_exp):
         mc = self._acc(built_exp.e)
@@ -1178,7 +1184,8 @@ class TestCollectState:
         assert built_exp.e.uncollected_trials() == {'acc': []}
 
     def test_uncollected_ignores_a_trial_the_connector_skips(self, multi_head_exp):
-        mc = self._acc(multi_head_exp.e, connector=Connector(node_query='dt1'))
+        mc = self._acc(multi_head_exp.e, connector={
+            '__ref__': 'mllabs._connector.Connector', '__params__': {'node_query': 'dt1'}})
         _run(multi_head_exp, multi_head_exp.trial1, multi_head_exp.trial2,
              collectors=[mc.name])
         assert multi_head_exp.e.uncollected_trials() == {'acc': []}
