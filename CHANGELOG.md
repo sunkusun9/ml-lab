@@ -5,6 +5,143 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-08-17
+
+Closes out the "agent-workable surface" milestone. 0.9.0 made a project's root
+self-contained; this release makes that root worth talking to: state that used
+to require hand-joining several stores now has one owner, every remaining
+definition — including a Collector's `params` — is plain data, and adopting a
+new Pipeline version no longer destroys a trained Predictor under a name
+(`reset`) that means the opposite everywhere else.
+
+### Added
+
+- `Project` now owns the dataset, exactly one pipeline with a version
+  lifecycle, and the live run objects it hands out — `experimenters`/
+  `trainers` return the same object on repeat access. `add_experimenter`/
+  `add_trainer` are add-only; an existing run is reached through
+  `project.experimenters[name]`, never re-created by accident (#128)
+- Pipeline versioning: `build()` publishes and mints a version only when the
+  definition actually changed; `draft()` returns the same snapshot
+  unregistered, for previewing without committing. A project is seeded with
+  v0 — the empty Pipeline, published — so "nothing built yet" is a real row,
+  not an absence
+- `Trial` and `Predictor` carry `pipeline_version` as part of their own
+  definition rather than a note on the history row. `Project.set_trial(s)`
+  stamps the latest published version, `Trainer.train` stamps its own adopted
+  version, `Predictor.from_trial` copies it. `exp()`/`train()` refuse a stamp
+  that does not match the adopted version — but only where a job would
+  actually be created, so re-handing an already-finished round stays a no-op
+  rather than an error
+- Trial authoring moved to the project: `Project.set_trial(s)` registers
+  (returning only what was added or changed) and freezes a name once it has a
+  `'built'` fold behind it, so a redefinition cannot leave old results
+  describing a definition that never produced them. `Experimenter.exp(names)`
+  runs by name, expanding the fold grid itself and resuming from what is
+  already `'built'` (#126)
+- `Trial.chain(name, **overrides)` derives one Trial from another —
+  `src_trial` reference, partial `params` merge, `+`/`-` edge combination,
+  overrides read by presence so `adapter=None` can clear a field.
+  `Project.chain_trial(src_name, name=None, **overrides)` composes lookup,
+  naming and registration. `TrialStore.next_name`/`next_seq` mint a
+  persisted, project-wide, assign-never-derive name counter (#132)
+- `GridTrials` replaces the free `make_trials` function: combo generation
+  carries no name concept at all, fixing a defect where growing or shrinking
+  a sweep silently renamed sibling combos. `Project.make_trials(name,
+  generator)` mints names and registers in one call (#132)
+- `compare_specs({name: spec})` diffs any `ProcessorSpec` mapping — Trial
+  specs or Pipeline node specs alike — into per-processor `common`/`diff`,
+  replacing the Pipeline-only `compare_nodes` (#132)
+- `Collectors` moved to a per-Experimenter registry
+  (`{exp path}/collectors`), fixing silent overwrite when two runs shared a
+  Trial name. `exp(names, collectors=)` selects by name from the run's own
+  registry (#135)
+- Predictor lifecycle gains a `status` column (`init`/`trained`/`retired`/
+  `error`); a Pipeline version switch **retires** a Predictor whose inputs
+  changed — terminal, never retrained again — instead of silently dropping
+  its artifacts under `reset`, which means the opposite for a node.
+  `Trainer.retiring_predictors(pipeline)` previews the cascade before
+  adopting (#133)
+- `Project.publish_pipeline(experimenters=True, trainers=False,
+  dry_run=False)` builds, adopts across every Experimenter and reports the
+  cost in one call. Trainers stay out by default — adopting there can retire
+  trained Predictors, which a mere experiment-side publish should not do
+  (#133)
+- `Project.uncollected_trials` / `Experimenter.uncollected_trials`: Trials
+  that ran but that a Collector kept nothing for. Replaces a hand-rolled join
+  that looked for a *missing* history row and so silently dropped Trials
+  whose collection had recorded `'error'`
+- `Project.stale_nodes()` / `Experimenter.stale_nodes(pipeline)` /
+  `Trainer.stale_nodes(pipeline)`: preview which artifacts a Pipeline
+  adoption would drop, before adopting it. `set_pipeline` now calls the same
+  implementation the preview does, so the two cannot drift (#130)
+- `error_nodes`/`error_trials`/`collect_errors` return lists of dicts —
+  identity columns plus the flattened failure — instead of formatted
+  strings, so calling code can act on a failure instead of parsing a report
+  (#130)
+- `ExtDataProvider` (`project.ext_data`): a named registry for data beyond
+  the main dataset — a held-out test set, `aug_data`, a Collector's external
+  data — read fresh from disk on every access rather than cached, since this
+  data is not recomputable if evicted. `Resolver` (`project.resolver`) adds
+  `'@ext:name'` resolution on top of the existing ref-resolution machinery
+  and is threaded through Experimenter, Trainer and Collector construction
+  (#131)
+- Collector `params` is now a plain, JSON-validated `TEXT` column instead of
+  an unvalidated pickle file — `set_collector` rejects a live collector,
+  connector or params value the same way a Pipeline node rejects a live
+  processor (#131)
+
+### Changed
+
+- `Inferencer` no longer has a Project-managed path, factory or loader —
+  `to_inferencer()` re-reads already-durable Trainer objects rather than
+  fitting anything, so a project-managed copy would only drift from the
+  original. Provenance instead rides inside the artifact as `trainer_spec`
+  (name, pipeline_version, n_splits, splitter ref/params — strings and
+  primitives only), read with `.get()` so pickles saved before this release
+  still open (#129)
+- `DataFlow`/`TrainDataFlow` read artifacts on demand instead of loading a
+  fold's entire node set at construction, so reopening a built run no longer
+  materialises every processor and intermediate dataset in the grid up
+  front. Train output now goes through `DataCache` under the same byte
+  budget as valid/test, instead of an uncapped per-flow dict (#138)
+- `Project.__init__` no longer takes `aug_data` — it is just a named entry
+  in `ext_data` now, referenced as `'@ext:name'` wherever `aug_data=` is
+  accepted (#131)
+
+### Removed
+
+- `Project.aug_data` / `set_aug_data` — see `ExtDataProvider` above
+- `Project.collectors()` / `collectors_path()` and the project-root
+  `collectors/` directory — Collectors are per-Experimenter now (#135)
+- `PipelineBuilder.compare_nodes` — use `compare_specs({name: spec})` (#132)
+- Free-function `make_trials` and its `{name}_{idx}` naming scheme — use
+  `GridTrials` with `Project.make_trials` (#132)
+- Pipeline `archived` status — a version is `draft` or `published` with no
+  demotion, since a demoted pickle would go on claiming to be current.
+  `remove_pipeline_version` refuses the *latest* version instead of
+  requiring `archived` (#143)
+- `Project.inferencer_path` (#129)
+
+### Fixed
+
+- `reset_nodes()` on a Trial deleted the artifact but left the fold recorded
+  as `'built'` in `experiment_hist`, silently skipping it on the next
+  `exp()`. A Trial now persists nothing at all — the executor distinguishes
+  job kinds with an explicit `store`/`chained` pair instead of inferring
+  them, so the two skip gates can no longer disagree (#127)
+- There was no way to fully remove a Trial — definition, every Experimenter's
+  history, and collected data together. `Project.remove_trial(name)` now
+  does all four stores it touches (#127)
+
+### Breaking, no migration
+
+Several schema changes ship with no upgrade path — a Pipeline `versions`
+table with no `status` column, `trials`/`predictors` gaining
+`pipeline_version`/`status` columns, Collector `params` moving from a pickle
+file to a `TEXT` column. A project directory created before this release will
+not open against it.
+
 ## [0.9.0] - 2026-08-05
 
 A rework of how a project, a pipeline and a run relate to each other. **Almost
