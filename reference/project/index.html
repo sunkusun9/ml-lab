@@ -1,0 +1,4878 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="ML pipeline and experiment management library">
+      
+      
+      
+      
+        <link rel="prev" href="../">
+      
+      
+        <link rel="next" href="../pipeline/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Project - ml-labs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#project" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="ml-labs" class="md-header__button md-logo" aria-label="ml-labs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            ml-labs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Project
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/sunkusun9/ml-labs" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    sunkusun9/ml-labs
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../concepts/" class="md-tabs__link">
+          
+  
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guide/project-pipeline/" class="md-tabs__link">
+          
+  
+  
+  User Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../serving/inferencer/" class="md-tabs__link">
+          
+  
+  
+  Serving Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+  
+
+<nav class="md-nav md-nav--primary md-nav--lifted md-nav--integrated" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="ml-labs" class="md-nav__button md-logo" aria-label="ml-labs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    ml-labs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/sunkusun9/ml-labs" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    sunkusun9/ml-labs
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/state-model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    State Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/data-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/project-pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project &amp; Pipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/edges-dsl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    edges DSL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/experimenter-trials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Experimenter &amp; Trials
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/collectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Collectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/trainer-predictors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Trainer &amp; Predictors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/adapters/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adapters
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/processors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Processors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/nn/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Neural Network Models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Serving Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Serving Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../serving/inferencer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Serving Guide (Inferencer)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#mllabs.Project" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Project
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Project">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        data
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.experimenters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        experimenters
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        pipeline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.trainers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        trainers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.add_experimenter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        add_experimenter
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.add_trainer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        add_trainer
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.chain_trial" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        chain_trial
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.collect_errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        collect_errors
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.error_trials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        error_trials
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.list_experimenters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        list_experimenters
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.list_pipeline_versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        list_pipeline_versions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.list_trainers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        list_trainers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.load_pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        load_pipeline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.make_trials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        make_trials
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.pending_trials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        pending_trials
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.publish_pipeline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        publish_pipeline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.remove_experimenter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        remove_experimenter
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.remove_pipeline_version" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        remove_pipeline_version
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.remove_trainer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        remove_trainer
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.remove_trial" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        remove_trial
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.set_collector" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        set_collector
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.set_data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        set_data
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.set_trial" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        set_trial
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.set_trials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        set_trials
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.stale_nodes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        stale_nodes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Project.uncollected_trials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        uncollected_trials
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mllabs.TrialStore" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TrialStore
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="TrialStore">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.TrialStore.get_by_name" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        get_by_name
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.TrialStore.get_hist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        get_hist
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.TrialStore.get_info" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        get_info
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.TrialStore.get_status" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        get_status
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.TrialStore.has" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        has
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.TrialStore.next_name" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        next_name
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.TrialStore.next_seq" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        next_seq
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.TrialStore.record" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        record
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.TrialStore.register" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        register
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.TrialStore.register_all" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        register_all
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.TrialStore.remove" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        remove
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mllabs.ExtDataProvider" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ExtDataProvider
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="ExtDataProvider">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.ExtDataProvider.get" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        get
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.ExtDataProvider.names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        names
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.ExtDataProvider.register" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        register
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.ExtDataProvider.remove" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        remove
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.ExtDataProvider.size" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        size
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.ExtDataProvider.sizes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        sizes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mllabs.Resolver" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resolver
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Resolver">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Resolver.instance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        instance
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Resolver.params" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        params
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Resolver.processor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        processor
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mllabs.Resolver.value" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        value
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../experimenter/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Experimenter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../trials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Trials &amp; Predictors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../trainer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Trainer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../inferencer/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inferencer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../collectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Collectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../connector/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connector
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../adapters/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adapters
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../processors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Processors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nn/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Neural Network Models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../filters/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Filters
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="project">Project<a class="headerlink" href="#project" title="Permanent link">&para;</a></h1>
+
+
+<div class="doc doc-object doc-class">
+
+
+
+<h2 id="mllabs.Project" class="doc doc-heading">
+            <code>mllabs.Project</code>
+
+
+<a href="#mllabs.Project" class="headerlink" title="Permanent link">&para;</a></h2>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>Root of a project directory.</p>
+<p>Layout::</p>
+<div class="highlight"><pre><span></span><code>{path}/
+  project.db          ProjectStore — what this project manages
+  trials.db           TrialStore (definitions + execution history)
+  data.pkl            the dataset everything here is built against
+  ext_data/           named external data (ExtDataProvider) — {name}.pkl each.
+                       aug_data lives here too now — register it under a
+                       name and pass &#39;@ext:name&#39; as aug_data= to
+                       add_experimenter/add_trainer; Project has no
+                       aug_data storage of its own
+  pipeline/           pipeline.db — the working copy, which is the
+                       builder itself and never a version — plus
+                       v{n}.pkl and v{n}_builder.pkl per published one
+  exp/{name}/         Experimenter — its own store, Pipeline copy,
+                       NodeStore and Collectors, all self-contained
+  trainers/{name}/    Trainer (same, own NodeStore)
+  inferencers/{name}/ saved Inferencers
+</code></pre></div>
+<p>Project holds what is project-wide — the dataset, the pipelines, the
+TrialStore, the shared cache — and keeps the components it hands out, so
+asking for the same name twice gives the same object rather than a second
+one over the same directory. Everything about an individual Experimenter or
+Trainer — its splitters, the Pipeline it adopted, its node artifacts and
+history, its Collectors — still belongs to its own directory, so it can be
+reopened without a Project at all.</p>
+<p>The dataset is the exception that makes the rest work: it is the one thing
+they cannot restore from their own directories, so without it here every
+question about the project needs the caller to bring a dataframe.</p>
+<p>There is no <code>save()</code>. Each component writes through as it changes, and a
+second place to persist from would be a second source of truth.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>path</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span> | <span title="pathlib.Path">Path</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Project root. Created if missing.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>data</code>
+            </td>
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Dataset for this project. Stored under <code>data.pkl</code> and handed to
+every Experimenter/Trainer that does not override it.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>cache_maxsize</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Stage-output cache size in bytes, shared by every
+Experimenter/Trainer in the project. Default 4 GB.</p>
+              </div>
+            </td>
+            <td>
+                  <code>4 * 1024 ** 3</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h3 id="mllabs.Project.data" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">data</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+<a href="#mllabs.Project.data" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>The project dataset, read from disk on first use (<code>None</code> if unset).</p>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h3 id="mllabs.Project.experimenters" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">experimenters</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+<a href="#mllabs.Project.experimenters" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>This project's Experimenters, by name.</p>
+<p>The objects, opened on demand — which needs the project's data, that
+being the one thing an Experimenter cannot read back from its own
+directory. :meth:<code>list_experimenters</code> answers the cheaper question of
+which names this project manages.</p>
+<p>Only names not already held are opened, so one added through
+:meth:<code>add_experimenter</code> comes back as the very object that call
+returned. Two live Experimenters over one directory would each hold
+their own Collectors and node caches, and a change through one would be
+invisible to the other.</p>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h3 id="mllabs.Project.pipeline" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">pipeline</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+<a href="#mllabs.Project.pipeline" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>This project's :class:<code>~mllabs.PipelineBuilder</code> — the working copy.</p>
+<p>One per project. The builder <em>is</em> the <code>open</code> version: it is the only
+editable state there is, and building it publishes whatever it currently
+says (see :meth:<code>PipelineBuilder.build</code>). Asking twice gives the same
+object rather than a second builder over the same db, which would let
+two in-memory copies of the definitions drift apart.</p>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h3 id="mllabs.Project.trainers" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">trainers</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+<a href="#mllabs.Project.trainers" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>This project's Trainers, by name. Opened like :attr:<code>experimenters</code>.</p>
+
+    </div>
+
+</div>
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.add_experimenter" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">add_experimenter</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">pipeline_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">aug_data</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.add_experimenter" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Add a new Experimenter named <em>name</em>, under <code>{project}/exp/{name}</code>.</p>
+<p>An addition, so a taken name raises rather than being written over.
+Constructing an Experimenter splits the data afresh and resets its
+provenance, which over an existing one is damage rather than a reopen;
+reach for that one through :attr:<code>experimenters</code>.</p>
+<p>Its name is its identity: it is both the directory and the key used in
+:class:<code>~mllabs.TrialStore</code> history.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>name</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Experimenter name.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>data</code>
+            </td>
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Dataset for it. Defaults to the project's.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>pipeline_version</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Version for it to adopt.
+Omitted, it adopts the published one — version 0, the empty
+Pipeline, until something has been built. Adopting an
+unpublished edit is a separate act: build it first.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>aug_data</code>
+            </td>
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>External data appended at DataSource level to inner
+train splits — a live dataset, or an <code>'@ext:name'</code> string
+resolved against <code>self.ext_data</code> (register it there first).
+No project-level default any more: omitted, there is none.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>**kwargs</code>
+            </td>
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Passed to :class:<code>~mllabs.Experimenter</code> (<code>sp</code>, <code>sp_v</code>,
+<code>splitter_params</code>, <code>title</code>, <code>data_key</code>, ...).</p>
+              </div>
+            </td>
+            <td>
+                  <code>{}</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<p><span class="doc-section-title">Raises:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><span title="ValueError">ValueError</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If this project already manages <em>name</em>, or something
+else already occupies its directory.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.add_trainer" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">add_trainer</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">pipeline_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">aug_data</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.add_trainer" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Add a new Trainer named <em>name</em>, under <code>{project}/trainers/{name}</code>.</p>
+<p>Same shape as :meth:<code>add_experimenter</code>, and the same rule: a taken name
+raises. <em>pipeline_version</em> defaults the same way too — the latest
+published version. Any published version is adoptable, and this never
+hands over a draft, which is the one thing <code>set_pipeline</code> refuses.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.chain_trial" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">chain_trial</span><span class="p">(</span><span class="n">src_name</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">pipeline_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="o">**</span><span class="n">overrides</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.chain_trial" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Author a Trial derived from an already-registered one.</p>
+<p>Looks up <em>src_name</em> in :attr:<code>trials</code>, derives the successor via
+<code>Trial.chain</code>, and registers it through :meth:<code>set_trial</code> — so the
+freeze gate and version stamping apply exactly as they would to any
+other authored Trial.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>src_name</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Name of the registered source Trial.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>name</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Name for the new Trial. Left unset, one is
+minted from <code>self.trials.next_name(src_name)</code> — a fresh
+number under <em>src_name</em>'s own prefix.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>pipeline_version, **overrides</code>
+            </td>
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Passed straight to <code>Trial.chain</code>.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>str | None: The new Trial's name, or <code>None</code> if nothing</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>changed (see :meth:<code>set_trial</code>).</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<p><span class="doc-section-title">Raises:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><span title="KeyError">KeyError</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If <em>src_name</em> is not registered.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.collect_errors" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">collect_errors</span><span class="p">(</span><span class="n">experimenter</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">collectors</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.collect_errors" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Collection failures across the project, one dict each.</p>
+<p>The third error read beside :meth:<code>error_trials</code> and
+<code>Experimenter.error_nodes</code>, and the only one that has to go through
+an Experimenter: a Collector's history belongs to the registry that owns
+it, and the registry is per-Experimenter. So this asks each one via
+<code>Experimenter.collect_errors</code> rather than reading a store of its own,
+and adds the <code>experimenter</code> key that <code>collect_hist</code> deliberately
+has no column for — which one it was is answered by whose db it is.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>experimenter</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Only this Experimenter's failures.
+<code>None</code> reads every one's.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>collectors</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span> | <span title="list">list</span>[<span title="str">str</span>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Registered Collector names.
+<code>None</code> reads every one of them.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>list[dict]: <code>Experimenter.collect_errors</code> rows with</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>experimenter</code> added. Empty when clean.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.error_trials" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">error_trials</span><span class="p">(</span><span class="n">experimenter</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.error_trials" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Failed folds of Trial execution, one dict each.</p>
+<p>The Trial counterpart of <code>Experimenter.error_nodes</code>, and it lives
+here for the same reason that one lives there: a failure is read from
+whoever owns the history it is recorded in. Node history is the
+Experimenter's; Trial history is the project's, keyed by experimenter.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>experimenter</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Only this Experimenter's failures.
+<code>None</code> reads every one's.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>list[dict]: <code>trial_name</code>, <code>experimenter</code>, <code>outer_idx</code>,</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>inner_idx</code>, <code>pipeline_version</code> and the flattened failure</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>(<code>type</code>, <code>message</code>, <code>traceback</code>). Empty when clean.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.list_experimenters" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">list_experimenters</span><span class="p">()</span></code>
+
+<a href="#mllabs.Project.list_experimenters" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Names of every Experimenter this project manages.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.list_pipeline_versions" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">list_pipeline_versions</span><span class="p">()</span></code>
+
+<a href="#mllabs.Project.list_pipeline_versions" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Every published version: <code>{version, path, builder_path}</code> rows.</p>
+<p>No status among them: being listed here is what published means, and a
+draft never reaches the store.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.list_trainers" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">list_trainers</span><span class="p">()</span></code>
+
+<a href="#mllabs.Project.list_trainers" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Names of every Trainer this project manages.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.load_pipeline" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">load_pipeline</span><span class="p">(</span><span class="n">version</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.load_pipeline" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>A published version by number; without one, the latest.</p>
+<p>A read, and only a read. It used to build :attr:<code>pipeline</code> when given
+no version, which publishes — so a call that reads like "load" minted a
+version, and adding an Experimenter did too. Minting now happens in one
+place, :meth:<code>PipelineBuilder.build</code>, where it is what you asked for.</p>
+<p>There is always something to return: a project publishes the empty
+Pipeline as version 0 when it is created.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.make_trials" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">make_trials</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">generator</span><span class="p">,</span> <span class="n">pipeline_version</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.make_trials" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Author a batch of Trials from <em>generator</em>, registering all of them.</p>
+<p><em>generator</em> (e.g. :class:<code>~mllabs.GridTrials</code>) enumerates what each
+Trial should <em>contain</em> — it exposes <code>combos() -&gt; list[dict]</code> of
+<code>Trial</code> constructor kwargs (processor/edges/method/adapter/params/
+tag), nothing about names. This is where each combo becomes an
+identity: a name from <code>self.trials.next_name(name)</code> — assign, never
+derive, so growing or shrinking the batch never renames a sibling —
+and registration through :meth:<code>set_trials</code>, so the freeze gate and
+version stamping apply exactly as they would to any other authored
+Trial.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>name</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Prefix passed to <code>next_name</code> for every combo.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>generator</code>
+            </td>
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Anything exposing <code>combos() -&gt; list[dict]</code>.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>pipeline_version</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Applied to every Trial in the
+batch before registration. Left unset, <code>set_trial</code> fills in
+the latest published version per Trial — pass it to author
+the whole batch against an older one.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>list[str]: Names of the Trials added or changed (see</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>meth:<code>set_trials</code>) — the work list for the next <code>exp()</code>.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.pending_trials" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">pending_trials</span><span class="p">(</span><span class="n">experimenter</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.pending_trials" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Registered Trials that errored or have not run.</p>
+<p>The work list: a Trial with an <code>'error'</code> fold, and one with no
+history at all, both still have to be executed and are indistinguishable
+in what they need. Written by hand this filter tends to catch only the
+second — the notebook's version did, so an errored Trial silently
+dropped out of the list of things left to do.</p>
+<p>Deliberately coarse: a Trial interrupted partway through
+the folds is <em>not</em> reported, because deciding that means comparing
+history against a fold grid this store does not know. Running the
+returned names is safe either way — <code>exp()</code> skips the folds that
+are done.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>experimenter</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Judge against this Experimenter's history.
+<code>None</code> asks whether a Trial ran anywhere in the project.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>list[str]: Trial names, in registration order.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.publish_pipeline" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">publish_pipeline</span><span class="p">(</span><span class="n">experimenters</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">trainers</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">dry_run</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.publish_pipeline" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Build the working copy, move Experimenters and Trainers onto it, and
+report what that cost.</p>
+<p>The sequence this exists for is: build, propagate, <em>then</em> author. It
+has to hold, because the pieces enforcing it are not the ones that
+would notice it broken. :meth:<code>set_trial</code> stamps a Trial with the
+latest published version, adopting is what gives an Experimenter a
+version to compare against, and <code>exp()</code> refuses a stamp that is not
+the adopted one. Build without propagating and the Trials authored
+next carry a version nothing holds — which surfaces as a refusal at
+<code>exp()</code>, some distance from the omission that caused it. One call
+spanning the project is the only place that ordering can live: an
+Experimenter knows nothing of its siblings, and a store knows nothing
+of either.</p>
+<p><strong>Trainers stay out unless asked for.</strong> The two sides do not pay the
+same price. An Experimenter loses node artifacts, which the next
+<code>build()</code> makes again. A Trainer loses trained models: adopting
+retires every Predictor whose inputs changed, and retirement is
+terminal. Work usually moves the other way round anyway — experiment,
+read the results, then promote into a Trainer — so a publish during
+experimentation should not reach into what has already been trained.</p>
+<p>Leaving one behind strands nothing. A Trainer keeps its own Pipeline
+copy and its Predictors carry the version they were trained against,
+so it goes on working at the version it holds; <code>train()</code> refuses a
+mismatch rather than quietly doing the wrong thing. Moving it forward
+stays available as its own decision, here or through
+<code>trainer.set_pipeline(project.load_pipeline())</code>.</p>
+<p>Building an unchanged definition returns the version it already has,
+so calling this out of habit costs nothing and moves nothing.</p>
+<p>What comes back is the cost, not just the number: afterwards there is
+nothing left to ask, the artifacts being gone and the staleness
+consumed in deciding to delete them. The two losses are reported
+apart because they are not the same loss (see
+:meth:<code>Trainer.retiring_predictors</code>).</p>
+<p>Propagation is sequential and not atomic: if one raises, the ones
+before it have already adopted. Repeating the call is the repair,
+adoption being idempotent once the version is held.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>experimenters</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Propagate to this project's Experimenters.
+Default <code>True</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>True</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>trainers</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Propagate to its Trainers. Default <code>False</code> —
+see above. Left <code>False</code>, they are neither adopted into nor
+opened, and are absent from the report.</p>
+              </div>
+            </td>
+            <td>
+                  <code>False</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>dry_run</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Report the cost and adopt nothing. Uses
+:meth:<code>PipelineBuilder.draft</code> rather than building, so asking
+what a publish would cost does not perform one — the same
+reason :meth:<code>stale_nodes</code> does. Pair it with
+<code>trainers=True</code> to price a Trainer before committing to it.</p>
+              </div>
+            </td>
+            <td>
+                  <code>False</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+<th>Name</th>          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+<td><code>dict</code></td>            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>{'version', 'experimenters', 'trainers'}</code>, where</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+<td></td>            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>experimenters</code> is <code>{name: [node...]}</code> and <code>trainers</code> is</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+<td></td>            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>{name: {'nodes': [...], 'retired': [...]}}</code>. <code>version</code> is</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+<td></td>            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>None</code> for a dry run — a draft carries no number.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.remove_experimenter" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">remove_experimenter</span><span class="p">(</span><span class="n">name</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.remove_experimenter" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Delete the Experimenter named <em>name</em> — its directory, and its Trial history.</p>
+<p>The history goes because the name is what keys it. Left behind, it would
+attach to whatever is added under that name next, and <code>exp()</code> would
+skip folds it had never actually run — the silent kind of wrong. Trial
+<em>definitions</em> are untouched: those belong to the project.</p>
+
+
+<p><span class="doc-section-title">Raises:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><span title="KeyError">KeyError</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If this project manages no Experimenter named <em>name</em>.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.remove_pipeline_version" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">remove_pipeline_version</span><span class="p">(</span><span class="n">version</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.remove_pipeline_version" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Delete a published version. Not the latest one.</p>
+<p>The latest is what :meth:<code>load_pipeline</code> and <code>add_experimenter</code> /
+<code>add_trainer</code> resolve to when given no number, so removing it would
+move that pointer silently. Any older one goes freely: nothing that ran
+against it breaks, since every Experimenter and Trainer holds its own
+Pipeline copy. What is lost is what their provenance points at.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.remove_trainer" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">remove_trainer</span><span class="p">(</span><span class="n">name</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.remove_trainer" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Delete the Trainer named <em>name</em> — its directory, Predictors included.</p>
+<p>Nothing outside it to clean up: a Trainer's history lives in its own
+stores rather than in a project-wide one.</p>
+
+
+<p><span class="doc-section-title">Raises:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><span title="KeyError">KeyError</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If this project manages no Trainer named <em>name</em>.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.remove_trial" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">remove_trial</span><span class="p">(</span><span class="n">name</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.remove_trial" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Drop <em>name</em> from the project — definition, history and collected data.</p>
+<p>A Trial leaves no artifact, so everything it produced is spread across
+stores that deliberately don't know about each other: its definition
+and per-fold history in the project's <code>TrialStore</code>, and — inside
+every Experimenter that ran it — the collected data and the
+<code>CollectHist</code> rows describing it. Project is the only thing that
+sees all of them, so removing a Trial belongs here.</p>
+<p>Every Experimenter, with no way to ask for a subset. Leaving one out
+would leave results behind for a Trial the project no longer defines,
+and nothing afterwards would say which one still had them.</p>
+<p>The definition and the whole of its history go in one statement each;
+the rest is a pass over :attr:<code>experimenters</code>, delegating to
+:meth:<code>Experimenter.remove_trial_result</code>. That opens the ones not
+already held, which is what makes the removal reach a Collector
+answering from an in-memory cache (<code>ModelAttrCollector</code>/
+<code>SHAPCollector</code>) — a registry reopened from disk would not be the
+instance holding that cache.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>name</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Trial name. Removing one that was never registered is
+a no-op, not an error.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<p><span class="doc-section-title">Raises:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><span title="ValueError">ValueError</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If this project has no dataset, which opening an
+Experimenter needs.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.set_collector" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">set_collector</span><span class="p">(</span><span class="n">experimenter</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">collector</span><span class="p">,</span> <span class="n">connector</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">exist</span><span class="o">=</span><span class="s1">&#39;skip&#39;</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.set_collector" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Register a Collector on <em>experimenter</em>'s own registry.</p>
+<p>A thin proxy, not ownership — Project holds no Collector registry of
+its own (a Collectors registry has to stay per-Experimenter, since
+everything it writes is keyed by node name only; see
+<code>Experimenter.collectors</code>). This just saves the caller from reaching
+through <code>project.experimenters[experimenter].collectors</code> by hand for
+the common case of registering one by name, the same way
+:meth:<code>chain_trial</code> saves a reach through <code>self.trials</code>.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>experimenter</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Name of the Experimenter to register it on.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>name, collector, connector, path, params, exist</code>
+            </td>
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Passed straight
+to <code>Collectors.set_collector</code> — see there for what each
+means and what gets validated.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+<th>Name</th>          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+<td><code>Collector</code></td>            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>The registered collector.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<p><span class="doc-section-title">Raises:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><span title="KeyError">KeyError</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If this project manages no Experimenter named
+<em>experimenter</em>.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.set_data" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">set_data</span><span class="p">(</span><span class="n">data</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.set_data" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Store <em>data</em> as this project's dataset.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.set_trial" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">set_trial</span><span class="p">(</span><span class="n">trial</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.set_trial" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Add or update one Trial definition. Returns its name if anything changed.</p>
+<p>Authoring a Trial is a project-level act, separate from running one.
+Registration used to be a side effect of <code>Experimenter.exp()</code>, which
+meant a Trial could not enter the project without being executed, and
+that one Experimenter could redefine a name another had already used.</p>
+<p>A name that has already succeeded somewhere is frozen. The
+history is keyed by name, and a Trial leaves no artifact, so a
+redefinition would silently attach the old results to a definition
+that never produced them — the rows would look like one Trial's record
+and be two. Changing such a Trial means either a new name, or
+:meth:<code>remove_trial</code> to give up the results with it.</p>
+<p><strong>The version is stamped here.</strong> A Trial with no <code>pipeline_version</code>
+gets the latest published one, this being the only place that both
+knows the registry and owns the definition. Pass one explicitly to
+author against an older version; it has to exist, since a number no
+version answers to would be refused by every Experimenter with nothing
+to say why.</p>
+<p>Stamping interacts with the freeze on purpose: after the pipeline moves
+on, re-registering a name that already succeeded is a changed
+definition, so it raises instead of quietly re-pointing results at a
+version that did not produce them. Give it a new name.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>trial</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-internal" title="mllabs.Trial (mllabs._trial.Trial)" href="../trials/#mllabs.Trial">Trial</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Definition to store.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>str | None: <em>trial</em>'s name if it was added or changed, <code>None</code> if</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>the stored definition already matched — so the return value is the</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>work list for the next <code>exp()</code>.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<p><span class="doc-section-title">Raises:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><span title="ValueError">ValueError</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If the name has a <code>'built'</code> fold in
+<code>experiment_hist</code> and the definition differs from the
+stored one, or if <em>trial</em> names a version this project has
+never published.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.set_trials" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">set_trials</span><span class="p">(</span><span class="n">trials</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.set_trials" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>:meth:<code>set_trial</code> for many. Returns the names that were added or changed.</p>
+<p>Nothing is written until every Trial has been checked, so a batch
+holding one frozen name changes nothing at all rather than leaving
+half of itself registered. Stamping comes first for the same reason —
+an unstamped Trial and the stored one differ in a field, so comparing
+before stamping would call every Trial changed.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.stale_nodes" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">stale_nodes</span><span class="p">(</span><span class="n">pipeline</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">experimenter</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">trainer</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.stale_nodes" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>What adopting a definition would cost, before adopting — both sides.</p>
+<p>Delegates to <code>Experimenter.stale_nodes</code> and <code>Trainer.stale_nodes</code>,
+the same code each <code>set_pipeline</code> resets by — a preview of the real
+thing, not a second opinion about it.</p>
+<p>The two are reported under separate keys rather than in one mapping
+because <code>exp/{name}</code> and <code>trainers/{name}</code> are separate
+namespaces: one name can exist in both, and a flat dict would drop
+whichever came second without saying so.</p>
+<p><strong>Nodes only, on both sides — and that understates a Trainer.</strong> A
+node named here comes back on the next <code>build()</code> / <code>train()</code>,
+whereas adopting also retires every Predictor whose inputs changed,
+which is terminal. For the whole price of a publish, ask
+<code>publish_pipeline(dry_run=True, trainers=True)</code>; this stays about
+nodes, as its name says.</p>
+<p>Defaults to the working copy as a :meth:<code>PipelineBuilder.draft</code>, which
+is a snapshot and not a publication. Asking what an edit would cost must
+not be what commits the edit: <code>add_experimenter</code> / <code>add_trainer</code>
+adopt the latest version by default, so a mere preview would change what
+the next call adopts.</p>
+<p>Pipeline nodes only. A Trial is never reset by adoption — its
+<code>experiment_hist</code> row records the version it ran against and stays a
+true record of it, so rerunning is a separate, explicit act.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>pipeline</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-internal" title="mllabs.Pipeline (mllabs._pipeline.Pipeline)" href="../pipeline/#mllabs.Pipeline">Pipeline</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>The candidate. <code>None</code> uses the
+working copy as it stands. Pass :meth:<code>load_pipeline</code> output
+instead to ask the other direction — how far behind the
+published definition each Experimenter is.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>experimenter</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Ask only this Experimenter.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>trainer</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Ask only this Trainer.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+        <p>Naming either narrows to exactly what was named: with neither given
+every Experimenter and Trainer answers, with one given the other side
+comes back empty rather than silently answering in full.</p>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+<th>Name</th>          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+<td><code>dict</code></td>            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>``{'experimenters': {name: [node...]},</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+<td></td>            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>'trainers': {name: [node...]}}``, an empty list for one the</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+<td></td>            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>change does not touch.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Project.uncollected_trials" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">uncollected_trials</span><span class="p">(</span><span class="n">experimenter</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">collectors</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#mllabs.Project.uncollected_trials" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Trials that ran but left a matching Collector nothing.</p>
+<p>A Collector cannot answer this alone — it is keyed by node name and
+knows nothing of the project — so the question is asked here and
+delegated to <code>Experimenter.uncollected_trials</code>, which has the
+project's <code>trial_store</code> injected and owns the registry.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>experimenter</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Ask only this one. <code>None</code> asks every
+Experimenter in the project.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>collectors</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span> | <span title="list">list</span>[<span title="str">str</span>]</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Registered Collector names.
+<code>None</code> asks about every one of them.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+<th>Name</th>          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+<td><code>dict</code></td>            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>{experimenter_name: {collector_name: [trial_name, ...]}}</code> —</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+<td></td>            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>nested rather than flattened so the answer stays readable when a</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+<td></td>            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Trial name appears under more than one Experimenter.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h2 id="mllabs.TrialStore" class="doc doc-heading">
+            <code>mllabs.TrialStore</code>
+
+
+<a href="#mllabs.TrialStore" class="headerlink" title="Permanent link">&para;</a></h2>
+
+
+    <div class="doc doc-contents first">
+            <p class="doc doc-class-bases">
+              Bases: <code><span title="mllabs._store.ArtifactStore">ArtifactStore</span></code></p>
+
+
+
+        <p>Registry of Trial definitions plus a per-fold execution history.</p>
+<p>Inherits :class:<code>~mllabs._store.ArtifactStore</code>'s method shape but does
+not override any of it — it never persists obj/result artifacts, only
+definitions (<code>trials</code>) and execution history (<code>experiment_hist</code>). See
+<code>ArtifactStore</code> for why the interface is shared anyway.</p>
+<p><code>stores_artifacts</code> is left at the base class's <code>False</code>, which is what
+lets <code>Experimenter.exp()</code> hand this store to the executor the same way
+<code>build()</code> hands it a <code>NodeStore</code>: the executor asks the store whether
+there is anything to persist, and this one says no.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.TrialStore.get_by_name" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">get_by_name</span><span class="p">(</span><span class="n">name</span><span class="p">)</span></code>
+
+<a href="#mllabs.TrialStore.get_by_name" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Stored definition for <em>name</em> as a :class:<code>~mllabs.Trial</code>, or <code>None</code>.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.TrialStore.get_hist" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">get_hist</span><span class="p">(</span><span class="n">trial_name</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">experimenter</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">pipeline_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">status</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#mllabs.TrialStore.get_hist" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>History rows matching whichever filters are given.</p>
+<p>Each row's <code>info</code> is decoded back into a dict (<code>None</code> if it was
+never recorded).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.TrialStore.get_info" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">get_info</span><span class="p">(</span><span class="n">trial_name</span><span class="p">,</span> <span class="n">experimenter</span><span class="p">)</span></code>
+
+<a href="#mllabs.TrialStore.get_info" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p><code>{(outer_idx, inner_idx): info}</code> for one trial in one experimenter.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.TrialStore.get_status" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">get_status</span><span class="p">(</span><span class="n">trial_name</span><span class="p">,</span> <span class="n">experimenter</span><span class="p">)</span></code>
+
+<a href="#mllabs.TrialStore.get_status" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p><code>{(outer_idx, inner_idx): status}</code> for one trial in one experimenter.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.TrialStore.has" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">has</span><span class="p">(</span><span class="n">trial</span><span class="p">)</span></code>
+
+<a href="#mllabs.TrialStore.has" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Whether <em>trial</em>'s exact definition is the one stored under its name.</p>
+<p><code>False</code> when nothing is stored under the name at all, so a caller
+guarding a redefinition does not have to check for absence separately.
+Compares what execution depends on; <code>desc</code>/<code>tag</code>/<code>src_trial</code> are
+display and provenance metadata and do not make a definition a
+different one.</p>
+<p><code>pipeline_version</code> <em>is</em> compared. It decides where the Trial is
+allowed to run, so the same fields against a different version are a
+different definition — which is what makes <code>Project.set_trial</code> refuse
+to re-point a name that has already succeeded, rather than leaving the
+rule to convention.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.TrialStore.next_name" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">next_name</span><span class="p">(</span><span class="n">name_or_prefix</span><span class="p">)</span></code>
+
+<a href="#mllabs.TrialStore.next_name" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>A fresh <code>{prefix}{seq}</code> name derived from <em>name_or_prefix</em>.</p>
+<p><em>name_or_prefix</em> may be a bare prefix (<code>'lgb'</code>) or an existing
+Trial's own name (<code>'lgb5'</code>) — either way, the prefix is its
+leading non-digit run. The number is this store's next global
+sequence value (see :meth:<code>next_seq</code>), never derived from what
+already exists under that prefix, so it stays stable even after a
+prefix's highest existing number is removed.</p>
+<p>Two calls never collide with each other, though a caller is still
+free to hand-pick a name that does — <code>Project.set_trial</code>'s freeze
+gate is what would catch that, the same as any other redefinition.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.TrialStore.next_seq" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">next_seq</span><span class="p">()</span></code>
+
+<a href="#mllabs.TrialStore.next_seq" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>This TrialStore's next global naming sequence value.</p>
+<p>A plain persisted auto-increment counter — the same role
+<code>PipelineStore</code>'s <code>MAX(version) + 1</code> plays for Pipeline versions,
+just backed by its own table rather than derived from the rows it
+names, since a Trial name (unlike a version) is never reused.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.TrialStore.record" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">record</span><span class="p">(</span><span class="n">trial_name</span><span class="p">,</span> <span class="n">experimenter</span><span class="p">,</span> <span class="n">outer_idx</span><span class="p">,</span> <span class="n">inner_idx</span><span class="p">,</span> <span class="n">pipeline_version</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">status</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">info</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#mllabs.TrialStore.record" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Upsert one fold's outcome.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>trial_name</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Trial name — also its artifact directory.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>experimenter</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>The Experimenter's name.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>outer_idx</code>
+            </td>
+            <td>
+                  <code>int), inner_idx (int</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Fold coordinates.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>pipeline_version</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>The Pipeline version this ran
+against (the Experimenter's <code>pipeline_version</code>).</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>status</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>'built'</code> or <code>'error'</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>info</code>
+            </td>
+            <td>
+                  <code><span title="dict">dict</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Everything <code>_process()</code>/<code>_write_prep_error</code>
+produced besides <code>status</code> — <code>build_id</code>,
+<code>definition</code>, <code>fit_time</code>, <code>edges</code>, <code>train_shape</code>,
+<code>warnings</code>, and, on failure, <code>error</code>. JSON-encoded.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.TrialStore.register" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">register</span><span class="p">(</span><span class="n">trial</span><span class="p">)</span></code>
+
+<a href="#mllabs.TrialStore.register" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Store <em>trial</em>'s definition under its name.</p>
+<p><code>name</code> is the row's identity, so redefining a name overwrites its
+row exactly as it overwrites the artifact on disk.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>trial</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-internal" title="mllabs.Trial (mllabs._trial.Trial)" href="../trials/#mllabs.Trial">Trial</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Trial to register.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.TrialStore.register_all" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">register_all</span><span class="p">(</span><span class="n">trials</span><span class="p">)</span></code>
+
+<a href="#mllabs.TrialStore.register_all" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Register every Trial in <em>trials</em>.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.TrialStore.remove" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">remove</span><span class="p">(</span><span class="n">name</span><span class="p">)</span></code>
+
+<a href="#mllabs.TrialStore.remove" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Delete the definition stored under <em>name</em>.</p>
+<p>The definition only — <code>experiment_hist</code> is left alone, so what ran
+stays readable after the definition it ran is gone. Dropping a Trial
+from the project entirely spans this store, <code>CollectHist</code> and the
+Collectors' own data, which no single store can see: that is
+<code>Project.remove_trial(name)</code>.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h2 id="mllabs.ExtDataProvider" class="doc doc-heading">
+            <code>mllabs.ExtDataProvider</code>
+
+
+<a href="#mllabs.ExtDataProvider" class="headerlink" title="Permanent link">&para;</a></h2>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>Named registry of external data, persisted one pickle per name.</p>
+<p>Nothing is held in memory between calls — <code>get</code> reads straight off
+disk every time, <code>register</code> writes and forgets. A registry that
+cached would trade an unbounded number of entries against a byte
+budget it would then have to police, the way <code>DataCache</code> does for
+computed node outputs. Reading fresh instead means nothing here is
+ever evicted — appropriate because this data is not recomputable, it
+is exactly what the caller handed in — at the cost of a disk read per
+request. That cost is cheap where it is paid: a Collector reads this
+once per fold, not in a hot loop.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>path</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span> | <span title="pathlib.Path">Path</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Base directory — one file per registered name,
+created if missing.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.ExtDataProvider.get" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">get</span><span class="p">(</span><span class="n">name</span><span class="p">)</span></code>
+
+<a href="#mllabs.ExtDataProvider.get" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p><em>name</em>'s data, read fresh from disk.</p>
+
+
+<p><span class="doc-section-title">Raises:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><span title="KeyError">KeyError</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If nothing is registered under <em>name</em>.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.ExtDataProvider.names" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">names</span><span class="p">()</span></code>
+
+<a href="#mllabs.ExtDataProvider.names" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Every registered name, sorted.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.ExtDataProvider.register" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">register</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">data</span><span class="p">)</span></code>
+
+<a href="#mllabs.ExtDataProvider.register" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Persist <em>data</em> under <em>name</em>, overwriting whatever was there.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.ExtDataProvider.remove" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">remove</span><span class="p">(</span><span class="n">name</span><span class="p">)</span></code>
+
+<a href="#mllabs.ExtDataProvider.remove" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Delete <em>name</em>'s file. No-op if nothing was registered under it.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.ExtDataProvider.size" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">size</span><span class="p">(</span><span class="n">name</span><span class="p">)</span></code>
+
+<a href="#mllabs.ExtDataProvider.size" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p><em>name</em>'s file size in bytes, or <code>None</code> if unregistered.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.ExtDataProvider.sizes" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">sizes</span><span class="p">()</span></code>
+
+<a href="#mllabs.ExtDataProvider.sizes" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p><code>{name: bytes}</code> for every registered name.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h2 id="mllabs.Resolver" class="doc doc-heading">
+            <code>mllabs.Resolver</code>
+
+
+<a href="#mllabs.Resolver" class="headerlink" title="Permanent link">&para;</a></h2>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>ext_data (ExtDataProvider, optional): Backs <code>'@ext:name'</code> param
+    values. Left unset, encountering one raises rather than silently
+    passing the literal string through.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Resolver.instance" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">instance</span><span class="p">(</span><span class="n">spec</span><span class="p">)</span></code>
+
+<a href="#mllabs.Resolver.instance" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>String ref / <code>{'__ref__': ...}</code> spec -&gt; instance (adapter, connector).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Resolver.params" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">params</span><span class="p">(</span><span class="n">params</span><span class="p">)</span></code>
+
+<a href="#mllabs.Resolver.params" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Every value in <em>params</em>, resolved via :meth:<code>value</code>.</p>
+<p><code>{'__ref__': ...}</code>/<code>{'__callable__': ...}</code> specs resolve via
+<code>resolve_ref_values</code> exactly as they do for a Processor.
+<code>'@ext:name'</code> strings resolve against :attr:<code>ext_data</code>. Plain
+dicts/lists are recursed into so an <code>@ext:</code> reference nested
+inside one is still found; a value already inside a <code>__ref__</code>/
+<code>__callable__</code> spec is handed to <code>resolve_ref_values</code> whole; it
+does not by itself understand <code>@ext:</code>.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Resolver.processor" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">processor</span><span class="p">(</span><span class="n">processor</span><span class="p">)</span></code>
+
+<a href="#mllabs.Resolver.processor" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p><code>"module.ClassName"</code> string -&gt; class.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="mllabs.Resolver.value" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">value</span><span class="p">(</span><span class="n">value</span><span class="p">)</span></code>
+
+<a href="#mllabs.Resolver.value" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>One value, resolved — what :meth:<code>params</code> maps over a dict with,
+and what anything holding a bare <code>'@ext:name'</code> outside of a params
+dict (<code>Experimenter</code>/<code>Trainer</code>'s <code>aug_data</code>, say) calls
+directly instead of hand-rolling the same <code>@ext:</code> check.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "toc.integrate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
