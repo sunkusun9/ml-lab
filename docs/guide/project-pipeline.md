@@ -10,7 +10,16 @@ from mllabs import Project
 project = Project('exp', data=df)      # created if missing
 ```
 
-The dataset belongs here because it is the one thing an Experimenter or Trainer cannot restore from its own directory. Give it once and `add_experimenter` / `add_trainer` and the registries stop asking for a dataframe. `project.set_data(df)` sets it later; `aug_data=` is the same, for data appended to inner train splits.
+The dataset belongs here because it is the one thing an Experimenter or Trainer cannot restore from its own directory. Give it once and `add_experimenter` / `add_trainer` and the registries stop asking for a dataframe. `project.set_data(df)` sets it later.
+
+Anything beyond the main dataset — a held-out test set, rows to append to inner train splits (`aug_data`) — goes through `project.ext_data`, a named registry that reads fresh from disk on every access rather than caching:
+
+```python
+project.ext_data.register('extra', extra_df)
+project.add_experimenter('cv5', aug_data='@ext:extra')   # resolved at open time
+```
+
+`'@ext:name'` is accepted anywhere `aug_data=` is: `add_experimenter`, `add_trainer`, and the `Experimenter`/`Trainer` constructors directly.
 
 Everything else is reached from it:
 

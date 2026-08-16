@@ -6,10 +6,10 @@ Auto-generated from source docstrings via [mkdocstrings](https://mkdocstrings.gi
 
 | Module | Contents |
 |--------|----------|
-| [Project](project.md) | `Project`, `TrialStore`, `ExtDataProvider` |
+| [Project](project.md) | `Project`, `TrialStore`, `ExtDataProvider`, `Resolver` |
 | [Pipeline](pipeline.md) | `PipelineBuilder`, `Pipeline`, `ProcessorSpec`, `ColSelector` |
 | [Experimenter](experimenter.md) | `Experimenter`, `DataCache` |
-| [Trials & Predictors](trials.md) | `Trial`, `GridTrials`, `Predictor`, `PredictorStore` |
+| [Trials & Predictors](trials.md) | `Trial`, `GridTrials`, `Predictor`, `PredictorStore`, `compare_specs` |
 | [Trainer](trainer.md) | `Trainer` |
 | [Inferencer](inferencer.md) | `Inferencer` |
 | [Collectors](collectors.md) | `Collectors`, `CollectHist`, `Collector` and the built-in collectors |

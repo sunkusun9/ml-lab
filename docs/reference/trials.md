@@ -11,3 +11,11 @@ to the same `ProcessorSpec` — what differs is the question each answers.
 ::: mllabs.Predictor
 
 ::: mllabs.PredictorStore
+
+## Comparing specs
+
+`compare_specs` diffs any `{name: ProcessorSpec}` mapping — most often Trial
+specs (`{t.name: t.get_spec() for t in trials}`), but Pipeline node specs work
+the same way since both resolve to `ProcessorSpec`.
+
+::: mllabs.compare_specs

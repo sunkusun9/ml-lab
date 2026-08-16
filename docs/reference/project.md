@@ -5,3 +5,5 @@
 ::: mllabs.TrialStore
 
 ::: mllabs.ExtDataProvider
+
+::: mllabs.Resolver

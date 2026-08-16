@@ -36,9 +36,9 @@ A registry belongs to one run on purpose. Everything a Collector writes is keyed
 
 ### How they persist
 
-A definition is stored as parts to reassemble, never as a pickled instance: a plain-text row (`name`, `collector`, `connector`, `path`) plus the constructor `params` pickled to `{collectors}/__params/{name}.pkl`. Loading calls the same builder `set_collector` does, so registering and restoring take one path.
+A definition is stored as parts to reassemble, never as a pickled instance: a plain-text row (`name`, `collector`, `connector`, `path`) plus the constructor `params`, itself plain JSON in a `TEXT` column — the same validation and the same `{'__ref__': ..., '__params__': {...}}` / `'@ext:name'` spec forms a Pipeline node's `params` accepts. Loading calls the same builder `set_collector` does, so registering and restoring take one path.
 
-`params` is the pickled piece because a Collector's arguments can hold things no definition can express — `ProcessCollector(ext_data=df)` takes a DataFrame. The other four stay columns precisely so a registry can be listed and inspected without unpickling anything.
+A live object in `params` — `ProcessCollector(ext_data=df)` taking a raw DataFrame — is rejected the same way a Pipeline node rejects a live processor. Register the data on `project.ext_data` instead and pass a `'@ext:name'` reference (see [ProcessCollector](#processcollector) below).
 
 !!! warning "Collector classes must be importable at module level"
     A class defined inside a function cannot be resolved from its reference, and multi-worker runs pickle collectors out to workers.
@@ -249,10 +249,12 @@ oc.get_outputs('lgb1')            # {(outer_idx, inner_idx): entry}
 Predicts on external data — a test set — using the same fitted upstream nodes the fold used.
 
 ```python
+project.ext_data.register('test_set', test_df)
+
 collectors.set_collector(
     'test_preds', 'mllabs.collector.ProcessCollector',
     {'__ref__': 'mllabs.Connector', '__params__': {'node_query': 'lgb.*'}},
-    params={'ext_data': test_df, 'output_var': None, 'method': 'mean'},
+    params={'ext_data': '@ext:test_set', 'output_var': None, 'method': 'mean'},
 )
 ```
 
@@ -264,7 +266,7 @@ pc.get_output(nodes=None, agg='mean')
 pc.get_output(nodes=['lgb1'], agg='mean')
 ```
 
-`ext_data` is a live DataFrame, which is exactly why `params` is the one pickled part of a Collector definition.
+`ext_data` is resolved from `'@ext:test_set'` at build time through the Experimenter's injected `Resolver` — the DataFrame itself never touches the stored definition, so a raw DataFrame in `params` is rejected up front instead of surviving as an unvalidated pickle.
 
 ## Related
 

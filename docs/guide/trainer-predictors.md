@@ -28,7 +28,18 @@ t = Trainer.load_trainer('trainers/final', df)      # no Project needed
 
 Reopening replays the **stored split indices** rather than recomputing them, so the folds are exactly the ones that were trained — which also lets a Trainer with no splitter reopen at all.
 
-`aug_data` appends rows to the training split at the DataSource level. Set it on the project (`Project(path, aug_data=...)` / `set_aug_data`) so a reopened Trainer gets it too.
+`aug_data` appends rows to the training split at the DataSource level. It is not persisted, so it has to be supplied again at every open — register it once on `project.ext_data` and pass a `'@ext:name'` reference:
+
+```python
+project.ext_data.register('extra', extra_df)
+project.add_trainer('final', pipeline_version=pipeline.version, aug_data='@ext:extra')
+```
+
+Reopening through `project.trainers['final']` does not re-supply it; the standalone path does:
+
+```python
+t = Trainer.load_trainer('trainers/final', df, aug_data='@ext:extra', resolver=project.resolver)
+```
 
 ## Predictors
 

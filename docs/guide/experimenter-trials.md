@@ -180,11 +180,19 @@ While the capture is open and `n_jobs > 1`, each worker gets its own log file to
 
 ## Extra training data
 
-`aug_data` appends rows to the inner training split at the DataSource level. It is not persisted — pass it again when reopening.
+`aug_data` appends rows to the inner training split at the DataSource level. It is not persisted, so it has to be supplied again wherever the Experimenter is opened.
+
+Register it once on the project's `ext_data` (a named registry that reads fresh from disk, unlike the cached main dataset), then pass a `'@ext:name'` reference:
 
 ```python
-project.set_aug_data(extra_df)          # or Project(path, aug_data=extra_df)
-e = project.experimenters['cv5']
+project.ext_data.register('extra', extra_df)
+project.add_experimenter('cv5', aug_data='@ext:extra')
+```
+
+Reopening through `project.experimenters['cv5']` does **not** re-supply `aug_data` — it was never persisted, and the project has no way to remember it for you. Pass it again on the standalone path instead:
+
+```python
+e = Experimenter.load_experimenter('exp/cv5', df, aug_data='@ext:extra', resolver=project.resolver)
 ```
 
 ## Related

@@ -361,7 +361,7 @@ trial_seq(id)  -- 오토인크리먼트뿐, next_name()의 전역 카운터
 - **`DataCache`와 다르게 캐시가 아니다** — `get()`이 항상 디스크에서 새로 읽고, 메모리에 아무것도 안 들고 있는다. 그래서 용량 상한/eviction 정책이 필요 없다: ext_data는 계산 결과가 아니라 호출자가 준 원본이라 evict되면 재계산으로 복구할 방법이 없기 때문. `DataCache`의 "예산 넘으면 LRU로 밀어낸다"가 이 데이터엔 안전하지 않다는 게 이 클래스가 캐시가 아닌 이유
 - 그 대신 매 `get()`마다 디스크 I/O가 드는데, 감내 가능한 트레이드오프로 봄 — Collector/aug_data가 이걸 읽는 빈도는 생성·재오픈 시점 1회지 hot loop가 아니라서
 - `data.pkl`과 달리 **여러 개**를 이름으로 구분해 들고 있어야 해서(메인 데이터는 하나뿐이라 `Project._data`처럼 메모리에 캐싱해도 안전하지만, 이건 개수가 안 정해져 있어 전부 캐싱하면 메모리를 예측 불가능하게 먹음) — 아예 캐싱을 안 하는 쪽을 택함
-- 파일 하나당 하나의 pickle(`{path}/{name}.pkl`) — `CollectorStore`의 `params.pkl`과 달리 이 provider 자체는 ref-spec 검증이나 구조 강제가 없다. 순수 pickle in/out
+- 파일 하나당 하나의 pickle(`{path}/{name}.pkl`) — `CollectorStore`의 `params`(JSON `TEXT` 컬럼)와 달리 이 provider 자체는 ref-spec 검증이나 구조 강제가 없다. 순수 pickle in/out — 산 객체를 그대로 여기 등록해두고 정의 쪽에는 이름만 남기는 게 이 클래스의 요점이라서
 
 ### Resolver (`_resolver.py`)
 spec을 실제 값으로 푸는 지점을 하나로 모은 것. `_serialize.py`의 `resolve_processor`/`resolve_instance`/`resolve_ref_values`는 순수 함수라 spec만으로 답이 나오지만, `'@ext:name'` 값은 그 프로젝트의 `ExtDataProvider`를 알아야 풀리므로 순수 함수로 못 둔다 — `Resolver`가 그 함수들을 감싸고 상태(`ext_data`) 하나를 더한 게 전부다.
@@ -526,9 +526,9 @@ predictors(name PK, desc, processor, method, adapter, params, edges, tag,
   - **게이트가 아니라 로그** — `experiment_hist`와 달리 이걸 보고 뭘 스킵하지 않는다. 다만 "`'built'`로 스킵된 fold엔 수집 기록이 없다"가 조회로 드러나서, 이미 다 돌린 실험에 collector를 새로 붙여 `exp()`를 다시 불렀을 때 아무것도 수집 안 되는 상황이 무증상으로 지나가지 않는다
 
 - **CollectorStore / CollectorEntity** (`collector/_store.py`): Collector 정의 저장소
-  - `collectors(name PK, collector TEXT, connector TEXT, path TEXT)` + `{path}/__params/{name}.pkl`
-  - **인스턴스를 저장하지 않는다** — 조립 부품 두 쪽(entity 행 + params pkl)만 남기고 로드 때 `build_collector(entity, params)`로 **다시 조립**. `set_collector`와 완전히 같은 경로를 타므로 등록과 복원이 구조적으로 같아진다. 실행 중 인스턴스에 붙는 값(`_n_outer`/`_n_inner`)은 영속화 대상이 아님
-  - `params`가 **pkl 파일**인 이유: `ProcessCollector(ext_data=df)`처럼 정의로 표현 불가능한 산 객체가 들어옴 — 노드/Trial처럼 JSON 강제를 할 수 없어서 이 한 조각만 pickle. 나머지 4개는 평문 컬럼이라 **unpickle 없이** 목록/내용 조회 가능(`list_entities()`)
+  - `collectors(name PK, collector TEXT, connector TEXT, params TEXT, path TEXT)` — `params`는 파일이 아니라 `TEXT` 컬럼(`serialize_to_json`/`deserialize_from_json`), `PipelineBuilder`가 노드/그룹 params에 쓰는 것과 같은 메커니즘
+  - **인스턴스를 저장하지 않는다** — 조립 부품(entity 행 + params JSON)만 남기고 로드 때 `build_collector(entity, params)`로 **다시 조립**. `set_collector`와 완전히 같은 경로를 타므로 등록과 복원이 구조적으로 같아진다. 실행 중 인스턴스에 붙는 값(`_n_outer`/`_n_inner`)은 영속화 대상이 아님
+  - `params`는 **plain data + ref spec만 허용** — `_validate_params`가 `PipelineBuilder`와 같은 규칙으로 강제한다(#131). `ProcessCollector(ext_data=df)`처럼 정의로 표현 못 하던 산 객체는 이제 `ExtDataProvider`에 이름으로 등록하고 `'@ext:name'` 참조로 넘긴다("ExtDataProvider" 섹션). `collector`/`connector`/`path`는 평문 컬럼이라 params를 역직렬화 안 해도 목록/내용 조회 가능(`list_entities()`)
   - `CollectorEntity`(`__slots__`: `name`/`collector`/`connector`/`path`) — 한 행의 표현. `of(...)`가 준 대로의 **문자 원형**으로 정규화(클래스면 `_obj_to_ref`, `Connector` 인스턴스면 `{__ref__, __params__}`)
   - `register(entity, params)` / `build(name)` / `load_all()` / `get_entity` / `list_entities` / `get_params` / `names` / `remove`
   - **Collector 클래스는 모듈 최상위여야 한다** — 함수 안에서 정의한 서브클래스는 ref로 resolve할 수 없고, 멀티워커 실행이 collector를 pickle해 워커로 보내므로 어차피 필요한 조건. `Collector.__getstate__`/`_SAVE_EXCLUDE`가 그 경로를 위해 존재
@@ -882,9 +882,9 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
                                     #   Collector 데이터가 노드 이름만으로 키잉되므로
                                     #   경로가 Experimenter를 가르는 유일한 수단
       collectors.db                 #   CollectorStore — collectors(name PK, collector,
-                                    #     connector, path). 정의의 평문 절반
-      __params/{name}.pkl           #   정의의 나머지 절반 — 생성자 params (산 객체가
-                                    #     들어올 수 있어 pickle). 이 둘로 재조립
+                                    #     connector, params, path). params도 JSON TEXT —
+                                    #     산 객체(예: ProcessCollector의 ext_data)는
+                                    #     project.ext_data에 등록하고 '@ext:name'으로 참조
       collect_hist.db               #   CollectHist — 정의(위)와 별도 파일로,
                                     #     CollectorStore는 정의만 갖는다는 경계 유지
       {name}/                       #   Collector가 소유하는 저장 위치 — 데이터만
