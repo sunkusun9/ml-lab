@@ -13,6 +13,7 @@ _JOIN_TIMEOUT = 10
 
 from ._node_processor import ProgressMonitor
 from ._pipeline import _definition_of
+from ._resolver import Resolver
 
 
 def _prep_error_info(edges, exc):
@@ -59,18 +60,34 @@ def _worker_lost_info(edges, message):
     }
 
 
-def _process(spec, train_data, valid_data, fit_process, monitor, gpu_id_list=None, single_worker = True):
+def _process(spec, train_data, valid_data, fit_process, monitor, gpu_id_list=None,
+             single_worker = True, resolver=None):
     from ._node_processor import TransformProcessor, PredictProcessor
     method = spec.method
-    if method in ['transform', 'fit_transform']:
-        obj = TransformProcessor(spec.name, spec.processor, spec.adapter, spec.params)
-    else:
-        obj = PredictProcessor(spec.name, spec.processor, method, spec.adapter, spec.params)
 
     start_time = time.time()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
+            # Resolving processor/adapter/params (an '@ext:name' reference,
+            # say) can fail the same way fit can — caught here too, not just
+            # construction — so it lands as this job's 'error' info instead
+            # of an uncaught exception out of build()/exp()/train(). adapter
+            # goes through Resolver.instance() same as a spec'd one would —
+            # resolve_instance(None) is a passthrough, so TransformProcessor/
+            # PredictProcessor's own resolve_node_adapter(transformer, None)
+            # still does the default-lookup-by-class-name it always did;
+            # when a spec was given, that same call becomes a harmless
+            # no-op re-resolve of an already-live instance.
+            _resolver = resolver or Resolver()
+            processor = _resolver.processor(spec.processor)
+            adapter = _resolver.instance(spec.adapter)
+            params = _resolver.params(spec.params)
+            if method in ['transform', 'fit_transform']:
+                obj = TransformProcessor(spec.name, processor, adapter, params)
+            else:
+                obj = PredictProcessor(spec.name, processor, method, adapter, params)
+
             if fit_process:
                 result = obj.fit_process(train_data, valid_data, gpu_id_list=gpu_id_list, monitor=monitor, single_worker = single_worker)
             else:
@@ -252,14 +269,21 @@ class ProcessWorker(_mp_ctx.Process):
             ``self``), so it pickles across the process boundary fine. Used to
             write the fitted obj/result once a job finishes, the same call
             single-process execution makes.
+        resolver (Resolver, optional): Resolves a job's spec params at
+            Processor-construction time — see ``_process``. Holds at most an
+            ``ExtDataProvider`` (just a path), so it pickles across the
+            process boundary the same way ``store`` does. ``None`` falls back
+            to a bare ``Resolver()`` inside ``_process`` — no ``ext_data``,
+            so an ``'@ext:name'`` param would raise there.
     """
 
-    def __init__(self, conn, collectors, store, gpu_id=None, log_path=None):
+    def __init__(self, conn, collectors, store, gpu_id=None, log_path=None, resolver=None):
         super().__init__(daemon=True)
         self.conn = conn
         self.collectors = collectors
         self.store = store
         self.gpu_id = gpu_id
+        self.resolver = resolver
         self.log_path = log_path
 
     def run(self):
@@ -286,7 +310,7 @@ class ProcessWorker(_mp_ctx.Process):
                 node_name = spec.name
                 method = spec.method
                 fit_process = method in ['fit_transform', 'fit_predict']
-                obj, result, info = _process(spec, train_data, valid_data, fit_process, monitor, gpu_id_list, single_worker = False)
+                obj, result, info = _process(spec, train_data, valid_data, fit_process, monitor, gpu_id_list, single_worker = False, resolver=self.resolver)
                 for w in info.get('warnings', []):
                     logger.warning(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}")
                 if obj is None:
@@ -389,7 +413,7 @@ def _job_data(job):
 
 
 def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None,
-                    chained=False):
+                    chained=False, resolver=None):
     """Run *jobs* to completion, single-process.
 
     Every kind of job dispatches identically through ``_process``; what the
@@ -417,6 +441,10 @@ def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None
     *collectors* is separate, and only about Collectors: ``None`` skips
     ``ext_data`` prep and matching entirely (nodes never have Collectors), a
     list runs them (``[]`` is a list with nothing to match).
+
+    *resolver* (``Resolver``, optional) resolves a job's spec params at
+    Processor-construction time — passed straight to ``_process``. ``None``
+    falls back to a bare ``Resolver()`` there.
 
     Returns ``{(outer_idx, inner_idx, name): error_info}`` for every kind of
     job — the key is a job identity, which the ready-loop needs to keep a
@@ -460,7 +488,7 @@ def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None
             if tracker:
                 tracker.start(0, node_name, outer_idx, inner_idx)
             obj, result, info = _process(job.spec, train_data, valid_data, fit_process,
-                                         router, gpu_id_list, single_worker=True)
+                                         router, gpu_id_list, single_worker=True, resolver=resolver)
             for w in info.get('warnings', []):
                 router.message(f"[{node_name}] fold {outer_idx}_{inner_idx}: {w}", typ='warning')
             if obj is None:
@@ -493,13 +521,15 @@ def _execute_single(jobs, store, gpu_id_list=None, collectors=None, tracker=None
 
 def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, tracker=None,
                    gpu_fallback_cpu=True, cpu_fallback_gpu=True, log_dir=None,
-                   chained=False):
+                   chained=False, resolver=None):
     """Run *jobs* to completion with a worker pool.
 
-    *store*, *chained* and *collectors* mean exactly what they do in
-    ``_execute_single``: the store that owns this kind of job's record
+    *store*, *chained*, *collectors* and *resolver* mean exactly what they do
+    in ``_execute_single``: the store that owns this kind of job's record
     (written to only if it keeps artifacts), whether these jobs feed each
-    other through ``job.flow``, and whether Collectors run.
+    other through ``job.flow``, whether Collectors run, and what resolves a
+    job's spec params at Processor-construction time. *resolver* is handed to
+    each ``ProcessWorker`` at spawn, same as *store*.
 
     Readiness is recomputed from scratch every dispatch cycle
     (``_collect_ready``) rather than tracked in mutable lists, because a
@@ -555,7 +585,8 @@ def _execute_multi(jobs, n_jobs, store, gpu_id_list=None, collectors=None, track
         # worker always gets an empty list in that case.
         w = ProcessWorker(child_conn, collectors or [], store,
                           gpu_id=gpu_id_list[i] if i < n_gpu else None,
-                          log_path=os.path.join(log_dir, f'worker_{i}.log') if log_dir else None)
+                          log_path=os.path.join(log_dir, f'worker_{i}.log') if log_dir else None,
+                          resolver=resolver)
         w.start()
         child_conn.close()
         workers.append((w, parent_conn))

@@ -44,14 +44,18 @@ def make_exp(path, data, aug_data=None, name='e1'):
 
 
 def make_project_exp(root, data, aug_data=None, name='e1'):
-    """An Experimenter created through a Project, so it can be reopened.
+    """An Experimenter created through a Project.
 
-    aug_data is not persisted with the Experimenter, so it comes from the
-    project — that is where reopening finds it, and a project without one
-    reopens the Experimenter without one.
+    aug_data is not persisted with the Experimenter, and Project keeps no
+    project-level default of its own any more — register it under a name in
+    project.ext_data and pass '@ext:name' to add_experimenter instead.
     """
-    project = Project(root, data=data, aug_data=aug_data)
-    project.add_experimenter(name, **SPLITTERS)
+    project = Project(root, data=data)
+    if aug_data is not None:
+        project.ext_data.register('aug', aug_data)
+        project.add_experimenter(name, aug_data='@ext:aug', **SPLITTERS)
+    else:
+        project.add_experimenter(name, **SPLITTERS)
     return project
 
 
@@ -285,8 +289,18 @@ class TestExperimenterAugData:
         assert 'f2' in train.get_columns()
 
     def test_load_passes_aug_data(self, tmp_path, base_data, aug_df):
+        """aug_data is never persisted, and Project no longer keeps a
+        project-level default either — reopening through the lazy
+        `experimenters` property (see test_load_without_aug_data) therefore
+        comes back with none. Carrying it across a reload is the caller's
+        job: resupply the same '@ext:name' reference to
+        Experimenter.load_experimenter directly."""
         make_project_exp(tmp_path / 'proj', base_data, aug_data=aug_df)
-        exp2 = Project(tmp_path / 'proj').experimenters['e1']
+        reopened = Project(tmp_path / 'proj')
+        exp2 = Experimenter.load_experimenter(
+            reopened.exp_path('e1'), base_data, aug_data='@ext:aug',
+            resolver=reopened.resolver,
+        )
         assert exp2.aug_data is not None
         n = exp2.outer_folds[0].train_data_flows[0].data_source.get_train().get_shape()[0]
         assert n > 0

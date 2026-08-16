@@ -6,7 +6,7 @@ Auto-generated from source docstrings via [mkdocstrings](https://mkdocstrings.gi
 
 | Module | Contents |
 |--------|----------|
-| [Project](project.md) | `Project`, `TrialStore` |
+| [Project](project.md) | `Project`, `TrialStore`, `ExtDataProvider` |
 | [Pipeline](pipeline.md) | `PipelineBuilder`, `Pipeline`, `ProcessorSpec`, `ColSelector` |
 | [Experimenter](experimenter.md) | `Experimenter`, `DataCache` |
 | [Trials & Predictors](trials.md) | `Trial`, `GridTrials`, `Predictor`, `PredictorStore` |

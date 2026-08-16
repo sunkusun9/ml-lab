@@ -15,13 +15,14 @@ import shutil
 from pathlib import Path
 
 from ._cache import DataCache
+from ._ext_data import ExtDataProvider
+from ._resolver import Resolver
 from ._trial import Trial
 from ._trial_store import TrialStore
 from ._project_store import ProjectStore
 from ._common import error_payload
 
 DATA_FILE = 'data.pkl'
-AUG_DATA_FILE = 'aug_data.pkl'
 
 
 class Project:
@@ -33,7 +34,11 @@ class Project:
           project.db          ProjectStore — what this project manages
           trials.db           TrialStore (definitions + execution history)
           data.pkl            the dataset everything here is built against
-          aug_data.pkl        data appended to inner train splits, if any
+          ext_data/           named external data (ExtDataProvider) — {name}.pkl each.
+                               aug_data lives here too now — register it under a
+                               name and pass '@ext:name' as aug_data= to
+                               add_experimenter/add_trainer; Project has no
+                               aug_data storage of its own
           pipeline/           pipeline.db — the working copy, which is the
                                builder itself and never a version — plus
                                v{n}.pkl and v{n}_builder.pkl per published one
@@ -61,28 +66,26 @@ class Project:
         path (str | Path): Project root. Created if missing.
         data: Dataset for this project. Stored under ``data.pkl`` and handed to
             every Experimenter/Trainer that does not override it.
-        aug_data: Data appended at DataSource level to inner train splits.
         cache_maxsize (int): Stage-output cache size in bytes, shared by every
             Experimenter/Trainer in the project. Default 4 GB.
     """
 
-    def __init__(self, path, data=None, aug_data=None, cache_maxsize=4 * 1024 ** 3):
+    def __init__(self, path, data=None, cache_maxsize=4 * 1024 ** 3):
         self.path = Path(path)
         self.cache_maxsize = cache_maxsize
         self.cache = DataCache(maxsize=cache_maxsize)
         self.path.mkdir(parents=True, exist_ok=True)
         self.trials = TrialStore(self.path)
         self.store = ProjectStore(self.path)
+        self.ext_data = ExtDataProvider(self.path / 'ext_data')
+        self.resolver = Resolver(ext_data=self.ext_data)
         self._data = None
-        self._aug_data = None
         self._pipeline = None
         self._experimenters = {}
         self._trainers = {}
         self._seed_base_version()
         if data is not None:
             self.set_data(data)
-        if aug_data is not None:
-            self.set_aug_data(aug_data)
 
     # ------------------------------------------------------------------
     # data
@@ -95,22 +98,10 @@ class Project:
             self._data = self._read_data(DATA_FILE)
         return self._data
 
-    @property
-    def aug_data(self):
-        """Augmentation data, read from disk on first use (``None`` if unset)."""
-        if self._aug_data is None:
-            self._aug_data = self._read_data(AUG_DATA_FILE)
-        return self._aug_data
-
     def set_data(self, data):
         """Store *data* as this project's dataset."""
         self._data = data
         self._write_data(DATA_FILE, data)
-
-    def set_aug_data(self, aug_data):
-        """Store *aug_data* as this project's augmentation data."""
-        self._aug_data = aug_data
-        self._write_data(AUG_DATA_FILE, aug_data)
 
     def _read_data(self, fname):
         p = self.path / fname
@@ -221,7 +212,10 @@ class Project:
                 Omitted, it adopts the published one — version 0, the empty
                 Pipeline, until something has been built. Adopting an
                 unpublished edit is a separate act: build it first.
-            aug_data: Augmentation data. Defaults to the project's.
+            aug_data: External data appended at DataSource level to inner
+                train splits — a live dataset, or an ``'@ext:name'`` string
+                resolved against ``self.ext_data`` (register it there first).
+                No project-level default any more: omitted, there is none.
             **kwargs: Passed to :class:`~mllabs.Experimenter` (``sp``, ``sp_v``,
                 ``splitter_params``, ``title``, ``data_key``, ...).
 
@@ -235,8 +229,8 @@ class Project:
                            'exp', ExperimenterStore.stored_at, 'experimenters')
         exp = Experimenter(
             self.exp_path(name), name, self._resolve_data(data),
-            aug_data=aug_data if aug_data is not None else self.aug_data,
-            cache=self.cache, trial_store=self.trials, **kwargs,
+            aug_data=aug_data,
+            cache=self.cache, trial_store=self.trials, resolver=self.resolver, **kwargs,
         )
         exp.set_pipeline(self.load_pipeline(pipeline_version))
         self.store.register_experimenter(name)
@@ -257,8 +251,8 @@ class Project:
                            'trainers', TrainerStore.stored_at, 'trainers')
         trainer = Trainer(
             self.trainer_path(name), name, self._resolve_data(data),
-            aug_data=aug_data if aug_data is not None else self.aug_data,
-            cache=self.cache, **kwargs,
+            aug_data=aug_data,
+            cache=self.cache, resolver=self.resolver, **kwargs,
         )
         trainer.set_pipeline(self.load_pipeline(pipeline_version))
         self.store.register_trainer(name)
@@ -327,17 +321,22 @@ class Project:
             shutil.rmtree(path)
 
     def _open_experimenter(self, name):
+        # aug_data is never persisted (Experimenter/Trainer docstrings), and
+        # Project keeps no project-level default any more — a reopened
+        # Experimenter simply has none unless the caller goes around this
+        # property and calls Experimenter.load_experimenter(..., aug_data=)
+        # directly.
         from ._experimenter import Experimenter
         return Experimenter.load_experimenter(
-            self.exp_path(name), self._resolve_data(None), aug_data=self.aug_data,
-            cache=self.cache, trial_store=self.trials,
+            self.exp_path(name), self._resolve_data(None),
+            cache=self.cache, trial_store=self.trials, resolver=self.resolver,
         )
 
     def _open_trainer(self, name):
         from ._trainer import Trainer
         return Trainer.load_trainer(
             self.trainer_path(name), self._resolve_data(None),
-            aug_data=self.aug_data, cache=self.cache,
+            cache=self.cache, resolver=self.resolver,
         )
 
     def set_trial(self, trial):
@@ -545,6 +544,34 @@ class Project:
             if not rows or any(r['status'] == 'error' for r in rows):
                 pending.append(trial.name)
         return pending
+
+    def set_collector(self, experimenter, name, collector, connector, path=None,
+                      params=None, exist='skip'):
+        """Register a Collector on *experimenter*'s own registry.
+
+        A thin proxy, not ownership — Project holds no Collector registry of
+        its own (a Collectors registry has to stay per-Experimenter, since
+        everything it writes is keyed by node name only; see
+        ``Experimenter.collectors``). This just saves the caller from reaching
+        through ``project.experimenters[experimenter].collectors`` by hand for
+        the common case of registering one by name, the same way
+        :meth:`chain_trial` saves a reach through ``self.trials``.
+
+        Args:
+            experimenter (str): Name of the Experimenter to register it on.
+            name, collector, connector, path, params, exist: Passed straight
+                to ``Collectors.set_collector`` — see there for what each
+                means and what gets validated.
+
+        Returns:
+            Collector: The registered collector.
+
+        Raises:
+            KeyError: If this project manages no Experimenter named
+                *experimenter*.
+        """
+        return self.experimenters[experimenter].collectors.set_collector(
+            name, collector, connector, path=path, params=params, exist=exist)
 
     def collect_errors(self, experimenter=None, collectors=None):
         """Collection failures across the project, one dict each.

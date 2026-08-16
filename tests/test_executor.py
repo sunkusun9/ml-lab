@@ -321,8 +321,8 @@ class TestWorkerWarningVerbosity:
         from mllabs import Connector, MetricCollector
         exp.set_pipeline(pipeline.build())
         exp.build()
-        exp.collectors.set_collector('m', MetricCollector, Connector(),
-                                     params={'output_var': None, 'metric_func': _const_metric})
+        exp.collectors.set_collector('m', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+                                     params={'output_var': None, 'metric_func': {'__callable__': 'test_executor._const_metric'}})
         logger = ProgressSessionLogger(level=['info', 'progress'])  # no 'warning'
         exp.exp(_names(_wp(), exp), ['m'], logger=logger)
 

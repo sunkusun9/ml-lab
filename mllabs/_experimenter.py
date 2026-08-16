@@ -13,6 +13,7 @@ from ._store import NodeStore
 from ._experimenter_store import ExperimenterStore
 from ._describer import desc_spec
 from ._logger import resolve_logger
+from ._resolver import Resolver
 from .collector import Collectors
 
 
@@ -154,6 +155,16 @@ class Experimenter():
             is not persisted: a ``TrialStore`` is project-level, and an
             Experimenter reopened from its own directory has no way to find one
             that would not amount to guessing at the layout above it.
+        resolver (Resolver, optional): Resolves a stored spec's params into
+            live objects — used both by ``Collectors`` at Collector
+            construction and by ``build()``/``exp()`` at Processor
+            construction (``_executor._process``), so an ``'@ext:name'``
+            param resolves the same way for a Pipeline node, a Trial, or a
+            Collector. Same injection story as *cache*: a project has exactly
+            one, and it is not persisted (a ``Resolver`` may hold an
+            ``ExtDataProvider``, itself project-scoped). Omitted, everything
+            downstream falls back to a bare ``Resolver()`` with no
+            ``ExtDataProvider``.
 
     Attributes:
         cache (DataCache): Shared LRU cache, or ``None``.
@@ -179,7 +190,7 @@ class Experimenter():
             self, path, name, data, data_names = None,
             sp = ShuffleSplit(n_splits=1, random_state=1), sp_v=None,
             splitter_params=None, title=None, data_key=None,
-            aug_data=None, cache=None, trial_store=None
+            aug_data=None, cache=None, trial_store=None, resolver=None
         ):
         self.name = name
         self.trial_store = trial_store
@@ -188,6 +199,8 @@ class Experimenter():
         self._store = ExperimenterStore(self.path)
         data_native = unwrap(data)
         self.data = wrap(data)
+        _resolver = resolver if resolver is not None else Resolver()
+        aug_data = _resolver.value(aug_data) if aug_data is not None else None
         self.aug_data = wrap(aug_data) if aug_data is not None else None
         self.title = title
         self.data_key = data_key
@@ -218,8 +231,9 @@ class Experimenter():
             raw_splits.append((test_idx, inner_folds))
 
         self.cache = cache
+        self.resolver = resolver
         self.node_store = NodeStore(self.path / '__folds')
-        self.collectors = Collectors(self.path / 'collectors')
+        self.collectors = Collectors(self.path / 'collectors', resolver=resolver)
 
         self.outer_folds = [
             OuterFold(
@@ -248,7 +262,7 @@ class Experimenter():
 
     @staticmethod
     def load_experimenter(path, data, data_key=None, aug_data=None, cache=None,
-                          trial_store=None):
+                          trial_store=None, resolver=None):
         """Reopen the Experimenter rooted at *path*.
 
         Everything comes out of that directory — meta and splitters from its
@@ -262,9 +276,14 @@ class Experimenter():
             data_key (str, optional): Must match the saved value, if one was
                 given when the Experimenter was created.
             aug_data (optional): External data appended to inner train splits.
+                A live dataset, or an ``'@ext:name'`` string resolved against
+                *resolver*'s ``ExtDataProvider`` (see ``Resolver.value``).
             cache (DataCache, optional): Shared LRU cache.
             trial_store (TrialStore, optional): Not saved on disk, so a
                 reopened Experimenter has one only if it is given one here.
+            resolver (Resolver, optional): Turns a Collector's stored spec
+                into live objects (see ``Collectors``) — not saved on disk
+                either, same reasoning as ``trial_store``.
 
         Returns:
             Experimenter: The reopened Experimenter.
@@ -294,7 +313,7 @@ class Experimenter():
         exp = Experimenter(
             path, meta['name'], data,
             title=meta.get('title'), data_key=saved_data_key,
-            aug_data=aug_data, cache=cache, trial_store=trial_store,
+            aug_data=aug_data, cache=cache, trial_store=trial_store, resolver=resolver,
             **split_kwargs,
         )
         pipeline = store.load_pipeline()
@@ -694,10 +713,11 @@ class Experimenter():
             if n_jobs > 1:
                 log_dir = self.path / '__worker_logs' if self._os_log_state is not None else None
                 errors = _execute_multi(jobs, n_jobs, self.node_store, gpu_id_list=gpu_id_list,
-                                        tracker=tracker, log_dir=log_dir, chained=True)
+                                        tracker=tracker, log_dir=log_dir, chained=True,
+                                        resolver=self.resolver)
             else:
                 errors = _execute_single(jobs, self.node_store, gpu_id_list=gpu_id_list,
-                                         tracker=tracker, chained=True)
+                                         tracker=tracker, chained=True, resolver=self.resolver)
         finally:
             tracker.close()
 
@@ -800,10 +820,11 @@ class Experimenter():
                 log_dir = self.path / '__worker_logs' if self._os_log_state is not None else None
                 errors = _execute_multi(jobs, n_jobs, trial_store, gpu_id_list=gpu_id_list,
                                         collectors=collectors, tracker=tracker,
-                                        log_dir=log_dir)
+                                        log_dir=log_dir, resolver=self.resolver)
             else:
                 errors = _execute_single(jobs, trial_store, gpu_id_list=gpu_id_list,
-                                         collectors=collectors, tracker=tracker)
+                                         collectors=collectors, tracker=tracker,
+                                         resolver=self.resolver)
         finally:
             tracker.close()
 

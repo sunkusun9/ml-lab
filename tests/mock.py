@@ -83,6 +83,24 @@ class NativeChatterStage:
         return X
 
 
+class EchoStage:
+    """Stores whatever constructor params it was given (as a Processor's
+    'payload' param, not a Collector's) — for asserting on what actually
+    reached the constructor after Resolver resolution."""
+    __name__ = 'EchoStage'
+    def __init__(self, payload=None, **kwargs):
+        self.payload = payload
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        return X
+
+    def fit_transform(self, X, y=None):
+        return self.fit(X, y).transform(X)
+
+
 class WarnStage:
     """Emits a Python warning during fit (captured into info['warnings'])."""
     __name__ = 'WarnStage'
@@ -152,3 +170,14 @@ class CountingCollector(Collector):
     """Returns a result for every fold, so every fold gets a 'collected' row."""
     def collect(self, context):
         return (context['outer_idx'], context['inner_idx'])
+
+
+class EchoCollector(Collector):
+    """Stores whatever constructor params it was given, for asserting on
+    what actually reached the constructor (e.g. after Resolver resolution)."""
+    def __init__(self, name, connector, payload=None):
+        super().__init__(name, connector)
+        self.payload = payload
+
+    def collect(self, context):
+        return None

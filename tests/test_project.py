@@ -394,6 +394,25 @@ class TestMakeTrials:
         assert {project.trials.get_by_name(n).pipeline_version for n in names} == {1}
 
 
+class TestSetCollector:
+    """Project.set_collector — a proxy onto the named Experimenter's own
+    registry, not a Collectors registry Project owns (see
+    TestProjectLayout.test_project_owns_no_collector_registry)."""
+
+    def test_registers_on_the_named_experimenter(self, project, sample_data):
+        e = project.add_experimenter('run_a', sample_data)
+        mc = project.set_collector(
+            'run_a', 'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+            params={'output_var': None,
+                    'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'}})
+        assert e.collectors.get_collector('acc') is mc
+
+    def test_unknown_experimenter_raises(self, project):
+        with pytest.raises(KeyError, match='nope'):
+            project.set_collector('nope', 'acc', 'mllabs.MetricCollector',
+                                  'mllabs._connector.Connector')
+
+
 class TestChainTrial:
     """Project.chain_trial — chain() plus registration, in one call."""
 
@@ -1229,8 +1248,8 @@ class TestRemoveTrial:
             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=0), pipeline_version=version,
         )
         e.build()
-        e.collectors.set_collector('acc', MetricCollector, Connector(),
-                                   params={'output_var': None, 'metric_func': dummy_metric})
+        e.collectors.set_collector('acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+                                   params={'output_var': None, 'metric_func': {'__callable__': 'test_project.dummy_metric'}})
         project.set_trial(_trial())
         e.exp(['dt'])
         return e, e.collectors

@@ -358,7 +358,7 @@ class TestCollectorsRegistry:
         # match on (2026-08-01, role was dead weight: Collectors only ever
         # run against Trial jobs anyway, never Stage ones).
         return reg.set_collector(
-            name, 'mllabs.MetricCollector', Connector(),
+            name, 'mllabs.MetricCollector', 'mllabs._connector.Connector',
             params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'},
                     'output_var': '*'},
             **kw,
@@ -439,7 +439,8 @@ class TestCollectorsRegistry:
 
     def test_match_filters_by_connector(self, swept, tmp_path):
         reg = self._reg(tmp_path)
-        reg.set_collector('nope', 'mllabs.MetricCollector', Connector(node_query='^zzz'),
+        reg.set_collector('nope', 'mllabs.MetricCollector',
+                          {'__ref__': 'mllabs._connector.Connector', '__params__': {'node_query': '^zzz'}},
                           params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'},
                                   'output_var': '*'})
         assert reg.match(swept[0].get_spec()) == []
@@ -468,7 +469,7 @@ class TestCollectorsRegistry:
 
     def test_pathless_registry_persists_nothing(self, tmp_path):
         reg = Collectors()
-        reg.set_collector('m', 'mllabs.MetricCollector', Connector(),
+        reg.set_collector('m', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
                           path=tmp_path / 'm', params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'}, 'output_var': '*'})
         assert reg.names() == ['m']
         assert not (tmp_path / 'collectors.db').exists()
@@ -481,7 +482,8 @@ class TestCollectorStore:
     def _reg(self, tmp_path):
         reg = Collectors(tmp_path)
         reg.set_collector('m', 'mllabs.MetricCollector',
-                          Connector(node_query='^dt', processor='mock.DummyHead'),
+                          {'__ref__': 'mllabs._connector.Connector',
+                           '__params__': {'node_query': '^dt', 'processor': 'mock.DummyHead'}},
                           params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'}, 'output_var': '*'})
         return reg
 
@@ -492,33 +494,42 @@ class TestCollectorStore:
         assert entity.path == str(tmp_path / 'm')
 
     def test_entity_describes_the_connector(self, tmp_path):
+        """The spec is recorded exactly as given — no more auto-populating
+        every Connector attribute (including ones left at their default),
+        now that set_collector requires the spec form up front instead of
+        converting a live instance."""
         self._reg(tmp_path)
         entity = CollectorStore(tmp_path).get_entity('m')
         assert entity.connector == {
             '__ref__': 'mllabs._connector.Connector',
-            '__params__': {'node_query': '^dt', 'edges': None,
-                           'processor': 'mock.DummyHead'},
+            '__params__': {'node_query': '^dt', 'processor': 'mock.DummyHead'},
         }
 
-    def test_a_class_argument_is_recorded_as_its_ref(self, tmp_path):
+    def test_a_class_argument_is_rejected(self, tmp_path):
+        """collector must be a "module.ClassName" string, same rule
+        _validate_processor enforces for a Pipeline node — a live class
+        would silently fail Connector.match, which compares as a string."""
         from mllabs import MetricCollector
         reg = Collectors(tmp_path)
-        reg.set_collector('c', MetricCollector, Connector(), params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'}, 'output_var': '*'})
-        assert CollectorStore(tmp_path).get_entity('c').collector == \
-            'mllabs.collector._metric.MetricCollector'
+        with pytest.raises(TypeError, match='collector must be'):
+            reg.set_collector('c', MetricCollector, 'mllabs._connector.Connector',
+                              params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'}, 'output_var': '*'})
 
     def test_list_entities_is_registration_ordered(self, tmp_path):
         reg = self._reg(tmp_path)
-        reg.set_collector('z', 'mllabs.MetricCollector', Connector(), params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'}, 'output_var': '*'})
+        reg.set_collector('z', 'mllabs.MetricCollector', 'mllabs._connector.Connector', params={'metric_func': {'__callable__': 'sklearn.metrics.accuracy_score'}, 'output_var': '*'})
         assert [e.name for e in CollectorStore(tmp_path).list_entities()] == ['m', 'z']
 
     def test_unknown_name_reads_as_none(self, tmp_path):
         store = CollectorStore(tmp_path)
-        assert store.build('nope') is None and store.get_entity('nope') is None
+        assert store.get_entity('nope') is None
 
-    def test_build_reassembles_from_entity_and_params(self, tmp_path):
+    def test_reopening_reassembles_from_entity_and_params(self, tmp_path):
+        """Store only ever hands back entity/params — Collectors is what
+        turns those into a live instance, on reopen exactly as on
+        registration (see collector/_registry.py's _build)."""
         reg = self._reg(tmp_path)
-        rebuilt = CollectorStore(tmp_path).build('m')
+        rebuilt = Collectors(tmp_path).get_collector('m')
         assert type(rebuilt) is type(reg.get_collector('m'))
         assert rebuilt.output_var == '*'
         assert rebuilt.connector.node_query == '^dt'
@@ -536,10 +547,11 @@ class TestCollectorStore:
         was built from — so run-time state cannot leak into the next build."""
         reg = self._reg(tmp_path)
         reg.get_collector('m')._buf['dt'] = {0: {0: 'x'}}
-        assert CollectorStore(tmp_path).build('m')._buf == {}
+        assert Collectors(tmp_path).get_collector('m')._buf == {}
 
     def test_remove_drops_the_params_file(self, tmp_path):
         reg = self._reg(tmp_path)
         reg.remove_collector('m')
         store = CollectorStore(tmp_path)
-        assert store.get_params('m') is None and store.build('m') is None
+        assert store.get_params('m') is None
+        assert Collectors(tmp_path).get_collector('m') is None

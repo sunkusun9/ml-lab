@@ -10,6 +10,7 @@ from ._trial import Trial
 from ._edge_dsl import parse, eval_expr, referenced_nodes
 from ._logger import resolve_logger
 from ._pipeline import Pipeline
+from ._resolver import Resolver
 from ._serialize import _obj_to_ref, serialize_value
 from ._common import (resolve_common_status, require_built_pipeline,
                       require_published_pipeline)
@@ -51,8 +52,8 @@ class TrainFold:
 class Trainer:
     """Runs cross-validation training on a subset of Pipeline nodes.
 
-    No ``Project`` dependency, and nothing to inject but a ``cache``: like
-    :class:`~mllabs.Experimenter`, a Trainer owns its own store — here a
+    No ``Project`` dependency, and nothing to inject but a ``cache`` and a
+    ``resolver``: like :class:`~mllabs.Experimenter`, a Trainer owns its own store — here a
     :class:`~mllabs._trainer_store.TrainerStore`, built from ``path`` — and
     everything needed to reopen it lives in that directory. ``Project``
     supplies the path and records the name in its index.
@@ -94,7 +95,7 @@ class Trainer:
     """
 
     def __init__(self, path, name, data, splitter=None, splitter_params=None,
-                 aug_data=None, cache=None):
+                 aug_data=None, cache=None, resolver=None):
         self.name = name
         self.data = wrap(data)
         self.path = Path(path)
@@ -102,11 +103,14 @@ class Trainer:
         self.splitter = splitter
         self.splitter_params = splitter_params if splitter_params is not None else {}
         self.cache = cache
+        self.resolver = resolver
         self._store = TrainerStore(self.path)
         self.node_store = NodeStore(self.path)
         self.predictor_path = self.path / '__predictors'
         self.predictor_store = NodeStore(self.predictor_path)
         self.predictor_defs = PredictorStore(self.predictor_path)
+        _resolver = resolver if resolver is not None else Resolver()
+        aug_data = _resolver.value(aug_data) if aug_data is not None else None
         self.aug_data = wrap(aug_data) if aug_data is not None else None
 
         self.pipeline = Pipeline.empty()
@@ -116,7 +120,7 @@ class Trainer:
         self.save()
 
     @staticmethod
-    def load_trainer(path, data, aug_data=None, cache=None):
+    def load_trainer(path, data, aug_data=None, cache=None, resolver=None):
         """Reopen the Trainer rooted at *path*.
 
         Everything comes out of that directory — meta and splits from its
@@ -128,8 +132,14 @@ class Trainer:
         Args:
             path: The Trainer's base directory.
             data: Dataset to attach.
-            aug_data (optional): External data appended to train splits.
+            aug_data (optional): External data appended to train splits. A
+                live dataset, or an ``'@ext:name'`` string resolved against
+                *resolver*'s ``ExtDataProvider`` (see ``Resolver.value``).
             cache (DataCache, optional): Shared LRU cache.
+            resolver (Resolver, optional): Resolves a stored spec's params
+                into live objects at Processor-construction time (see
+                ``Experimenter``'s *resolver* for the full story). Not saved
+                on disk, same reasoning as *cache*.
 
         Returns:
             Trainer: The reopened Trainer.
@@ -153,11 +163,14 @@ class Trainer:
         trainer.splitter = splits.get('splitter')
         trainer.splitter_params = splits.get('splitter_params') or {}
         trainer.cache = cache
+        trainer.resolver = resolver
         trainer._store = store
         trainer.node_store = NodeStore(path)
         trainer.predictor_path = path / '__predictors'
         trainer.predictor_store = NodeStore(trainer.predictor_path)
         trainer.predictor_defs = PredictorStore(trainer.predictor_path)
+        _resolver = resolver if resolver is not None else Resolver()
+        aug_data = _resolver.value(aug_data) if aug_data is not None else None
         trainer.aug_data = wrap(aug_data) if aug_data is not None else None
         trainer.pipeline = Pipeline.empty()
         trainer.train_folds = trainer._make_train_folds(splits.get('split_indices'))
@@ -776,11 +789,11 @@ class Trainer:
                 if n_jobs > 1:
                     node_errors = _execute_multi(
                         node_jobs, n_jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=node_tracker,
-                        log_dir=self.path / '__worker_logs', chained=True)
+                        log_dir=self.path / '__worker_logs', chained=True, resolver=self.resolver)
                 else:
                     node_errors = _execute_single(
                         node_jobs, self.node_store, gpu_id_list=gpu_id_list, tracker=node_tracker,
-                        chained=True)
+                        chained=True, resolver=self.resolver)
                 error_nodes.update(n for _, _, n in node_errors)
 
             if predictor_jobs:
@@ -795,11 +808,11 @@ class Trainer:
                     predictor_errors = _execute_multi(
                         predictor_jobs, n_jobs, self.predictor_store, gpu_id_list=gpu_id_list,
                         collectors=[], tracker=predictor_tracker,
-                        log_dir=self.path / '__worker_logs')
+                        log_dir=self.path / '__worker_logs', resolver=self.resolver)
                 else:
                     predictor_errors = _execute_single(
                         predictor_jobs, self.predictor_store, gpu_id_list=gpu_id_list,
-                        collectors=[], tracker=predictor_tracker)
+                        collectors=[], tracker=predictor_tracker, resolver=self.resolver)
                 error_nodes.update(n for _, _, n in predictor_errors)
         finally:
             base_tracker.close()
