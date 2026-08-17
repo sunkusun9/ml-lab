@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 
 from ._cache import DataCache
+from ._data_wrapper import wrap
 from ._ext_data import ExtDataProvider
 from ._resolver import Resolver
 from ._trial import Trial
@@ -99,9 +100,47 @@ class Project:
         return self._data
 
     def set_data(self, data):
-        """Store *data* as this project's dataset."""
+        """Replace this project's dataset, and reset whatever that invalidates.
+
+        Every Experimenter/Trainer this project manages reads the project's
+        own data (see :meth:`add_experimenter`/:meth:`add_trainer` — there is
+        no per-one override any more), so a changed dataset is a change they
+        have to answer to, the same way an adopted Pipeline version is:
+        compared against the data each one's own adopted Pipeline was built
+        against (:meth:`Pipeline.stale_nodes_for_data`), and whatever a
+        node's DataSource-origin edges would now resolve to differently is
+        reset right here, before the new data is written — the same
+        commit-point pattern as :meth:`Experimenter.set_pipeline` /
+        :meth:`Trainer.set_pipeline`, just triggered by the data changing
+        instead of the Pipeline.
+
+        Nothing to compare against on the very first call (or any call before
+        data was ever set): an unset dataset is not a prior definition to have
+        diverged from, so nothing is stale.
+
+        Every Experimenter/Trainer already held in memory is dropped from
+        this Project's registry afterwards, so the next access reopens it
+        against the new data — splits included — instead of going on with a
+        now-stale in-memory copy.
+
+        Args:
+            data: The new dataset.
+        """
+        old = self.data
+        if old is not None:
+            old_w, new_w = wrap(old), wrap(data)
+            for exp in self.experimenters.values():
+                stale = exp.pipeline.stale_nodes_for_data(old_w, new_w)
+                if stale:
+                    exp.reset_nodes(stale)
+            for trainer in self.trainers.values():
+                stale = trainer.pipeline.stale_nodes_for_data(old_w, new_w)
+                if stale:
+                    trainer.reset_nodes(stale)
         self._data = data
         self._write_data(DATA_FILE, data)
+        self._experimenters = {}
+        self._trainers = {}
 
     def _read_data(self, fname):
         p = self.path / fname
@@ -114,13 +153,11 @@ class Project:
         with open(self.path / fname, 'wb') as f:
             pickle.dump(data, f)
 
-    def _resolve_data(self, data):
-        if data is not None:
-            return data
+    def _resolve_data(self):
         if self.data is None:
             raise ValueError(
-                'This project has no data. Pass data= to this call, or set it '
-                'once with Project(path, data=...) / project.set_data(...).'
+                'This project has no data. Set it once with '
+                'Project(path, data=...) / project.set_data(...).'
             )
         return self.data
 
@@ -193,7 +230,7 @@ class Project:
                 held[name] = open_one(name)
         return held
 
-    def add_experimenter(self, name, data=None, pipeline_version=None,
+    def add_experimenter(self, name, pipeline_version=None,
                          aug_data=None, **kwargs):
         """Add a new Experimenter named *name*, under ``{project}/exp/{name}``.
 
@@ -205,9 +242,13 @@ class Project:
         Its name is its identity: it is both the directory and the key used in
         :class:`~mllabs.TrialStore` history.
 
+        Always trains against this project's own data — there is no
+        per-Experimenter override any more. That is what lets :meth:`set_data`
+        answer "what does changing the data invalidate" for every Experimenter
+        this project manages, rather than only some of them.
+
         Args:
             name (str): Experimenter name.
-            data: Dataset for it. Defaults to the project's.
             pipeline_version (int, optional): Version for it to adopt.
                 Omitted, it adopts the published one — version 0, the empty
                 Pipeline, until something has been built. Adopting an
@@ -228,7 +269,7 @@ class Project:
         self._require_free('Experimenter', name, self.list_experimenters(),
                            'exp', ExperimenterStore.stored_at, 'experimenters')
         exp = Experimenter(
-            self.exp_path(name), name, self._resolve_data(data),
+            self.exp_path(name), name, self._resolve_data(),
             aug_data=aug_data,
             cache=self.cache, trial_store=self.trials, resolver=self.resolver, **kwargs,
         )
@@ -237,20 +278,22 @@ class Project:
         self._experimenters[name] = exp
         return exp
 
-    def add_trainer(self, name, data=None, pipeline_version=None, aug_data=None, **kwargs):
+    def add_trainer(self, name, pipeline_version=None, aug_data=None, **kwargs):
         """Add a new Trainer named *name*, under ``{project}/trainers/{name}``.
 
-        Same shape as :meth:`add_experimenter`, and the same rule: a taken name
-        raises. *pipeline_version* defaults the same way too — the latest
-        published version. Any published version is adoptable, and this never
-        hands over a draft, which is the one thing ``set_pipeline`` refuses.
+        Same shape as :meth:`add_experimenter`, and the same rules: a taken
+        name raises, and it always trains against this project's own data —
+        no per-Trainer override. *pipeline_version* defaults the same way
+        too — the latest published version. Any published version is
+        adoptable, and this never hands over a draft, which is the one thing
+        ``set_pipeline`` refuses.
         """
         from ._trainer import Trainer
         from ._trainer_store import TrainerStore
         self._require_free('Trainer', name, self.list_trainers(),
                            'trainers', TrainerStore.stored_at, 'trainers')
         trainer = Trainer(
-            self.trainer_path(name), name, self._resolve_data(data),
+            self.trainer_path(name), name, self._resolve_data(),
             aug_data=aug_data,
             cache=self.cache, resolver=self.resolver, **kwargs,
         )
@@ -328,14 +371,14 @@ class Project:
         # directly.
         from ._experimenter import Experimenter
         return Experimenter.load_experimenter(
-            self.exp_path(name), self._resolve_data(None),
+            self.exp_path(name), self._resolve_data(),
             cache=self.cache, trial_store=self.trials, resolver=self.resolver,
         )
 
     def _open_trainer(self, name):
         from ._trainer import Trainer
         return Trainer.load_trainer(
-            self.trainer_path(name), self._resolve_data(None),
+            self.trainer_path(name), self._resolve_data(),
             cache=self.cache, resolver=self.resolver,
         )
 
@@ -620,7 +663,7 @@ class Project:
         return {name: self.experimenters[name].uncollected_trials(collectors)
                 for name in self._experimenter_names(experimenter)}
 
-    def stale_nodes(self, pipeline=None, experimenter=None, trainer=None):
+    def stale_nodes(self, pipeline=None, experimenter=None, trainer=None, data=None):
         """What adopting a definition would cost, before adopting — both sides.
 
         Delegates to ``Experimenter.stale_nodes`` and ``Trainer.stale_nodes``,
@@ -656,6 +699,13 @@ class Project:
                 published definition each Experimenter is.
             experimenter (str, optional): Ask only this Experimenter.
             trainer (str, optional): Ask only this Trainer.
+            data (optional): Candidate dataset, previewed the same way
+                :meth:`set_data` would apply it — against each
+                Experimenter's/Trainer's own adopted Pipeline
+                (:meth:`Pipeline.stale_nodes_for_data`, compared to its
+                current ``.data``) and unioned with whatever *pipeline*
+                already stales. ``None`` (the default) previews no data
+                change, matching the behavior before this argument existed.
 
         Naming either narrows to exactly what was named: with neither given
         every Experimenter and Trainer answers, with one given the other side
@@ -673,10 +723,18 @@ class Project:
                      else ([] if named else self.list_experimenters()))
         trainer_names = ([trainer] if trainer is not None
                          else ([] if named else self.list_trainers()))
+        new_data = wrap(data) if data is not None else None
+
+        def _stale(run):
+            stale = set(run.stale_nodes(pipeline))
+            if new_data is not None:
+                stale |= run.pipeline.stale_nodes_for_data(wrap(run.data), new_data)
+            return sorted(stale)
+
         return {
-            'experimenters': {name: self.experimenters[name].stale_nodes(pipeline)
+            'experimenters': {name: _stale(self.experimenters[name])
                               for name in exp_names},
-            'trainers': {name: self.trainers[name].stale_nodes(pipeline)
+            'trainers': {name: _stale(self.trainers[name])
                          for name in trainer_names},
         }
 
