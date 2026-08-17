@@ -48,10 +48,10 @@ def pipeline(project):
 
 
 @pytest.fixture
-def exp(project, sample_data, pipeline):
+def exp(project, pipeline):
     version = pipeline.build().version
     return project.add_experimenter(
-        'e1', sample_data,
+        'e1',
         sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42), pipeline_version=version,
     )
 
@@ -704,7 +704,7 @@ class TestSaveLoad:
         assert _trial_built(project.trials, 'dt', loaded)
 
     def test_load_data_key_mismatch(self, project, sample_data):
-        e = project.add_experimenter('dk', sample_data, data_key='key_a')
+        e = project.add_experimenter('dk', data_key='key_a')
         with pytest.raises(ValueError, match='data_key'):
             Experimenter.load_experimenter(e.path, sample_data, data_key='key_b')
 

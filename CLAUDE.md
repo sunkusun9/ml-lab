@@ -127,6 +127,7 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 - `topo_order()`: DataSource에서 내려오는 깊이순 노드명 (DataSource 제외) — 빌드 시 1회 계산해 캐시
 - `descendants(name)`, `check_data_compatibility(data)`
 - `diff_from(old)` → `set[str]`: "Staleness" 섹션 참조
+- `stale_nodes_for_data(old_data, new_data)` → `set[str]`: `diff_from`의 데이터판 — Pipeline 정의(자기 자신)는 그대로 두고, DataSource-origin edge가 old/new 실제 데이터(`DataWrapper`)에서 다른 컬럼셋으로 풀리는 노드 + downstream을 stale로 잡는다. "Staleness — 데이터 변경" 섹션 참조
 - `subset(node_names)`: 지정 노드 + 조상만 담은 새 Pipeline
 - **불변성의 한계**: `params`/`edges`는 shallow copy — 중첩 값은 builder와 공유. "수정하지 않는다"는 관례로 지킴
 
@@ -208,7 +209,8 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 "프로젝트에 뭐가 있나"를 데이터 없이 물을 수 있다.
 
 - `Project(path, data=None, cache_maxsize=4GB)` — `DataCache`를 소유하고 모든 Experimenter/Trainer가 공유
-- **데이터셋**: `data` property(첫 접근에 `data.pkl`에서 읽음 — 이름·이력 조회는 데이터를 안 건드림), `set_data(data)`로 저장. 형식은 pkl(pandas/polars/cudf/numpy 다 되고 프로젝트가 이미 pipeline/splitter를 피클로 저장). 없으면 `_resolve_data`가 `ValueError`로 안내
+- **데이터셋**: `data` property(첫 접근에 `data.pkl`에서 읽음 — 이름·이력 조회는 데이터를 안 건드림). 형식은 pkl(pandas/polars/cudf/numpy 다 되고 프로젝트가 이미 pipeline/splitter를 피클로 저장). 없으면 `_resolve_data`가 `ValueError`로 안내
+- **`set_data(data)`는 그냥 저장이 아니다 — 채택 커밋 지점**(`Experimenter.set_pipeline`/`Trainer.set_pipeline`과 같은 자리). 덮어쓰기 전에 `old = self.data`를 잡아, 이 프로젝트가 관리하는 각 Experimenter/Trainer의 **자기 adopted `pipeline`**으로 `pipeline.stale_nodes_for_data(old, new)`(`_pipeline.py`, "Staleness" 섹션 참조)를 호출해 영향받는 노드를 `reset_nodes(...)`한 뒤에 새 데이터를 쓴다. 이전 데이터가 없으면(`old is None`) 비교할 대상이 없어 아무것도 안 지운다 — 빈 Pipeline과 diff하는 것과 같은 이유. 호출 뒤 `self._experimenters`/`self._trainers`를 비워서, 이미 손에 든 인스턴스도 다음 접근에서 새 데이터로 재오픈되게 만든다(안 그러면 아티팩트는 리셋됐는데 메모리 속 객체는 옛 데이터로 다시 split을 낸 상태로 남는다)
 - **`ext_data`**: `ExtDataProvider`(`{path}/ext_data/`) — `data`와 달리 **여러 개**를 이름으로 등록해두는 자리라 메모리에 캐싱 안 하고 요청마다 디스크에서 새로 읽음. 자세한 내용은 "ExtDataProvider" 섹션
 - **`aug_data`는 이제 Project가 안 갖고 있다** — `project.ext_data.register(name, df)`로 등록해두고, `add_experimenter(..., aug_data='@ext:name')`처럼 참조 문자열로 넘긴다. `Project.__init__`에도 `aug_data` 파라미터가 없다 — 관리할 별도 상태가 아니라 `ext_data`의 이름 있는 항목 하나일 뿐이라서
 - **`resolver`**: `Resolver(ext_data=self.ext_data)` — `add_experimenter`/`add_trainer`가 만드는 Experimenter/Trainer에 그대로 주입돼, Collector 구성과 Processor 실행 양쪽에서 `'@ext:name'`을 같은 방식으로 푼다("Resolver" 섹션 참조)
@@ -216,7 +218,8 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 - **레지스트리**: `experimenters`/`trainers` — `{name: 객체}`. 접근할 때마다 `list_*()`를 훑어 **아직 안 들고 있는 이름만** 연다(그래서 데이터셋이 필요). `list_experimenters()`/`list_trainers()`는 이름만 답하는 싼 질문이라 별개로 남는다
   - **`add_*`가 만든 객체가 곧 레지스트리가 돌려주는 객체다** — "안 들고 있는 것만 연다"의 요점이 이것. 한 디렉토리에 살아있는 인스턴스가 둘이면 각자 자기 Collectors와 노드 캐시를 들고 있어서, 한쪽으로 가한 변경이 다른 쪽엔 안 보인다(`Project.pipeline`이 builder 하나를 고수하는 것과 같은 이유)
   - 그래서 "다 훑었나" 플래그가 없다 — dict는 **내가 든 것** 하나만 뜻하고, 접근당 비용은 sqlite 쿼리 하나
-- **`add_experimenter(name, data=None, pipeline_version=None, aug_data=None, **kw)` / `add_trainer(...)`**: **추가 전용** — 이미 있는 이름이면 `ValueError`. 생성은 split을 다시 계산하고 provenance를 리셋하므로 기존 것 위에 하면 재개가 아니라 피해다(#128). 기존 것은 `project.experimenters[name]`으로
+- **`add_experimenter(name, pipeline_version=None, aug_data=None, **kw)` / `add_trainer(...)`**: **추가 전용** — 이미 있는 이름이면 `ValueError`. 생성은 split을 다시 계산하고 provenance를 리셋하므로 기존 것 위에 하면 재개가 아니라 피해다(#128). 기존 것은 `project.experimenters[name]`으로
+  - **`data` 파라미터가 없다 — Experimenter/Trainer별 데이터 override는 없어졌다(#148).** 항상 `self._resolve_data()`(= 이 프로젝트의 `data`)를 쓴다. 이게 있어야 `set_data`가 "이 프로젝트가 관리하는 전부"를 대상으로 데이터 변경의 영향을 답할 수 있다 — 일부 Experimenter가 다른 데이터를 쓰면 그 답이 거짓이 된다
   - `aug_data`는 그대로 Experimenter/Trainer에 전달만 한다(project 레벨 기본값으로의 폴백 없음) — 산 데이터셋이든 `'@ext:name'` 문자열이든 상관없이. 재오픈(`experimenters`/`trainers` property → `_open_experimenter`/`_open_trainer`)은 애초에 `aug_data`를 안 넘긴다 — 원래 미퍼시스트였던 값이라 project가 대신 기억해줄 방법이 없다(#131)
   - **존재 판정이 두 질문이다**: `ProjectStore`가 "이 프로젝트가 무엇을 관리하나"(멤버십), `ExperimenterStore.stored_at`/`TrainerStore.stored_at`이 "그 디렉토리가 이미 찼나"(점유). 색인엔 없는데 디스크엔 있는 건 모순이 아니라 "우리 것은 아니지만 자리는 찼다"는 정확한 사실이고, `add_*`는 둘 다 거부한다
   - `pipeline_version` 기본값은 **양쪽 다 최신 published** — 채택 가능한 게 published뿐이라 게이트를 그냥 통과하고, 아직 아무것도 빌드 안 했으면 v0(빈 Pipeline)라 특수 케이스가 없다. 빌더에 편집만 해두고 빌드 안 한 상태로 추가하면 **그 편집은 안 들어간다** — 채택하려면 `build()`가 먼저
@@ -245,12 +248,13 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 - **`set_collector(experimenter, name, collector, connector, path=None, params=None, exist='skip')`**: 지정한 Experimenter의 `collectors`(`Collectors.set_collector`)에 그대로 위임하는 얇은 대행 메소드. **소유가 아니다** — Project는 여전히 Collector 레지스트리를 안 갖는다(#136, "Project owns no collector registry" 그대로 유지). `project.experimenters[experimenter].collectors.set_collector(...)`를 손으로 안 써도 되게 해주는 편의일 뿐, `chain_trial`이 `self.trials`를 대신 만져주는 것과 같은 자리
 - **`collect_errors(experimenter=None, collectors=None)`**: 수집 실패를 fold당 dict 하나로. 세 번째 에러 읽기이고(노드는 `Experimenter.error_nodes`, Trial은 위 `error_trials`), **유일하게 Experimenter를 거쳐야 읽는다** — Collector 이력은 레지스트리 소유고 레지스트리는 Experimenter별이라, 자기 store가 없어 `Experimenter.collect_errors`에 묻는다
   - 팬아웃하면서 **`experimenter` 키를 얹는다** — `collect_hist`엔 그 컬럼이 일부러 없고(어느 것이냐는 db가 어디 있느냐로 답한다), 여러 레지스트리를 가로지를 때만 필요해지는 값이라
-- **`stale_nodes(pipeline=None, experimenter=None, trainer=None)`**: 그 정의를 채택하면 어느 노드의 아티팩트가 날아가는지를 **채택 전에** 본다 → `{'experimenters': {name: [노드...]}, 'trainers': {name: [노드...]}}`. `Experimenter.stale_nodes`/`Trainer.stale_nodes` 위임
+- **`stale_nodes(pipeline=None, experimenter=None, trainer=None, data=None)`**: 그 정의를 채택하면 어느 노드의 아티팩트가 날아가는지를 **채택 전에** 본다 → `{'experimenters': {name: [노드...]}, 'trainers': {name: [노드...]}}`. `Experimenter.stale_nodes`/`Trainer.stale_nodes` 위임
   - **키가 나뉜 이유**: `exp/{name}`과 `trainers/{name}`은 별개 네임스페이스라 한 이름이 양쪽에 있을 수 있고, 평평한 dict면 둘 중 하나가 말없이 사라진다. 이름을 주면 준 것만 답하고 반대쪽은 빈 dict
   - **양쪽 다 노드만 답한다 — Trainer에겐 과소평가다**: 채택은 Predictor 폐기도 일으키는데 그건 terminal이다. 전체 가격은 `publish_pipeline(dry_run=True, trainers=True)`
   - `pipeline=None`이면 **working copy**를 `self.pipeline.draft()`로 스냅샷 떠서 쓴다 — draft는 등록을 안 하므로 조회가 버전을 찍지 않는다. 찍으면 `add_experimenter`/`add_trainer`의 기본값이 최신이라 **미리보기가 다음 채택 대상을 바꿔버린다**
   - `load_pipeline()`을 넘기면 반대 방향 질문이 된다 — 각 Experimenter가 최신보다 얼마나 뒤처졌나
   - 노드 전용. Trial은 채택이 안 건드리므로 여기 안 나온다
+  - **`data`**: `set_data(data)`를 지금 부르면 뭐가 stale해지는지 같은 방식으로 미리 본다 — 각 Experimenter/Trainer의 자기 `pipeline`으로 `pipeline.stale_nodes_for_data(wrap(run.data), wrap(data))`를 호출해 `pipeline` 파라미터가 이미 낸 stale 집합과 합집합한다("Staleness — 데이터 변경" 섹션 참조). `None`(기본)이면 이 축은 안 물어서, 이 파라미터가 생기기 전과 동작이 같다
 - **`uncollected_trials(experimenter=None, collectors=None)`**: 돌긴 했는데 매칭되는 Collector가 아무것도 못 남긴 Trial. `Experimenter.uncollected_trials`에 위임하고 **`{experimenter: {collector: [trial...]}}`로 중첩**해 돌려준다(같은 Trial 이름이 여러 Experimenter에 있어도 읽히게)
   - 여기 있는 이유는 Collector가 답할 수 없어서다 — 노드 이름으로만 키잉돼 있고 프로젝트를 모른다. 반대로 `Experimenter`는 `trial_store`를 주입받고 레지스트리를 소유해서 세 조각이 거기서 만난다
 - **`remove_trial(name)`**: Trial 하나를 프로젝트에서 완전히 지운다 — 정의(`TrialStore.trials`) + 이력(`experiment_hist`, **모든 experimenter**) + 각 Experimenter가 수집한 데이터와 그 `CollectHist`. Trial은 아티팩트를 안 남기는 대신 흔적이 서로 모르는 store들에 흩어져 있고, **그걸 다 보는 건 Project뿐**이라 여기 있다(단일 store 위의 편의 래퍼가 아니라, 주인 없는 교차 연산에 주인을 준 것)
@@ -697,6 +701,18 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
 - **Predictor는 폐기된다**: 바뀐 노드를 읽는 Predictor는 자기 모델을 만든 입력이 사라진 것이라, 채택이 그걸 남겨둘 수도 없고 다시 만들 수도 없다 → `retired`(terminal). `train()`이 Job을 안 만들고, 이름으로 지정하면 거절. 미리 물으려면 `Trainer.retiring_predictors(pipeline)`. Trial/Predictor를 별도 클래스로 둔 판단이 실제로 갈라지는 지점
   - **`reset_nodes`와는 반대 동작이다** — 그쪽은 정의가 그대로라 같은 모델이 다시 나오므로 `init`으로 복귀시킨다. 지우는 파일은 같고 뜻이 정반대
   - 폐기를 면한 Predictor만 `_restamp_predictors`가 새 버전으로 옮긴다(아티팩트가 살아남았다 = 읽는 노드가 두 버전에서 동일 정의)
+
+## Staleness — 데이터 변경 (#148)
+위 판정은 **Pipeline 정의**가 바뀌는 경우다. **데이터 자체**가 바뀌는 경우는 별개 축이고, 판정 지점도 다르다 — `Project.set_data(data)` 한 곳(`set_pipeline`이 정의-변경 쪽 판정 지점인 것과 대칭).
+
+`data_key` 같은 수동 라벨 비교(#148 이전)를 쓰지 않는다 — 이 프로젝트가 identity를 값으로 비교하듯([[pattern_identity_value_comparison]]), old/new 데이터를 직접 비교한다. 해시도 안 쓴다: 컨텐츠 해시나 old 데이터 자체를 통째로 들고 있는 것과 시간 복잡도는 같고(둘 다 전체를 한 번은 훑어야 함), Project는 애초에 old(`self.data`, 덮어쓰기 전)와 new(인자)를 동시에 실제 값으로 쥐고 있어서 그럴 필요가 없다.
+
+**`Pipeline.stale_nodes_for_data(old_data, new_data)`** — `diff_from`처럼 위상 순서로 훑되, 비교 대상이 다른 Pipeline이 아니라 old/new 실제 데이터다: DataSource-origin edge segment(`_ds_columns_unchanged`)가 두 데이터에서 다른 컬럼셋으로 풀리면 그 노드 + downstream(`_affected_nodes`)이 stale. **선언된 schema/targets는 안 본다** — 실제 데이터가 기준이라 `set_datasource`를 다시 안 불러도 잡힌다. 또한 `_SchemaColumns`(컬럼명만 아는 가짜 데이터)가 아니라 진짜 `DataWrapper`를 넘기므로 `@numeric` 같은 dtype selector도 정확히 풀린다 — schema-vs-schema 비교(정의 변경 쪽)보다 오히려 정밀하다
+
+- **판정·커밋이 `Project.set_data()` 한 곳**: 덮어쓰기 전에 `old = self.data`를 잡아, 이 프로젝트가 관리하는 **각 Experimenter/Trainer 자기 자신의 adopted `pipeline`**으로 `stale_nodes_for_data(old, new)`를 호출하고 stale한 것만 그 자리에서 `reset_nodes(...)`한 뒤 새 데이터를 쓴다. 미리보기는 `Project.stale_nodes(data=...)`가 같은 계산을 그대로 노출("Project" 섹션 참조) — `set_pipeline`/`stale_nodes(pipeline=)`와 같은 "미리보기가 실제와 같은 코드" 원칙
+- **Predictor는 폐기가 아니라 reset이다** — Pipeline 버전 교체와 의도적으로 다른 지점. 데이터가 바뀌어도 Pipeline **정의**는 그대로라 `Trainer.reset_nodes`가 쓰는 경로 그대로(`init`으로 복귀, 다음 `train()`이 새 데이터로 재학습) 재사용한다 — `retiring`/`RETIRED`로 보내지 않는다. 데이터 변경으로 모델이 실제로 달라질 수 있다는 점에서 완전히 정밀한 처리는 아니지만, 지금 범위는 **노드 단위 staleness 감지**로 한정했다(#148)
+- **Experimenter별/Trainer별 데이터 override는 없다(#148로 제거)** — `add_experimenter`/`add_trainer`에 `data` 파라미터가 없다. 전부 `Project.data`를 그대로 쓰기 때문에 `set_data`가 이 프로젝트가 관리하는 전부를 대상으로 답할 수 있다 — override가 있었다면 일부는 다른 데이터를 쓰고 있어서 이 계산 자체가 거짓이 됐을 것
+- `set_data` 호출 뒤 `self._experimenters`/`self._trainers`를 비운다 — 아티팩트는 reset했는데 메모리 속 객체가 옛 데이터로 만든 split을 계속 들고 있으면 다음 `build()`/`exp()`/`train()`이 새 데이터가 아니라 옛 데이터로 도는 모순이 생기므로, 다음 접근에서 새 데이터로 재오픈되게 강제한다
 
 ## Trial/Predictor 버전 스탬프 — 정의가 자기 버전을 들고 다닌다
 `pipeline_version`은 이력 행에 붙는 메모가 아니라 **정의의 필드**다. 그래서

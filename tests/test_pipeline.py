@@ -1663,3 +1663,60 @@ class TestDiffFromDataSourceChange:
         old = build({'x1': 'numerical', 'x2': 'numerical', 'target': 'binary'})
         new = build({'x1': 'numerical', 'target': 'binary'})
         assert new.diff_from(old) == {'s1', 's2'}
+
+
+class TestStaleNodesForData:
+    """Pipeline.stale_nodes_for_data — the data-change counterpart of
+    TestDiffFromDataSourceChange: the Pipeline definition (schema included)
+    never changes here, only the actual data does."""
+
+    def _pipeline(self, x_edge='{x1}'):
+        p = PipelineBuilder()
+        p.set_datasource({'x1': 'numerical', 'target': 'binary'})
+        p.set_grp('g_stage', processor=DummyStage, method='transform', edges={'X': x_edge})
+        p.set_node('s1', grp='g_stage')
+        return p.draft()
+
+    def test_unrelated_column_added_does_not_stale(self):
+        from mllabs._data_wrapper import wrap
+        pipeline = self._pipeline()
+        old = wrap(pd.DataFrame({'x1': [1], 'target': [0]}))
+        new = wrap(pd.DataFrame({'x1': [1], 'target': [0], 'x2': [2]}))
+        assert pipeline.stale_nodes_for_data(old, new) == set()
+
+    def test_referenced_column_removed_stales(self):
+        from mllabs._data_wrapper import wrap
+        pipeline = self._pipeline(x_edge='{x1, x2}')
+        old = wrap(pd.DataFrame({'x1': [1], 'x2': [1], 'target': [0]}))
+        new = wrap(pd.DataFrame({'x1': [1], 'target': [0]}))
+        assert pipeline.stale_nodes_for_data(old, new) == {'s1'}
+
+    def test_dtype_only_change_on_explicit_columns_does_not_stale(self):
+        """Matches diff_from's test_var_type_change_alone_does_not_stale: an
+        explicit {x1} segment resolves to the same column list regardless of
+        that column's dtype."""
+        from mllabs._data_wrapper import wrap
+        pipeline = self._pipeline()
+        old = wrap(pd.DataFrame({'x1': [1], 'target': [0]}))
+        new = wrap(pd.DataFrame({'x1': [1.5], 'target': [0]}))
+        assert pipeline.stale_nodes_for_data(old, new) == set()
+
+    def test_identical_data_does_not_stale(self):
+        from mllabs._data_wrapper import wrap
+        pipeline = self._pipeline(x_edge='{x1}')
+        data = wrap(pd.DataFrame({'x1': [1], 'target': [0]}))
+        assert pipeline.stale_nodes_for_data(data, data) == set()
+
+    def test_downstream_of_stale_ds_node_also_stales(self):
+        from mllabs._data_wrapper import wrap
+        p = PipelineBuilder()
+        p.set_datasource({'x1': 'numerical', 'x2': 'numerical', 'target': 'binary'})
+        p.set_grp('g_stage', processor=DummyStage, method='transform', edges={'X': '{x1, x2}'})
+        p.set_node('s1', grp='g_stage')
+        p.set_grp('g_stage2', processor=DummyStage, method='transform', edges={'X': 's1:(*)'})
+        p.set_node('s2', grp='g_stage2')
+        pipeline = p.draft()
+
+        old = wrap(pd.DataFrame({'x1': [1], 'x2': [1], 'target': [0]}))
+        new = wrap(pd.DataFrame({'x1': [1], 'target': [0]}))
+        assert pipeline.stale_nodes_for_data(old, new) == {'s1', 's2'}

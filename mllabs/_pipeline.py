@@ -224,21 +224,28 @@ class _SchemaColumns:
         return self._columns
 
 
-def _ds_columns_unchanged(edges, old_schema, new_schema):
+def _ds_columns_unchanged(edges, old_source, new_source):
     """True if every bare (DataSource-origin) segment across *edges*
-    resolves to the same column list under *old_schema* and *new_schema*.
+    resolves to the same column list under *old_source* and *new_source*.
 
-    Segments that can't be resolved from schema alone (dtype/processor
-    ``@selector``s, or a column no longer present) are treated as changed —
-    there's no data here to prove they still resolve the same way.
+    *old_source*/*new_source* are whatever ``eval_expr`` can read a
+    DataSource segment against — a declared schema wrapped in
+    ``_SchemaColumns`` (``diff_from``, which has no real data to work with),
+    or a real ``DataWrapper`` when the comparison is against actual data
+    (``Pipeline.stale_nodes_for_data``), where dtype selectors (``@numeric``
+    etc.) resolve too, not just names.
+
+    Segments that can't be resolved (dtype/processor ``@selector``s against
+    a bare schema, or a column no longer present) are treated as changed —
+    there's nothing here to prove they still resolve the same way.
     """
     for dsl_string in edges.values():
         for name, expr in iter_segments(dsl_string):
             if name is not None:
                 continue
             try:
-                old_cols = eval_expr(expr, _SchemaColumns(old_schema))
-                new_cols = eval_expr(expr, _SchemaColumns(new_schema))
+                old_cols = eval_expr(expr, old_source)
+                new_cols = eval_expr(expr, new_source)
             except Exception:
                 return False
             if old_cols != new_cols:
@@ -774,7 +781,9 @@ class Pipeline:
             if name not in old.nodes:
                 stale.add(name)
                 continue
-            if ds_changed and not _ds_columns_unchanged(self.nodes[name].edges, old_schema, new_schema):
+            if ds_changed and not _ds_columns_unchanged(
+                self.nodes[name].edges, _SchemaColumns(old_schema), _SchemaColumns(new_schema)
+            ):
                 stale.add(name)
                 continue
             if _definition_of(old.get_node_spec(name)) != _definition_of(self.get_node_spec(name)):
@@ -785,6 +794,31 @@ class Pipeline:
                     stale.add(name)
                     break
         return stale
+
+    def stale_nodes_for_data(self, old_data, new_data):
+        """Node names this Pipeline would drop if *new_data* replaced *old_data*.
+
+        The counterpart of :meth:`diff_from` for a change in the data rather
+        than in the Pipeline definition: a DataSource-origin edge segment
+        that resolves to a different column set under *new_data* than under
+        *old_data* stales that node and everything downstream of it, even
+        though the declared ``schema``/``targets`` never changed.
+
+        Compared against real data rather than a declared schema (unlike
+        ``diff_from``'s DataSource-change case), so dtype selectors
+        (``@numeric`` etc.) resolve too, not just bare names.
+
+        Args:
+            old_data, new_data (DataWrapper): Already-wrapped datasets.
+
+        Returns:
+            set[str]: Node names to reset.
+        """
+        roots = [
+            name for name in self.topo_order()
+            if not _ds_columns_unchanged(self.nodes[name].edges, old_data, new_data)
+        ]
+        return set(_affected_nodes(self.nodes, roots))
 
     def check_data_compatibility(self, data):
         """Verify *data* contains every column declared in the DataSource schema.

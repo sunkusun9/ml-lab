@@ -115,7 +115,7 @@ class TestProjectLayout:
         assert not hasattr(project, 'collectors')
         assert not (project.path / 'collectors').exists()
 
-        e = project.add_experimenter('run_a', sample_data)
+        e = project.add_experimenter('run_a')
         assert e.collectors.path == e.path / 'collectors'
 
 
@@ -400,7 +400,7 @@ class TestSetCollector:
     TestProjectLayout.test_project_owns_no_collector_registry)."""
 
     def test_registers_on_the_named_experimenter(self, project, sample_data):
-        e = project.add_experimenter('run_a', sample_data)
+        e = project.add_experimenter('run_a')
         mc = project.set_collector(
             'run_a', 'acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
             params={'output_var': None,
@@ -634,28 +634,28 @@ class TestProjectEndToEnd:
 
 
 class TestExperimenterUnderProject:
-    def _exp(self, project, builder, sample_data, name='run_a', version=None):
+    def _exp(self, project, builder, name='run_a', version=None):
         if version is None:
             version = builder.build().version
         return project.add_experimenter(
-            name, sample_data,
+            name,
             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=0), pipeline_version=version,
         )
 
     def test_name_is_the_directory(self, project, builder, sample_data):
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         assert e.path == project.path / 'exp' / 'run_a'
         assert e.name == 'run_a'
 
     def test_pipeline_comes_from_the_version(self, project, builder, sample_data):
         built = builder.build()
-        e = self._exp(project, builder, sample_data, version=built.version)
+        e = self._exp(project, builder, version=built.version)
         assert e.pipeline_version == built.version
         assert e.pipeline.build_id == built.build_id
 
     def test_pipeline_is_kept_beside_the_run(self, project, builder, sample_data):
         """The run owns its Pipeline copy; the version stays as provenance."""
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         assert (e.path / 'pipeline.pkl').exists()
         assert e._store.fetch()['pipeline_version'] == e.pipeline_version
 
@@ -663,7 +663,7 @@ class TestExperimenterUnderProject:
         """The directory alone is enough — no Project, no version resolution,
         and the splitters come back with it."""
         from mllabs._experimenter import Experimenter
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         e.build()
 
         reopened = Experimenter.load_experimenter(e.path, sample_data)
@@ -677,7 +677,7 @@ class TestExperimenterUnderProject:
     def test_reload_survives_the_version_being_gone(self, project, builder, sample_data):
         """The run reads its own copy, so it reopens even if the project's
         stored version can no longer be loaded."""
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         e.build()
         for f in project.pipeline_path.glob('v*.pkl'):
             f.unlink()
@@ -691,14 +691,14 @@ class TestExperimenterUnderProject:
         """The published version, not the working copy — adding an
         Experimenter is not an occasion to mint one."""
         published = builder.build().version
-        e = project.add_experimenter('bare', sample_data)
+        e = project.add_experimenter('bare')
         assert e.pipeline_version == published
         assert len(project.list_pipeline_versions()) == 2   # v0 and this one
 
     def test_adding_before_anything_is_built_adopts_v0(self, project, sample_data):
         """Version 0 is the empty Pipeline every project is created with, so
         there is always something to adopt and nothing to special-case."""
-        e = project.add_experimenter('bare', sample_data)
+        e = project.add_experimenter('bare')
         assert e.pipeline_version == 0
         assert e.pipeline.is_empty
         e.build()                       # nothing to build, and that is not an error
@@ -707,11 +707,11 @@ class TestExperimenterUnderProject:
         """Published is frozen, which is exactly what a Trainer is allowed to
         adopt — the default never hands it the working copy."""
         published = builder.build().version
-        t = project.add_trainer('bare_t', sample_data)
+        t = project.add_trainer('bare_t')
         assert t.pipeline_version == published
 
     def test_switching_version_resets_stale_nodes(self, project, builder, sample_data):
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         e.build()
         assert e.get_status('scaler') == 'built'
 
@@ -735,7 +735,7 @@ class TestExperimenterUnderProject:
         p.set_node('s2', grp='scale2')
         version = p.build().version
         e = project.add_experimenter(
-            'chained', sample_data,
+            'chained',
             sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=0), pipeline_version=version,
         )
         e.build()
@@ -754,7 +754,7 @@ class TestExperimenterUnderProject:
         p.set_node('s2', grp='scale2')
         version = p.build().version
         e = project.add_experimenter(
-            'chained_multi', sample_data,
+            'chained_multi',
             sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=0), pipeline_version=version,
         )
         e.build(n_jobs=2)
@@ -763,14 +763,14 @@ class TestExperimenterUnderProject:
 
     def test_multiple_experimenters_per_project(self, project, builder, sample_data):
         version = builder.build().version
-        self._exp(project, builder, sample_data, name='a', version=version)
-        self._exp(project, builder, sample_data, name='b', version=version)
+        self._exp(project, builder, name='a', version=version)
+        self._exp(project, builder, name='b', version=version)
         assert project.list_experimenters() == ['a', 'b']
 
     def test_project_indexes_names_run_holds_the_rest(self, project, builder, sample_data):
         """ProjectStore answers 'which runs exist'; everything about a run
         lives in the run's own store."""
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         assert project.store.list_experimenters() == ['run_a']
         assert (e.path / '__exp.db').exists()
         assert e._store.fetch()['pipeline_version'] == e.pipeline_version
@@ -784,14 +784,14 @@ class TestExperimenterUnderProject:
         """Two live Experimenters over one directory would each hold their own
         Collectors and node caches, so a change through one would be invisible
         to the other."""
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         assert project.experimenters['run_a'] is e
 
     def test_the_registry_opens_only_what_it_is_not_holding(self, project, builder,
                                                             sample_data):
-        e = self._exp(project, builder, sample_data, name='a')
+        e = self._exp(project, builder, name='a')
         reopened = Project(project.path, data=sample_data)
-        b = reopened.add_experimenter('b', sample_data)
+        b = reopened.add_experimenter('b')
         assert reopened.experimenters['b'] is b
         assert reopened.experimenters['a'].name == 'a'
         assert reopened.experimenters['a'] is not e
@@ -802,12 +802,12 @@ class TestExperimenterUnderProject:
         assert not (project.path / 'exp' / 'nope' / '__exp.db').exists()
 
     def test_unknown_meta_column_rejected(self, project, builder, sample_data):
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         with pytest.raises(ValueError, match='Unknown experimenter meta column'):
             e._store.save({'name': 'run_a', 'bogus': 1})
 
     def test_remove_experimenter(self, project, builder, sample_data):
-        self._exp(project, builder, sample_data)
+        self._exp(project, builder)
         project.remove_experimenter('run_a')
         assert project.list_experimenters() == []
         assert not (project.path / 'exp' / 'run_a').exists()
@@ -816,7 +816,7 @@ class TestExperimenterUnderProject:
                                                                 sample_data):
         """The name keys the history, so leaving it would hand the rows to
         whatever is added under that name next."""
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         project.trials.record('dt', 'run_a', 0, 0, 1, 'built')
         project.remove_experimenter('run_a')
         assert project.trials.get_hist(experimenter='run_a') == []
@@ -826,19 +826,18 @@ class TestExperimenterUnderProject:
             project.remove_experimenter('nope')
 
     def test_a_taken_name_cannot_be_added_over(self, project, builder, sample_data):
-        self._exp(project, builder, sample_data)
+        self._exp(project, builder)
         with pytest.raises(ValueError, match='already exists'):
-            project.add_experimenter('run_a', sample_data)
+            project.add_experimenter('run_a')
 
     def test_trainers_are_indexed_too(self, project, builder, sample_data):
-        from mllabs._data_wrapper import wrap
         version = builder.build().version
-        project.add_trainer('t1', wrap(sample_data), pipeline_version=version)
+        project.add_trainer('t1', pipeline_version=version)
         assert project.list_trainers() == ['t1']
         assert project.list_experimenters() == []
 
     def test_reload_restores_name_and_version(self, project, builder, sample_data):
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         e.build()
         loaded = Project(project.path, data=sample_data).experimenters['run_a']
         assert loaded.name == 'run_a'
@@ -847,12 +846,12 @@ class TestExperimenterUnderProject:
 
     def test_reload_checks_data_key(self, project, builder, sample_data):
         builder.build()
-        e = project.add_experimenter('keyed', sample_data, data_key='k1')
+        e = project.add_experimenter('keyed', data_key='k1')
         with pytest.raises(ValueError, match='data_key mismatch'):
             Experimenter.load_experimenter(e.path, sample_data, data_key='wrong')
 
     def test_trials_run_and_land_in_hist(self, project, builder, sample_data):
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         e.build()
         trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0})
         assert project.set_trial(trial) == 'dt'
@@ -867,7 +866,7 @@ class TestExperimenterUnderProject:
     def test_exp_skips_fold_already_built_in_hist(self, project, builder, sample_data):
         """_make_jobs consults TrialStore.experiment_hist, not the on-disk
         artifact — a fold recorded 'built' there is skipped without dispatch."""
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         e.build()
         project.set_trial(Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0}))
         e.exp(['dt'])
@@ -882,7 +881,7 @@ class TestExperimenterUnderProject:
         says. set_trial refuses such a redefinition, so this goes through the
         store directly — the skip rule has to hold on its own, since it is what
         makes the freeze necessary rather than merely tidy."""
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         e.build()
         project.set_trial(Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0}))
         e.exp(['dt'])
@@ -898,7 +897,7 @@ class TestExperimenterUnderProject:
         """NodeStore.status() can no longer see 'error' at all (obj.pkl was
         never written) — TrialStore.experiment_hist is the only place a
         Trial's error status/detail is recorded now."""
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         e.build()
         project.set_trial(Trial('bad', 'mock.BadPredictor', EDGES))
         e.exp(['bad'])
@@ -916,7 +915,7 @@ class TestExperimenterUnderProject:
         collectors path (unlike test_train_multi_worker, which only covers
         Trainer). One good and one failing trial across two folds so both
         the 'done' and 'error' worker messages are covered."""
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         e.build()
         project.set_trials([
             Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 0}),
@@ -932,16 +931,16 @@ class TestExpChecksTheVersion:
     node name and fold with no version in them, so two versions of one name
     would overwrite each other's metrics with nothing to say which won."""
 
-    def _exp(self, project, builder, sample_data, name='run_a', version=None):
+    def _exp(self, project, builder, name='run_a', version=None):
         return project.add_experimenter(
-            name, sample_data,
+            name,
             sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=0),
             pipeline_version=version,
         )
 
     def test_a_matching_version_runs(self, project, builder, sample_data):
         builder.build()
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         e.build()
         project.set_trial(_trial())
         e.exp(['dt'])
@@ -953,7 +952,7 @@ class TestExpChecksTheVersion:
         builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
         assert builder.build().version == 2
 
-        e = self._exp(project, builder, sample_data)     # adopts the latest, v2
+        e = self._exp(project, builder)     # adopts the latest, v2
         e.build()
         with pytest.raises(ValueError, match='version 1'):
             e.exp(['dt'])
@@ -963,7 +962,7 @@ class TestExpChecksTheVersion:
         """Nothing left to file, so nothing to refuse — re-handing a finished
         round stays a no-op rather than becoming an error."""
         builder.build()
-        e = self._exp(project, builder, sample_data)
+        e = self._exp(project, builder)
         e.build()
         project.set_trial(_trial())
         e.exp(['dt'])
@@ -978,7 +977,7 @@ class TestExpChecksTheVersion:
         """Some folds left means new results would land beside the old ones."""
         builder.build()
         e = project.add_experimenter(
-            'run_b', sample_data,
+            'run_b',
             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=0))
         e.build()
         project.set_trial(_trial())
@@ -999,7 +998,7 @@ class TestExpChecksTheVersion:
         builder.set_node('scaler', grp='scale', edges={'X': '{target}'}, exist='replace')
         builder.build()
 
-        e = self._exp(project, builder, sample_data, version=1)
+        e = self._exp(project, builder, version=1)
         e.build()
         e.exp(['dt'])
         assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built'}
@@ -1039,7 +1038,7 @@ class TestTrialErrorReporting:
         """error_nodes is Pipeline nodes only — the two halves used to come back
         from one call, indistinguishable in the output."""
         version = builder.build().version
-        e = project.add_experimenter('run_a', sample_data,
+        e = project.add_experimenter('run_a',
                                  pipeline_version=version)
         project.trials.record('bad', 'run_a', 0, 0, status='error')
         assert e.error_nodes() == []
@@ -1050,26 +1049,26 @@ class TestStaleNodes:
     answer exists, since set_pipeline turns it straight into deletions."""
 
     @staticmethod
-    def _built_exp(project, builder, sample_data, name='run_a'):
-        e = project.add_experimenter(name, sample_data, pipeline_version=builder.build().version)
+    def _built_exp(project, builder, name='run_a'):
+        e = project.add_experimenter(name, pipeline_version=builder.build().version)
         e.build()
         return e
 
     def test_untouched_working_copy_costs_nothing(self, project, builder, sample_data):
-        e = self._built_exp(project, builder, sample_data)
+        e = self._built_exp(project, builder)
         assert project.stale_nodes() == {'experimenters': {'run_a': []}, 'trainers': {}}
         assert e.get_status('scaler') == 'built'
 
     def test_edit_names_the_node_it_would_drop(self, project, builder, sample_data):
-        self._built_exp(project, builder, sample_data)
+        self._built_exp(project, builder)
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
         assert project.stale_nodes()['experimenters'] == {'run_a': ['scaler']}
 
     def test_trainers_answer_too(self, project, builder, sample_data):
         """Under their own key: exp/{name} and trainers/{name} are separate
         namespaces, so one flat mapping would drop a shared name silently."""
-        self._built_exp(project, builder, sample_data, 'shared')
-        project.add_trainer('shared', sample_data, pipeline_version=builder.build().version)
+        self._built_exp(project, builder, 'shared')
+        project.add_trainer('shared', pipeline_version=builder.build().version)
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
 
         assert project.stale_nodes() == {
@@ -1081,7 +1080,7 @@ class TestStaleNodes:
         """The working copy is built through draft(), which mints nothing — a
         preview that minted a version would change what add_experimenter()
         adopts next."""
-        self._built_exp(project, builder, sample_data)
+        self._built_exp(project, builder)
         before = project.list_pipeline_versions()
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
         project.stale_nodes()
@@ -1090,16 +1089,16 @@ class TestStaleNodes:
     def test_narrowed_to_one_experimenter(self, project, builder, sample_data):
         """Naming one narrows to exactly that: the other side comes back empty
         rather than quietly answering in full."""
-        self._built_exp(project, builder, sample_data, 'run_a')
-        self._built_exp(project, builder, sample_data, 'run_b')
-        project.add_trainer('t1', sample_data, pipeline_version=builder.build().version)
+        self._built_exp(project, builder, 'run_a')
+        self._built_exp(project, builder, 'run_b')
+        project.add_trainer('t1', pipeline_version=builder.build().version)
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
         assert project.stale_nodes(experimenter='run_a') == {
             'experimenters': {'run_a': ['scaler']}, 'trainers': {}}
 
     def test_narrowed_to_one_trainer(self, project, builder, sample_data):
-        self._built_exp(project, builder, sample_data, 'run_a')
-        project.add_trainer('t1', sample_data, pipeline_version=builder.build().version)
+        self._built_exp(project, builder, 'run_a')
+        project.add_trainer('t1', pipeline_version=builder.build().version)
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
         assert project.stale_nodes(trainer='t1') == {
             'experimenters': {}, 'trainers': {'t1': ['scaler']}}
@@ -1107,7 +1106,7 @@ class TestStaleNodes:
     def test_published_pipeline_asks_the_other_direction(self, project, builder, sample_data):
         """How far behind an Experimenter is: it adopted v0, the project has
         since published the node."""
-        e = project.add_experimenter('run_a', sample_data,
+        e = project.add_experimenter('run_a',
                                      pipeline_version=builder.build().version)
         e.build()
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
@@ -1115,19 +1114,87 @@ class TestStaleNodes:
         assert project.stale_nodes(project.load_pipeline())['experimenters'] == {'run_a': ['scaler']}
 
 
+class TestSetData:
+    """set_data(data) is a commit point like set_pipeline: it resets whatever
+    the new data invalidates for every Experimenter/Trainer this project
+    manages (#148), before writing the new data."""
+
+    @staticmethod
+    def _built_exp(project, builder, name='run_a'):
+        e = project.add_experimenter(name, pipeline_version=builder.build().version)
+        e.build()
+        return e
+
+    def test_first_set_data_stales_nothing(self, tmp_path, sample_data):
+        """No prior data means nothing to have diverged from — the same
+        reasoning as diffing against the empty Pipeline."""
+        project = Project(tmp_path / 'fresh')
+        project.set_data(sample_data)
+        assert project.data.equals(sample_data)
+
+    def test_unrelated_column_added_leaves_the_node_built(self, project, builder, sample_data):
+        e = self._built_exp(project, builder)
+        assert e.get_status('scaler') == 'built'
+
+        new_data = sample_data.assign(extra=1)
+        project.set_data(new_data)
+        assert project.experimenters['run_a'].get_status('scaler') == 'built'
+
+    def test_removed_referenced_column_resets_the_node(self, project, builder, sample_data):
+        e = self._built_exp(project, builder)
+        assert e.get_status('scaler') == 'built'
+
+        renamed = sample_data.rename(columns={'f1': 'f1_renamed'})
+        project.set_data(renamed)
+        assert project.experimenters['run_a'].get_status('scaler') is None
+
+    def test_trainers_are_reset_too(self, project, builder, sample_data):
+        """Checked on the already-held Trainer directly, not through a
+        reopen — reopening re-adopts the Pipeline, and its still-declared
+        schema requiring 'f1' is a separate concern (check_data_compatibility)
+        from the column-level staleness this test is about."""
+        t = project.add_trainer('t1', pipeline_version=builder.build().version)
+        t.train()
+        assert t.get_status('scaler') == 'built'
+
+        renamed = sample_data.rename(columns={'f1': 'f1_renamed'})
+        project.set_data(renamed)
+        assert t.get_status('scaler') is None
+
+    def test_stale_nodes_preview_matches_what_set_data_would_do(self, project, builder, sample_data):
+        self._built_exp(project, builder)
+        renamed = sample_data.rename(columns={'f1': 'f1_renamed'})
+
+        preview = project.stale_nodes(data=renamed)
+        assert preview['experimenters'] == {'run_a': ['scaler']}
+
+        project.set_data(renamed)
+        assert project.experimenters['run_a'].get_status('scaler') is None
+
+    def test_reopens_already_held_runs_against_the_new_data(self, project, builder, sample_data):
+        """Resetting artifacts is not enough on its own — an Experimenter
+        already held in memory still has the old data's splits until it is
+        reopened."""
+        self._built_exp(project, builder)
+        held_before = project.experimenters['run_a']
+
+        project.set_data(sample_data.assign(extra=1))
+        assert project.experimenters['run_a'] is not held_before
+
+
 class TestPublishPipeline:
     """Build, propagate, report — one call, because the ordering it enforces
     spans every Experimenter and no single one can see it."""
 
     @staticmethod
-    def _built_exp(project, builder, sample_data, name='run_a'):
-        e = project.add_experimenter(name, sample_data, pipeline_version=builder.build().version)
+    def _built_exp(project, builder, name='run_a'):
+        e = project.add_experimenter(name, pipeline_version=builder.build().version)
         e.build()
         return e
 
     def test_publishing_moves_the_experimenters_onto_the_new_version(
             self, project, builder, sample_data):
-        e = self._built_exp(project, builder, sample_data)
+        e = self._built_exp(project, builder)
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
 
         report = project.publish_pipeline()
@@ -1137,7 +1204,7 @@ class TestPublishPipeline:
     def test_the_report_names_what_it_cost(self, project, builder, sample_data):
         """Not just the number. Afterwards there is nothing left to ask —
         the artifacts are gone and the staleness went into deleting them."""
-        e = self._built_exp(project, builder, sample_data)
+        e = self._built_exp(project, builder)
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
 
         report = project.publish_pipeline()
@@ -1145,7 +1212,7 @@ class TestPublishPipeline:
         assert e.get_status('scaler') is None
 
     def test_an_unchanged_definition_moves_nothing(self, project, builder, sample_data):
-        e = self._built_exp(project, builder, sample_data)
+        e = self._built_exp(project, builder)
         before = project.list_pipeline_versions()
 
         report = project.publish_pipeline()
@@ -1154,7 +1221,7 @@ class TestPublishPipeline:
         assert e.get_status('scaler') == 'built'
 
     def test_a_dry_run_prices_it_without_publishing(self, project, builder, sample_data):
-        e = self._built_exp(project, builder, sample_data)
+        e = self._built_exp(project, builder)
         before = project.list_pipeline_versions()
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
 
@@ -1167,8 +1234,8 @@ class TestPublishPipeline:
     def test_trainers_stay_out_unless_asked_for(self, project, builder, sample_data):
         """An Experimenter loses artifacts that rebuild; a Trainer loses
         trained models for good. The default declines to spend the second."""
-        self._built_exp(project, builder, sample_data)
-        t = project.add_trainer('t1', sample_data, pipeline_version=builder.build().version)
+        self._built_exp(project, builder)
+        t = project.add_trainer('t1', pipeline_version=builder.build().version)
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
 
         report = project.publish_pipeline()
@@ -1183,7 +1250,7 @@ class TestPublishPipeline:
         assert t.pipeline_version == report['version']
 
     def test_experimenters_can_be_declined_too(self, project, builder, sample_data):
-        e = self._built_exp(project, builder, sample_data)
+        e = self._built_exp(project, builder)
         builder.set_node('scaler', grp='scale', exist='replace', params={'with_std': False})
 
         report = project.publish_pipeline(experimenters=False)
@@ -1227,7 +1294,7 @@ class TestPendingTrials:
 
     def test_feeds_straight_into_exp(self, project, builder, sample_data):
         version = builder.build().version
-        e = project.add_experimenter('run_a', sample_data,
+        e = project.add_experimenter('run_a',
                                  sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=0), pipeline_version=version)
         e.build()
         project.set_trial(_trial())
@@ -1241,10 +1308,10 @@ class TestRemoveTrial:
     history), and inside every run that ran it, the collected data and the
     CollectHist rows for it. Project is the only thing that sees them all."""
 
-    def _run(self, project, builder, sample_data, name='run_a'):
+    def _run(self, project, builder, name='run_a'):
         version = builder.build().version
         e = project.add_experimenter(
-            name, sample_data,
+            name,
             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=0), pipeline_version=version,
         )
         e.build()
@@ -1266,7 +1333,7 @@ class TestRemoveTrial:
         project.remove_trial('never_registered')
 
     def test_removes_definition_history_and_collected_data(self, project, builder, sample_data):
-        e, collectors = self._run(project, builder, sample_data)
+        e, collectors = self._run(project, builder)
         assert project.trials.get_by_name('dt') is not None
         assert project.trials.get_status('dt', 'run_a')
         assert collectors.hist.get_hist(node_name='dt')
@@ -1280,7 +1347,7 @@ class TestRemoveTrial:
         assert Collectors(e.path / 'collectors').get_collector('acc').get_metric('dt') is None
 
     def test_leaves_other_trials_alone(self, project, builder, sample_data):
-        e, collectors = self._run(project, builder, sample_data)
+        e, collectors = self._run(project, builder)
         project.set_trial(_trial('dt2'))
         e.exp(['dt2'])
 
@@ -1294,8 +1361,8 @@ class TestRemoveTrial:
     def test_reaches_every_run_that_collected_it(self, project, builder, sample_data):
         """The registries are per-run now, so this is a pass over the runs
         rather than one store — a run left out would keep its results."""
-        e_a, coll_a = self._run(project, builder, sample_data, name='run_a')
-        e_b, coll_b = self._run(project, builder, sample_data, name='run_b')
+        e_a, coll_a = self._run(project, builder, name='run_a')
+        e_b, coll_b = self._run(project, builder, name='run_b')
         assert coll_a.get_collector('acc').has_node('dt')
         assert coll_b.get_collector('acc').has_node('dt')
 
@@ -1310,7 +1377,7 @@ class TestRemoveTrial:
         """A registry reopened from disk is not the one the caller holds, and a
         Collector may answer from an in-memory cache — so removal has to go
         through the Experimenter object, which the project is holding."""
-        e, collectors = self._run(project, builder, sample_data)
+        e, collectors = self._run(project, builder)
         acc = collectors.get_collector('acc')
         assert acc.has_node('dt')
         project.remove_trial('dt')
@@ -1320,7 +1387,7 @@ class TestRemoveTrial:
     def test_a_removed_trial_runs_again_from_scratch(self, project, builder, sample_data):
         """Removal takes the definition too, so re-running means authoring it
         again — which is also what lifts the redefinition freeze."""
-        e, collectors = self._run(project, builder, sample_data)
+        e, collectors = self._run(project, builder)
         project.remove_trial('dt')
         assert project.set_trial(_trial()) == 'dt'
         e.exp(['dt'])
@@ -1344,7 +1411,7 @@ class TestTrainerUnderProject:
         p.set_node('s2', grp='scale2')
         version = p.build().version
 
-        t = project.add_trainer('trained_chain', wrap(sample_data), pipeline_version=version)
+        t = project.add_trainer('trained_chain', pipeline_version=version)
         t.train([Predictor('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
                            params={'max_depth': 3, 'random_state': 0})])
         assert t.get_status('s1') == 'built'
@@ -1364,7 +1431,7 @@ class TestTrainerUnderProject:
         p.set_node('s2', grp='scale2')
         version = p.build().version
 
-        t = project.add_trainer('trained_chain_multi', wrap(sample_data), pipeline_version=version)
+        t = project.add_trainer('trained_chain_multi', pipeline_version=version)
         t.train([Predictor('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
                            params={'max_depth': 3, 'random_state': 0})], n_jobs=2)
         assert t.get_status('s1') == 'built'
@@ -1390,7 +1457,7 @@ class TestTrainerUnderProject:
 
         predictor = Predictor('dt', TREE, {'X': 's2:(*)', 'y': '{target}'},
                               params={'max_depth': 3, 'random_state': 0})
-        t = project.add_trainer('trainer_reload', wrap(sample_data), pipeline_version=version)
+        t = project.add_trainer('trainer_reload', pipeline_version=version)
         t.train([predictor])
 
         loaded = Project(project.path, data=sample_data).trainers['trainer_reload']
@@ -1423,7 +1490,7 @@ class TestTrainerUnderProject:
         p.set_node('s1', grp='scale')
         version = p.build().version
 
-        t = project.add_trainer('t_standalone', wrap(sample_data), pipeline_version=version)
+        t = project.add_trainer('t_standalone', pipeline_version=version)
         t.train([Predictor('dt', TREE, {'X': 's1:(*)', 'y': '{target}'},
                            params={'max_depth': 3, 'random_state': 0})])
         assert (t.path / 'pipeline.pkl').exists()
