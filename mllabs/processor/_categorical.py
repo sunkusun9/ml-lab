@@ -238,8 +238,9 @@ class CatPairCombiner(BaseEstimator, TransformerMixin):
 
 class CatConverter(BaseEstimator, TransformerMixin):
 
-    def __init__(self, columns=None):
+    def __init__(self, columns=None, safe_cast=True):
         self.columns = columns
+        self.safe_cast = safe_cast
 
     def _resolve_columns(self, X, kind):
         if self.columns is None:
@@ -274,14 +275,24 @@ class CatConverter(BaseEstimator, TransformerMixin):
         X_out = X.copy()
         for col in self.columns_:
             if col in X_out.columns:
-                X_out[col] = X_out[col].astype('category')
+                s = X_out[col]
+                if self.safe_cast and pd.api.types.is_float_dtype(s):
+                    # xgboost rejects category names of float dtype (only str/int are
+                    # supported) -- route through str so the category names are str.
+                    s = s.where(s.isna(), s.astype(str))
+                X_out[col] = s.astype('category')
         return X_out
 
     def _transform_polars(self, X):
         exprs = []
         for col in self.columns_:
             if col in X.columns:
-                exprs.append(pl.col(col).cast(pl.Categorical))
+                expr = pl.col(col)
+                if self.safe_cast and X.schema[col].is_numeric():
+                    # polars refuses to cast numeric dtypes to Categorical directly
+                    # (int and float alike) -- Utf8 is the only accepted source.
+                    expr = expr.cast(pl.Utf8)
+                exprs.append(expr.cast(pl.Categorical))
         if exprs:
             return X.with_columns(exprs)
         return X

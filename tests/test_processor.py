@@ -108,12 +108,53 @@ class TestPolarsLoader:
         params = loader.get_params()
         assert params["predefined_types"] == {"a": pl.Int32}
         assert params["read_method"] == "read_csv"
+        assert params["safe_cast"] is True
 
     def test_predefined_types(self, sample_csv):
         loader = PolarsLoader(predefined_types={"a": pl.Int32})
         loader.fit(sample_csv)
         result = loader.transform(sample_csv)
         assert result["a"].dtype == pl.Int32
+
+    def test_predefined_categorical_on_numeric_column_normalizes_format(self, tmp_path):
+        # "1" and "1.0" are the same numeric value but distinct raw CSV tokens --
+        # reading straight into Categorical would key on the raw text and split them.
+        csv_path = tmp_path / "mixed_format.csv"
+        csv_path.write_text("grade\n1\n2\n3\n1.0\n2\n")
+        loader = PolarsLoader(predefined_types={"grade": pl.Categorical})
+        loader.fit(str(csv_path))
+        result = loader.transform(str(csv_path))
+        assert result["grade"].dtype == pl.Categorical
+        assert set(result["grade"].unique().to_list()) == {"1.0", "2.0", "3.0"}
+
+    def test_predefined_categorical_safe_cast_false_keeps_raw_text_split(self, tmp_path):
+        csv_path = tmp_path / "mixed_format.csv"
+        csv_path.write_text("grade\n1\n2\n3\n1.0\n2\n")
+        loader = PolarsLoader(predefined_types={"grade": pl.Categorical}, safe_cast=False)
+        loader.fit(str(csv_path))
+        result = loader.transform(str(csv_path))
+        assert set(result["grade"].unique().to_list()) == {"1", "1.0", "2", "3"}
+
+    def test_predefined_categorical_skips_when_column_absent(self, tmp_path):
+        # column targeted by predefined_types isn't present in the file being
+        # transformed (e.g. a later file in a multi-file list with a different
+        # schema) -- the two-stage cast must not choke on a missing column.
+        fit_csv = tmp_path / "has_grade.csv"
+        fit_csv.write_text("grade,name\n1,a\n2,b\n")
+        other_csv = tmp_path / "no_grade.csv"
+        other_csv.write_text("name\nc\nd\n")
+
+        loader = PolarsLoader(predefined_types={"grade": pl.Categorical})
+        loader.fit(str(fit_csv))
+        result = loader.transform(str(other_csv))
+        assert result.columns == ["name"]
+
+    def test_predefined_categorical_on_string_column_untouched(self, sample_csv):
+        loader = PolarsLoader(predefined_types={"c": pl.Categorical})
+        loader.fit(sample_csv)
+        assert loader._numeric_to_cat_cols_ == []
+        result = loader.transform(sample_csv)
+        assert result["c"].dtype == pl.Categorical
 
 
 @requires_polars
@@ -228,6 +269,43 @@ class TestCatConverter:
         names = conv.get_feature_names_out()
         assert "a" in names
         assert "c" in names
+
+    def test_pandas_safe_cast_default_routes_float_through_string(self, sample_pandas_df):
+        conv = CatConverter(columns=["a", "b"])
+        conv.fit(sample_pandas_df)
+        result = conv.transform(sample_pandas_df)
+        # int categories are already accepted by xgboost -- left as int
+        assert pd.api.types.is_integer_dtype(result["a"].cat.categories)
+        # float category names are rejected by xgboost -- routed through str
+        assert all(isinstance(c, str) for c in result["b"].cat.categories)
+
+    def test_pandas_safe_cast_false_keeps_float_categories(self, sample_pandas_df):
+        conv = CatConverter(columns=["b"], safe_cast=False)
+        conv.fit(sample_pandas_df)
+        result = conv.transform(sample_pandas_df)
+        assert pd.api.types.is_float_dtype(result["b"].cat.categories)
+
+    def test_pandas_safe_cast_preserves_na(self):
+        df = pd.DataFrame({"b": [1.0, np.nan, 3.0]})
+        conv = CatConverter(columns=["b"])
+        conv.fit(df)
+        result = conv.transform(df)
+        assert result["b"].isna().tolist() == [False, True, False]
+
+    @requires_polars
+    def test_polars_safe_cast_default_handles_numeric_columns(self, sample_polars_df):
+        conv = CatConverter(columns=["a", "b"])
+        conv.fit(sample_polars_df)
+        result = conv.transform(sample_polars_df)
+        assert result["a"].dtype == pl.Categorical
+        assert result["b"].dtype == pl.Categorical
+
+    @requires_polars
+    def test_polars_safe_cast_false_raises_on_numeric_column(self, sample_polars_df):
+        conv = CatConverter(columns=["a"], safe_cast=False)
+        conv.fit(sample_polars_df)
+        with pytest.raises(pl.exceptions.InvalidOperationError):
+            conv.transform(sample_polars_df)
 
     def test_column_index(self, sample_pandas_df):
         conv = CatConverter(columns=[2])
