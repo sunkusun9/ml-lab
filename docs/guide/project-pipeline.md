@@ -10,16 +10,16 @@ from mllabs import Project
 project = Project('exp', data=df)      # created if missing
 ```
 
-The dataset belongs here because it is the one thing an Experimenter or Trainer cannot restore from its own directory. Give it once and `add_experimenter` / `add_trainer` and the registries stop asking for a dataframe. `project.set_data(df)` sets it later.
+The dataset belongs here because it is the one thing an Experimenter or Trainer cannot restore from its own directory. Give it once and `set_experimenter` / `set_trainer` and the registries stop asking for a dataframe. `project.set_data(df)` sets it later.
 
 Anything beyond the main dataset — a held-out test set, rows to append to inner train splits (`aug_data`) — goes through `project.ext_data`, a named registry that reads fresh from disk on every access rather than caching:
 
 ```python
 project.ext_data.register('extra', extra_df)
-project.add_experimenter('cv5', aug_data='@ext:extra')   # resolved at open time
+project.set_experimenter('cv5', aug_data='@ext:extra')   # resolved at open time
 ```
 
-`'@ext:name'` is accepted anywhere `aug_data=` is: `add_experimenter`, `add_trainer`, and the `Experimenter`/`Trainer` constructors directly.
+`'@ext:name'` is accepted anywhere `aug_data=` is: `set_experimenter`, `set_trainer`, and the `Experimenter`/`Trainer` constructors directly.
 
 Everything else is reached from it:
 
@@ -37,8 +37,8 @@ Collectors are not among them — a registry belongs to the Experimenter that wr
 ## Adding and removing Experimenters and Trainers
 
 ```python
-project.add_experimenter('cv5', sp=..., splitter_params={'y': 'target'})
-project.add_trainer('final')
+project.set_experimenter('cv5', sp=..., splitter_params={'y': 'target'})
+project.set_trainer('final')
 
 e = project.experimenters['cv5']       # reach an existing one
 t = project.trainers['final']
@@ -46,16 +46,16 @@ t = project.trainers['final']
 project.remove_experimenter('cv5')     # deletes the directory
 ```
 
-`add_*` is strictly an addition: a taken name raises. Constructing an Experimenter splits the data afresh and resets its provenance, so doing that over an existing one is damage rather than a reopen — and an accessor that quietly created when the name was free would turn a typo into a second Experimenter instead of an error.
+`set_*` defaults to strictly an addition: a taken name raises (`exist='error'`). Constructing an Experimenter splits the data afresh and resets its provenance, so doing that over an existing one is damage rather than a reopen — and an accessor that quietly created when the name was free would turn a typo into a second Experimenter instead of an error. Pass `exist='skip'` to get the existing one back untouched instead of raising, or `exist='replace'` to drop it and build fresh — unconditionally, since there is no cheap way to tell in advance that recomputing splits would have been a no-op.
 
-Two different questions decide whether a name is free. `ProjectStore` says what this project *manages*; `ExperimenterStore.stored_at(path)` says whether the directory is *occupied*, possibly by something built outside the project. Either one refuses, with a message saying which.
+Two different questions decide whether a name is free. `ProjectStore` says what this project *manages*; `ExperimenterStore.stored_at(path)` says whether the directory is *occupied*, possibly by something built outside the project. `exist='error'` refuses either way, with a message saying which; `exist='skip'` only has something to hand back for the first case (the second still raises — an occupied-but-unmanaged directory isn't "the same one" `skip` can return); `exist='replace'` clears either.
 
 `remove_experimenter` also drops that name's rows from `experiment_hist`. The name is what keys them, so left behind they would attach to whatever is added under it next and `exp()` would skip folds it had never run. Trial *definitions* stay — those belong to the project.
 
-The registries open only names they are not already holding, so what `add_*` returned is what comes back:
+The registries open only names they are not already holding, so what `set_*` returned is what comes back:
 
 ```python
-e = project.add_experimenter('cv5', ...)
+e = project.set_experimenter('cv5', ...)
 project.experimenters['cv5'] is e      # True
 ```
 
@@ -188,7 +188,7 @@ project.load_pipeline(2)         # a specific version
 project.remove_pipeline_version(1)   # any but the latest
 ```
 
-The latest is what an omitted version number resolves to, so it cannot be removed — deleting it would silently change what the next `add_experimenter` adopts. Removing an older one breaks nothing that ran against it: every Experimenter and Trainer keeps its own Pipeline copy. What is lost is what a provenance pointer refers to.
+The latest is what an omitted version number resolves to, so it cannot be removed — deleting it would silently change what the next `set_experimenter` adopts. Removing an older one breaks nothing that ran against it: every Experimenter and Trainer keeps its own Pipeline copy. What is lost is what a provenance pointer refers to.
 
 ### Publishing and propagating
 

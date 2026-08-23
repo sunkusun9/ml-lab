@@ -83,6 +83,27 @@ class ModelAdapter(ABC):
             fit_params['sample_weight'] = unwrap(train_data['sample_weight'].squeeze())
         return fit_params
 
+    @staticmethod
+    def _eval_weight_list(train_weight, valid_weight, eval_mode):
+        """Weights positioned to match the ``eval_set`` list ``eval_mode``
+        builds — ``[valid]`` for ``'valid'``, ``[train, valid]`` for
+        ``'both'`` — for adapters (LightGBM, XGBoost) that take eval weights
+        as a list parallel to ``eval_set`` rather than folded into a Pool.
+
+        ``None`` for a side with no ``sample_weight`` edge is left in place
+        rather than dropped — LightGBM/XGBoost both treat a ``None`` entry as
+        uniform weight for just that eval set, not an error. Returns
+        ``None`` (skip the param entirely) only when neither side has one,
+        so the unweighted call shape is unchanged when no one asked for this.
+        """
+        if train_weight is None and valid_weight is None:
+            return None
+        if eval_mode == 'valid':
+            return [valid_weight]
+        if eval_mode == 'both':
+            return [train_weight, valid_weight]
+        return None
+
     def get_process_data(self, data):
         from .._data_wrapper import unwrap
         return unwrap(data)

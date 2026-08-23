@@ -378,7 +378,7 @@ class Experimenter():
 
         Takes the Pipeline object directly rather than a version number —
         this class has no way to load one by version itself (see the class
-        docstring); ``Project.add_experimenter()`` resolves that before
+        docstring); ``Project.set_experimenter()`` resolves that before
         calling this. ``self.pipeline_version`` is read straight off
         *pipeline* (its ``.version``), so it's never tracked as a separate,
         possibly-diverging value.

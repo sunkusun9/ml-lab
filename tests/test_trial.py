@@ -1,7 +1,7 @@
 import pytest
 
 from mllabs import CollectorStore, Collectors, Connector, PipelineBuilder
-from mllabs import Trial, GridTrials, compare_specs
+from mllabs import Trial, GridTrials, ListTrials, compare_specs
 
 
 LGBM = 'lightgbm.LGBMClassifier'
@@ -126,6 +126,119 @@ class TestGridTrialsValidation:
     def test_empty_grid_value_rejected(self):
         with pytest.raises(ValueError, match='is empty'):
             GridTrials(processor=TREE, edges=EDGES, param_grid={'max_depth': []})
+
+
+class TestListTrials:
+    def test_per_entry_fields_pass_through(self):
+        combos = ListTrials([
+            {'processor': LGBM, 'edges': EDGES, 'params': {'max_depth': 3}},
+            {'processor': TREE, 'edges': EDGES, 'params': {'max_depth': 5}},
+        ]).combos()
+        assert combos[0]['processor'] == LGBM
+        assert combos[1]['processor'] == TREE
+        assert [c['params']['max_depth'] for c in combos] == [3, 5]
+
+    def test_combos_carry_no_name(self):
+        combos = ListTrials([{'processor': TREE, 'edges': EDGES}]).combos()
+        assert 'name' not in combos[0]
+
+    def test_shared_processor_used_when_entry_omits_it(self):
+        combos = ListTrials(
+            [{'params': {'max_depth': 3}}, {'processor': TREE, 'params': {'max_depth': 5}}],
+            processor=LGBM, edges=EDGES,
+        ).combos()
+        assert combos[0]['processor'] == LGBM
+        assert combos[1]['processor'] == TREE
+
+    def test_missing_processor_without_shared_default_rejected(self):
+        with pytest.raises(ValueError, match="missing 'processor'|no 'processor'"):
+            ListTrials([{'edges': EDGES}])
+
+    def test_entry_params_override_shared_params_by_key(self):
+        combos = ListTrials(
+            [{'processor': TREE, 'params': {'max_depth': 7}}],
+            edges=EDGES, params={'max_depth': 3, 'random_state': 42},
+        ).combos()
+        assert combos[0]['params'] == {'max_depth': 7, 'random_state': 42}
+
+    def test_entry_edges_override_shared_edges_by_key(self):
+        combos = ListTrials(
+            [{'processor': TREE, 'edges': {'y': '{other_target}'}}],
+            edges=EDGES,
+        ).combos()
+        assert combos[0]['edges'] == {'X': 'scaler:(*)', 'y': '{other_target}'}
+
+    def test_edges_and_params_not_shared_between_combos(self):
+        combos = ListTrials(
+            [{'processor': TREE}, {'processor': TREE}],
+            edges=dict(EDGES), params={'max_depth': 3},
+        ).combos()
+        combos[0]['edges']['X'] = 'mutated'
+        combos[0]['params']['max_depth'] = 99
+        assert combos[1]['edges']['X'] == 'scaler:(*)'
+        assert combos[1]['params']['max_depth'] == 3
+
+    def test_entry_method_adapter_tag_desc_override_shared(self):
+        combos = ListTrials(
+            [{'processor': TREE, 'method': 'predict_proba', 'tag': ['probe'],
+              'desc': 'entry desc'}],
+            edges=EDGES, method='predict', tag=['default'],
+        ).combos()
+        assert combos[0]['method'] == 'predict_proba'
+        assert combos[0]['tag'] == ['probe']
+        assert combos[0]['desc'] == 'entry desc'
+
+    def test_desc_has_no_shared_default(self):
+        combos = ListTrials([{'processor': TREE}], edges=EDGES).combos()
+        assert combos[0]['desc'] is None
+
+    def test_unset_fields_fall_back_to_shared_defaults(self):
+        combos = ListTrials(
+            [{'processor': TREE}],
+            edges=EDGES, method='predict_proba', adapter='mllabs.adapter.DefaultAdapter',
+            tag=['default'],
+        ).combos()
+        assert combos[0]['method'] == 'predict_proba'
+        assert combos[0]['adapter'] == 'mllabs.adapter.DefaultAdapter'
+        assert combos[0]['tag'] == ['default']
+
+
+class TestListTrialsValidation:
+    def test_empty_combos_rejected(self):
+        with pytest.raises(ValueError, match='non-empty'):
+            ListTrials([])
+
+    def test_non_dict_entry_rejected(self):
+        with pytest.raises(TypeError, match='must be a dict'):
+            ListTrials(['not-a-dict'])
+
+    def test_unknown_field_rejected(self):
+        with pytest.raises(ValueError, match='unknown field'):
+            ListTrials([{'processor': TREE, 'edges': EDGES, 'bogus': 1}])
+
+    def test_processor_class_rejected(self):
+        from sklearn.tree import DecisionTreeClassifier
+        with pytest.raises(TypeError, match='processor must be'):
+            ListTrials([{'processor': DecisionTreeClassifier, 'edges': EDGES}])
+
+    def test_adapter_instance_rejected(self):
+        from mllabs.adapter import DefaultAdapter
+        with pytest.raises(TypeError, match='adapter must be'):
+            ListTrials([{'processor': TREE, 'edges': EDGES, 'adapter': DefaultAdapter()}])
+
+    def test_live_object_in_params_rejected(self):
+        from mllabs import ColSelector
+        with pytest.raises(TypeError, match='must be plain data'):
+            ListTrials([{'processor': TREE, 'edges': EDGES,
+                        'params': {'cat_features': ColSelector('*')}}])
+
+    def test_empty_edges_after_merge_rejected(self):
+        with pytest.raises(ValueError, match='non-empty'):
+            ListTrials([{'processor': TREE}])
+
+    def test_non_string_edge_rejected(self):
+        with pytest.raises(TypeError, match='DSL string'):
+            ListTrials([{'processor': TREE, 'edges': {'X': ['a', 'b']}}])
 
 
 class TestTrialSpec:

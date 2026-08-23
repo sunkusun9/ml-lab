@@ -7,7 +7,7 @@ An `Experimenter` runs one cross-validation experiment: it builds the Pipeline's
 ```python
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 
-e = project.add_experimenter(
+e = project.set_experimenter(
     'cv5',
     sp=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
     sp_v=StratifiedShuffleSplit(n_splits=1, train_size=0.9, random_state=42),
@@ -57,7 +57,7 @@ Already-built folds are skipped. `n_jobs` is capped at the actual number of jobs
 A Trial is one configuration to evaluate. It looks like a node — same `ProcessorSpec` — but lives outside the Pipeline.
 
 ```python
-from mllabs import Trial, GridTrials
+from mllabs import Trial, GridTrials, ListTrials
 
 trial = Trial('lgb1', 'lightgbm.LGBMClassifier',
               edges={'X': 'scale:(*) + ohe:(*)', 'y': '{target}'},
@@ -76,6 +76,23 @@ gen = GridTrials('lightgbm.LGBMClassifier',
                  param_grid={'num_leaves': [31, 63], 'learning_rate': [0.05, 0.1]})
 ```
 
+`ListTrials` is the other shape: an explicit list of combos, for a batch a grid can't express — a bake-off across model families, say, where `processor` itself differs per entry rather than one shared value varying over an axis:
+
+```python
+gen = ListTrials(
+    [
+        {'processor': 'lightgbm.LGBMClassifier', 'params': {'num_leaves': 31},
+         'desc': 'lgbm baseline'},
+        {'processor': 'catboost.CatBoostClassifier',
+         'params': {'depth': 6, 'verbose': False}, 'desc': 'catboost tuned'},
+    ],
+    edges={'X': 'scale:(*)', 'y': '{target}'},
+    params={'random_state': 42},
+)
+```
+
+Nothing is required per entry — `processor`/`edges`/`method`/`adapter`/`params`/`tag` passed to `ListTrials` itself are the shared defaults every entry starts from. `processor`/`method`/`adapter`/`tag`/`desc` are wholesale (an entry that sets one replaces the shared default outright); `params`/`edges` merge key-by-key instead, so the entry above still gets `edges={'X': 'scale:(*)', 'y': '{target}'}` and `params={'num_leaves': 31, 'random_state': 42}` without repeating them. Neither generator names anything — see below.
+
 ## Registering
 
 A Trial belongs to the project, so it is added there — separately from running it:
@@ -85,7 +102,7 @@ project.set_trial(trial)               # 'lgb1', or None if unchanged
 project.make_trials('lgb', gen)        # names + registers all four combos
 ```
 
-`make_trials` mints each name from `project.trials.next_name('lgb')` — assigned, never derived from the combo's position in the grid, so growing or shrinking the sweep later never renames a sibling combo. Both return only what was **added or changed**, so the return value is the work list for the next run. A definition identical to the stored one is not a change and comes back as `None` / omitted.
+`make_trials` mints each name from `project.trials.next_name('lgb')` — assigned, never derived from a combo's position in the batch, so growing or shrinking it later never renames a sibling combo. That holds the same way for `ListTrials` as for `GridTrials`; neither generator has a naming concept of its own. Both `set_trial`/`make_trials` return only what was **added or changed**, so the return value is the work list for the next run. A definition identical to the stored one is not a change and comes back as `None` / omitted.
 
 !!! warning "A Trial's name is its identity"
     `TrialStore` is project-wide and keyed by name, so a name is what history, results and every run's reference to it all hang on. Give a new configuration a new name.
@@ -186,7 +203,7 @@ Register it once on the project's `ext_data` (a named registry that reads fresh 
 
 ```python
 project.ext_data.register('extra', extra_df)
-project.add_experimenter('cv5', aug_data='@ext:extra')
+project.set_experimenter('cv5', aug_data='@ext:extra')
 ```
 
 Reopening through `project.experimenters['cv5']` does **not** re-supply `aug_data` — it was never persisted, and the project has no way to remember it for you. Pass it again on the standalone path instead:

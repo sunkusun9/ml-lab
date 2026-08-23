@@ -424,6 +424,42 @@ class TestOutputs:
 
 
 # ======================================================================
+# _split_val
+# ======================================================================
+
+class TestSplitVal:
+    """_split_val's auto-split path (validation_fraction > 0, no explicit
+    eval_set) used to slice sample_weight for the train half only and drop
+    the held-out validation half's weight on the floor."""
+
+    @requires_tf
+    def test_val_weight_matches_val_indices(self, pd_df, clf_target):
+        from mllabs.nn import NNClassifier
+        clf = NNClassifier(validation_fraction=0.2, random_state=0)
+        clf._fit_encoder(pd_df)
+        y_encoded = clf._prepare_target(clf_target)
+        weight = np.arange(len(clf_target), dtype=np.float64)
+
+        X_tr, y_tr, X_val, y_val, sw_tr, sw_val = clf._split_val(
+            pd_df, y_encoded, sample_weight=weight)
+
+        assert len(sw_tr) == len(y_tr)
+        assert len(sw_val) == len(y_val)
+        assert len(sw_tr) + len(sw_val) == len(clf_target)
+
+    @requires_tf
+    def test_no_weight_returns_none_for_both(self, pd_df, clf_target):
+        from mllabs.nn import NNClassifier
+        clf = NNClassifier(validation_fraction=0.2, random_state=0)
+        clf._fit_encoder(pd_df)
+        y_encoded = clf._prepare_target(clf_target)
+
+        *_, sw_tr, sw_val = clf._split_val(pd_df, y_encoded)
+        assert sw_tr is None
+        assert sw_val is None
+
+
+# ======================================================================
 # NNClassifier
 # ======================================================================
 
@@ -475,6 +511,20 @@ class TestNNClassifier:
         clf.fit(pd_df, clf_target, eval_set=[(pd_df, clf_target)])
         assert 'valid' in clf.evals_result_
         assert 'train' in clf.evals_result_
+
+    @requires_tf
+    def test_eval_set_sample_weight(self, pd_df, clf_target):
+        """eval_sample_weight threads into the validation tf.data.Dataset as
+        a weighted (inputs, target, weight) triple rather than being silently
+        dropped — Keras applies it to val_loss/val_metrics the same way
+        sample_weight does for the training set."""
+        from mllabs.nn import NNClassifier
+        clf = NNClassifier(epochs=2, batch_size=64, validation_fraction=0.0,
+                           early_stopping=0)
+        weights = np.ones(len(clf_target))
+        clf.fit(pd_df, clf_target, eval_set=[(pd_df, clf_target)],
+               eval_sample_weight=weights)
+        assert 'valid' in clf.evals_result_
 
     @requires_tf
     def test_validation_fraction(self, pd_df, clf_target):

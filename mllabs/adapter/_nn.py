@@ -64,6 +64,12 @@ class NNAdapter(ModelAdapter):
 
         if self.eval_mode and self.eval_mode != 'none' and train_v_X is not None and train_v_y is not None:
             fit_params['eval_set'] = [(unwrap(train_v_X), unwrap(train_v_y))]
+            train_v_w = valid_data.get('sample_weight') if valid_data else None
+            if train_v_w is not None:
+                # Only ever one eval_set entry here (NNEstimator doesn't
+                # have LightGBM/XGBoost's 'both' second slot), so this is
+                # just the valid weight — no positional list needed.
+                fit_params['eval_sample_weight'] = unwrap(train_v_w.squeeze())
 
         if self.verbose > 0 and monitor is not None and tf is not None:
             n_epochs = (params or {}).get('epochs', 100)

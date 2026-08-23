@@ -38,7 +38,7 @@ class Project:
           ext_data/           named external data (ExtDataProvider) — {name}.pkl each.
                                aug_data lives here too now — register it under a
                                name and pass '@ext:name' as aug_data= to
-                               add_experimenter/add_trainer; Project has no
+                               set_experimenter/set_trainer; Project has no
                                aug_data storage of its own
           pipeline/           pipeline.db — the working copy, which is the
                                builder itself and never a version — plus
@@ -103,7 +103,7 @@ class Project:
         """Replace this project's dataset, and reset whatever that invalidates.
 
         Every Experimenter/Trainer this project manages reads the project's
-        own data (see :meth:`add_experimenter`/:meth:`add_trainer` — there is
+        own data (see :meth:`set_experimenter`/:meth:`set_trainer` — there is
         no per-one override any more), so a changed dataset is a change they
         have to answer to, the same way an adopted Pipeline version is:
         compared against the data each one's own adopted Pipeline was built
@@ -211,7 +211,7 @@ class Project:
         which names this project manages.
 
         Only names not already held are opened, so one added through
-        :meth:`add_experimenter` comes back as the very object that call
+        :meth:`set_experimenter` comes back as the very object that call
         returned. Two live Experimenters over one directory would each hold
         their own Collectors and node caches, and a change through one would be
         invisible to the other.
@@ -230,14 +230,13 @@ class Project:
                 held[name] = open_one(name)
         return held
 
-    def add_experimenter(self, name, pipeline_version=None,
-                         aug_data=None, **kwargs):
-        """Add a new Experimenter named *name*, under ``{project}/exp/{name}``.
+    def set_experimenter(self, name, pipeline_version=None,
+                         aug_data=None, exist='error', **kwargs):
+        """Get-or-create the Experimenter named *name*, under ``{project}/exp/{name}``.
 
-        An addition, so a taken name raises rather than being written over.
         Constructing an Experimenter splits the data afresh and resets its
-        provenance, which over an existing one is damage rather than a reopen;
-        reach for that one through :attr:`experimenters`.
+        provenance, which over an existing one is damage rather than a
+        reopen — so that only happens when *exist* asks for it.
 
         Its name is its identity: it is both the directory and the key used in
         :class:`~mllabs.TrialStore` history.
@@ -257,17 +256,49 @@ class Project:
                 train splits — a live dataset, or an ``'@ext:name'`` string
                 resolved against ``self.ext_data`` (register it there first).
                 No project-level default any more: omitted, there is none.
+            exist (str): What to do if *name* is already taken (managed by
+                this project, or the directory is otherwise occupied).
+                ``'error'`` (default) raises, matching the old add-only
+                behavior. ``'skip'`` returns the existing Experimenter
+                unexamined — same as :attr:`experimenters`\\ ``[name]``, just
+                inline. ``'replace'`` drops it (:meth:`remove_experimenter`,
+                or the bare directory if this project never indexed it) and
+                builds fresh, unconditionally — there is no ``'diff'`` mode,
+                because splits/provenance are too costly to recompute just to
+                find out nothing changed.
             **kwargs: Passed to :class:`~mllabs.Experimenter` (``sp``, ``sp_v``,
                 ``splitter_params``, ``title``, ``data_key``, ...).
 
         Raises:
-            ValueError: If this project already manages *name*, or something
-                else already occupies its directory.
+            ValueError: If *exist* is ``'error'`` (the default) and this
+                project already manages *name*, or something else already
+                occupies its directory; or if *exist* is ``'skip'`` and the
+                directory is occupied but not managed by this project
+                (there is no "existing" object to hand back); or if *exist*
+                is none of ``'error'``/``'skip'``/``'replace'``.
         """
         from ._experimenter import Experimenter
         from ._experimenter_store import ExperimenterStore
-        self._require_free('Experimenter', name, self.list_experimenters(),
-                           'exp', ExperimenterStore.stored_at, 'experimenters')
+        managed = self.list_experimenters()
+        path = self.path / 'exp' / name
+        if name in managed or ExperimenterStore.stored_at(path):
+            if exist == 'error':
+                self._require_free('Experimenter', name, managed, 'exp',
+                                   ExperimenterStore.stored_at, 'experimenters')
+            elif exist == 'skip':
+                if name in managed:
+                    return self.experimenters[name]
+                raise ValueError(
+                    f"Experimenter {name!r} is not in this project, but {path} "
+                    f"already holds one. Remove it first, or use exist='replace'."
+                )
+            elif exist == 'replace':
+                if name in managed:
+                    self.remove_experimenter(name)
+                else:
+                    shutil.rmtree(path)
+            else:
+                raise ValueError(f'Unknown exist mode: {exist!r}')
         exp = Experimenter(
             self.exp_path(name), name, self._resolve_data(),
             aug_data=aug_data,
@@ -278,20 +309,38 @@ class Project:
         self._experimenters[name] = exp
         return exp
 
-    def add_trainer(self, name, pipeline_version=None, aug_data=None, **kwargs):
-        """Add a new Trainer named *name*, under ``{project}/trainers/{name}``.
+    def set_trainer(self, name, pipeline_version=None, aug_data=None, exist='error', **kwargs):
+        """Get-or-create the Trainer named *name*, under ``{project}/trainers/{name}``.
 
-        Same shape as :meth:`add_experimenter`, and the same rules: a taken
-        name raises, and it always trains against this project's own data —
-        no per-Trainer override. *pipeline_version* defaults the same way
+        Same shape as :meth:`set_experimenter`, and the same rules for
+        *exist* — it always trains against this project's own data (no
+        per-Trainer override), and *pipeline_version* defaults the same way
         too — the latest published version. Any published version is
         adoptable, and this never hands over a draft, which is the one thing
         ``set_pipeline`` refuses.
         """
         from ._trainer import Trainer
         from ._trainer_store import TrainerStore
-        self._require_free('Trainer', name, self.list_trainers(),
-                           'trainers', TrainerStore.stored_at, 'trainers')
+        managed = self.list_trainers()
+        path = self.path / 'trainers' / name
+        if name in managed or TrainerStore.stored_at(path):
+            if exist == 'error':
+                self._require_free('Trainer', name, managed, 'trainers',
+                                   TrainerStore.stored_at, 'trainers')
+            elif exist == 'skip':
+                if name in managed:
+                    return self.trainers[name]
+                raise ValueError(
+                    f"Trainer {name!r} is not in this project, but {path} "
+                    f"already holds one. Remove it first, or use exist='replace'."
+                )
+            elif exist == 'replace':
+                if name in managed:
+                    self.remove_trainer(name)
+                else:
+                    shutil.rmtree(path)
+            else:
+                raise ValueError(f'Unknown exist mode: {exist!r}')
         trainer = Trainer(
             self.trainer_path(name), name, self._resolve_data(),
             aug_data=aug_data,
@@ -616,6 +665,66 @@ class Project:
         return self.experimenters[experimenter].collectors.set_collector(
             name, collector, connector, path=path, params=params, exist=exist)
 
+    def get_collector(self, experimenter, name):
+        """Read back a Collector already registered on *experimenter*.
+
+        Same proxy relationship as :meth:`set_collector` — Project holds no
+        Collector registry of its own, this just saves the two-hop reach
+        through ``project.experimenters[experimenter].collectors`` for the
+        common case of fetching one by name.
+
+        Args:
+            experimenter (str): Name of the Experimenter whose registry to
+                read.
+            name (str): Collector name.
+
+        Returns:
+            Collector | None: The collector, or ``None`` if no such name is
+            registered there.
+
+        Raises:
+            KeyError: If this project manages no Experimenter named
+                *experimenter*.
+        """
+        return self.experimenters[experimenter].collectors.get_collector(name)
+
+    def build(self, experimenter, nodes=None, rebuild=False, n_jobs=1,
+             gpu_id_list=None, logger=None):
+        """Build Stage nodes on *experimenter*. A thin proxy to
+        ``Experimenter.build`` — see there for what each argument means.
+
+        Saves the reach through ``project.experimenters[experimenter]`` for
+        the common case of driving one Experimenter's build from the
+        project, the same way :meth:`set_collector` does for its registry.
+
+        Raises:
+            KeyError: If this project manages no Experimenter named
+                *experimenter*.
+        """
+        return self.experimenters[experimenter].build(
+            nodes=nodes, rebuild=rebuild, n_jobs=n_jobs,
+            gpu_id_list=gpu_id_list, logger=logger)
+
+    def exp(self, experimenter, trials, collectors=None, n_jobs=1,
+           gpu_id_list=None, logger=None):
+        """Run *trials* on *experimenter*. A thin proxy to
+        ``Experimenter.exp`` — see there for what each argument means.
+
+        Saves the reach through ``project.experimenters[experimenter]`` for
+        the common case of driving one Experimenter's run from the project,
+        the same way :meth:`set_collector` does for its registry.
+
+        Raises:
+            KeyError: If this project manages no Experimenter named
+                *experimenter*, or if a name in *trials* is not registered
+                in :attr:`trials`.
+            RuntimeError: If *experimenter* has no ``trial_store`` (only
+                possible for one opened outside this project's registry).
+        """
+        return self.experimenters[experimenter].exp(
+            trials, collectors=collectors, n_jobs=n_jobs,
+            gpu_id_list=gpu_id_list, logger=logger)
+
     def collect_errors(self, experimenter=None, collectors=None):
         """Collection failures across the project, one dict each.
 
@@ -684,7 +793,7 @@ class Project:
 
         Defaults to the working copy as a :meth:`PipelineBuilder.draft`, which
         is a snapshot and not a publication. Asking what an edit would cost must
-        not be what commits the edit: ``add_experimenter`` / ``add_trainer``
+        not be what commits the edit: ``set_experimenter`` / ``set_trainer``
         adopt the latest version by default, so a mere preview would change what
         the next call adopts.
 
@@ -907,8 +1016,8 @@ class Project:
     def remove_pipeline_version(self, version):
         """Delete a published version. Not the latest one.
 
-        The latest is what :meth:`load_pipeline` and ``add_experimenter`` /
-        ``add_trainer`` resolve to when given no number, so removing it would
+        The latest is what :meth:`load_pipeline` and ``set_experimenter`` /
+        ``set_trainer`` resolve to when given no number, so removing it would
         move that pointer silently. Any older one goes freely: nothing that ran
         against it breaks, since every Experimenter and Trainer holds its own
         Pipeline copy. What is lost is what their provenance points at.

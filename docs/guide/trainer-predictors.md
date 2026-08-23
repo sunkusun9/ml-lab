@@ -7,9 +7,9 @@ Where an `Experimenter` compares candidates, a `Trainer` trains the ones you cho
 ```python
 from sklearn.model_selection import KFold
 
-t = project.add_trainer('final', pipeline_version=pipeline.version)
+t = project.set_trainer('final', pipeline_version=pipeline.version)
 
-t = project.add_trainer('cv5',
+t = project.set_trainer('cv5',
                         splitter=KFold(n_splits=5, shuffle=True, random_state=42),
                         splitter_params={'y': 'target'},
                         pipeline_version=pipeline.version)
@@ -32,7 +32,7 @@ Reopening replays the **stored split indices** rather than recomputing them, so 
 
 ```python
 project.ext_data.register('extra', extra_df)
-project.add_trainer('final', pipeline_version=pipeline.version, aug_data='@ext:extra')
+project.set_trainer('final', pipeline_version=pipeline.version, aug_data='@ext:extra')
 ```
 
 Reopening through `project.trainers['final']` does not re-supply it; the standalone path does:

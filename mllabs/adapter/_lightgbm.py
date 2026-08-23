@@ -83,6 +83,13 @@ class LightGBMAdapter(ModelAdapter):
             elif self.eval_mode == 'both':
                 fit_params['eval_set'] = [(fit_params['X'], fit_params['y']), (train_v_X_native, train_v_y_native)]
 
+            train_v_w = valid_data.get('sample_weight') if valid_data else None
+            train_v_w_native = _not_polars(unwrap(train_v_w.squeeze())) if train_v_w is not None else None
+            eval_weight = self._eval_weight_list(
+                fit_params.get('sample_weight'), train_v_w_native, self.eval_mode)
+            if eval_weight is not None:
+                fit_params['eval_sample_weight'] = eval_weight
+
         if self.verbose > 0:
             if self.verbose < 1:
                 n_estimators = params.get('n_estimators', 100) if params else 100

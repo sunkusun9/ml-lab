@@ -80,10 +80,24 @@ class CatBoostAdapter(ModelAdapter):
         if self.eval_mode and self.eval_mode != 'none' and train_v_X is not None and train_v_y is not None:
             v_X = _maybe_to_pandas(unwrap(train_v_X))
             v_y = _maybe_to_pandas(unwrap(train_v_y))
+            v_w = valid_data.get('sample_weight') if valid_data else None
+            v_w = _maybe_to_pandas(unwrap(v_w.squeeze())) if v_w is not None else None
+            t_w = fit_params.get('sample_weight')
+
             if self.eval_mode == 'valid':
-                fit_params['eval_set'] = [(v_X, v_y)]
-            elif self.eval_mode == 'both':
-                fit_params['eval_set'] = [(fit_params['X'], fit_params['y']), (v_X, v_y)]
+                entries = [(v_X, v_y, v_w)]
+            else:
+                entries = [(fit_params['X'], fit_params['y'], t_w), (v_X, v_y, v_w)]
+
+            if t_w is not None or v_w is not None:
+                # CatBoost has no eval-side weight parameter of its own — a
+                # Pool is where a weight column attaches, so every entry
+                # becomes one (weight=None on a Pool is just uniform, same
+                # as the plain-tuple form below).
+                from catboost import Pool
+                fit_params['eval_set'] = [Pool(x, y, weight=w) for x, y, w in entries]
+            else:
+                fit_params['eval_set'] = [(x, y) for x, y, _ in entries]
 
         if self.verbose > 0:
             if self.verbose < 1:

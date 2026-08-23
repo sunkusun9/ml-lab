@@ -26,7 +26,7 @@ p.set_datasource({'age': 'numerical', 'city': 'nominal', 'target': 'binary'})
 p.set_node('scale', processor='sklearn.preprocessing.StandardScaler',
            method='fit_transform', edges={'X': '{age}'})
 
-e = project.add_experimenter('cv', pipeline_version=p.build().version)
+e = project.set_experimenter('cv', pipeline_version=p.build().version)
 e.build()
 
 project.set_trial(Trial('lgb', 'lightgbm.LGBMClassifier',

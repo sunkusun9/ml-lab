@@ -48,14 +48,14 @@ def make_project_exp(root, data, aug_data=None, name='e1'):
 
     aug_data is not persisted with the Experimenter, and Project keeps no
     project-level default of its own any more — register it under a name in
-    project.ext_data and pass '@ext:name' to add_experimenter instead.
+    project.ext_data and pass '@ext:name' to set_experimenter instead.
     """
     project = Project(root, data=data)
     if aug_data is not None:
         project.ext_data.register('aug', aug_data)
-        project.add_experimenter(name, aug_data='@ext:aug', **SPLITTERS)
+        project.set_experimenter(name, aug_data='@ext:aug', **SPLITTERS)
     else:
-        project.add_experimenter(name, **SPLITTERS)
+        project.set_experimenter(name, **SPLITTERS)
     return project
 
 
@@ -330,11 +330,11 @@ class TestTrainerAugData:
                        splitter=splitter, splitter_params={}, cache=DataCache(),
                        aug_data=aug_data)
 
-    def test_add_trainer_stores_aug_data(self, tmp_path, pipeline, base_data, aug_df):
+    def test_set_trainer_stores_aug_data(self, tmp_path, pipeline, base_data, aug_df):
         trainer = self._make_trainer(pipeline, 't1', base_data, tmp_path / 'tr_t1', aug_data=aug_df)
         assert trainer.aug_data is not None
 
-    def test_add_trainer_no_aug_data(self, tmp_path, pipeline, base_data):
+    def test_set_trainer_no_aug_data(self, tmp_path, pipeline, base_data):
         trainer = self._make_trainer(pipeline, 't1', base_data, tmp_path / 'tr_t1')
         assert trainer.aug_data is None
 

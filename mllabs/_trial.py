@@ -11,6 +11,22 @@ _CHAINABLE_FIELDS = frozenset(
 )
 
 
+def _validate_edges(edges, where):
+    """Shape check shared by every combo generator: a non-empty
+    ``{key: dsl_string}`` dict. Structural only — same as
+    ``PipelineBuilder.set_grp``/``set_node``, actual DSL syntax is checked
+    later, against a Pipeline, by ``validate_edges`` in ``_edge_dsl.py``.
+    """
+    if not isinstance(edges, dict) or not edges:
+        raise ValueError(f"{where}: edges must be a non-empty {{key: dsl_string}} dict")
+    for key, dsl_string in edges.items():
+        if not isinstance(dsl_string, str):
+            raise TypeError(
+                f"{where}: edges[{key!r}] must be a DSL string, got "
+                f"{type(dsl_string).__name__}"
+            )
+
+
 class Trial:
     """One concrete configuration to evaluate — what used to be a Head node.
 
@@ -217,15 +233,7 @@ class GridTrials:
         _validate_adapter(adapter, where)
         _validate_params(params, where)
         _validate_params(param_grid, where)
-
-        if not isinstance(edges, dict) or not edges:
-            raise ValueError(f"{where}: edges must be a non-empty {{key: dsl_string}} dict")
-        for key, dsl_string in edges.items():
-            if not isinstance(dsl_string, str):
-                raise TypeError(
-                    f"{where}: edges[{key!r}] must be a DSL string, got "
-                    f"{type(dsl_string).__name__}"
-                )
+        _validate_edges(edges, where)
 
         param_grid = dict(param_grid or {})
         for key, values in param_grid.items():
@@ -266,3 +274,123 @@ class GridTrials:
                 tag=list(self.tags),
             ))
         return result
+
+
+_COMBO_FIELDS = frozenset(('processor', 'edges', 'method', 'adapter', 'params', 'tag', 'desc'))
+
+
+class ListTrials:
+    """A generator for :meth:`~mllabs.Project.make_trials` from an explicit
+    list of combos — the counterpart to :class:`GridTrials` for a batch that
+    is not one shared axis sweep, e.g. a bake-off across model families.
+
+    Each entry in *combos* is ``Trial`` constructor kwargs minus ``name``
+    (``processor``/``edges``/``method``/``adapter``/``params``/``tag``/
+    ``desc``; ``name`` never among them — naming is assign-based and lives
+    on the ``Project`` side). Nothing is required per entry — the
+    constructor's own *processor*/*edges*/*method*/*adapter*/*params*/*tag*
+    are the shared defaults every entry starts from. *desc* has no shared
+    default: entries are hand-written here, unlike a grid sweep, so a
+    per-entry description ("lgbm baseline", "catboost tuned") is the point.
+
+    ``processor``/``method``/``adapter``/``tag``/``desc`` are wholesale: an
+    entry that sets one replaces the shared default outright. ``params``/
+    ``edges`` are structured, so an entry's own dict is merged key-by-key
+    over the shared one instead — the shared value survives for any key the
+    entry does not mention, and the entry's value wins where both define the
+    same key. This is a plain dict merge, not DSL-string combination
+    (``Trial.chain``'s ``+``/``-`` inheritance is a separate, more specific
+    tool)::
+
+        gen = ListTrials(
+            [
+                {'processor': 'lightgbm.LGBMClassifier', 'params': {'num_leaves': 31},
+                 'desc': 'lgbm baseline'},
+                {'processor': 'catboost.CatBoostClassifier',
+                 'params': {'depth': 6, 'verbose': False}, 'desc': 'catboost tuned'},
+            ],
+            edges={'X': 'scaler:(*)', 'y': '{target}'},
+            params={'random_state': 42},
+        )
+        project.make_trials('bakeoff', gen)
+
+    Every resolved combo (defaults merged in) is validated the same way
+    :class:`GridTrials` validates its own processor/adapter/params/edges,
+    once here at construction — so a bad entry fails when you build the
+    batch rather than sometime later during registration.
+
+    Args:
+        combos (list[dict]): Each entry may set any of ``processor``/
+            ``edges``/``method``/``adapter``/``params``/``tag``/``desc``;
+            unset ones (other than ``desc``) fall back to the shared
+            defaults below.
+        processor (str, optional): Shared default. Either this or every
+            entry's own ``processor`` must be given.
+        edges (dict, optional): Shared ``{key: dsl_string}`` defaults, merged
+            key-by-key under each entry's own.
+        method (str): Shared default. Default ``'predict'``.
+        adapter: Shared default. ``None`` / string ref / ``{"__ref__": ...}``.
+        params (dict, optional): Shared defaults, merged key-by-key under
+            each entry's own.
+        tag (list[str], optional): Shared default.
+    """
+
+    def __init__(self, combos, processor=None, edges=None, method='predict',
+                 adapter=None, params=None, tag=None):
+        where = 'ListTrials'
+        if not isinstance(combos, (list, tuple)) or not combos:
+            raise ValueError(f"{where}: combos must be a non-empty list of dicts")
+
+        if processor is not None:
+            _validate_processor(processor, where)
+        _validate_adapter(adapter, where)
+        _validate_params(params, where)
+        common_edges = dict(edges or {})
+        if common_edges:
+            _validate_edges(common_edges, where)
+        common_params = dict(params or {})
+        common_tag = list(tag or [])
+
+        result = []
+        for i, combo in enumerate(combos):
+            entry_where = f"{where}: combos[{i}]"
+            if not isinstance(combo, dict):
+                raise TypeError(f"{entry_where} must be a dict, got {type(combo).__name__}")
+            unknown = set(combo) - _COMBO_FIELDS
+            if unknown:
+                raise ValueError(f"{entry_where} has unknown field(s): {sorted(unknown)}")
+
+            entry_processor = combo.get('processor', processor)
+            if entry_processor is None:
+                raise ValueError(
+                    f"{entry_where} has no 'processor', and none was given as a shared default"
+                )
+            entry_adapter = combo.get('adapter', adapter)
+            entry_params = {**common_params, **combo.get('params', {})}
+            entry_edges = {**common_edges, **combo.get('edges', {})}
+
+            _validate_processor(entry_processor, entry_where)
+            _validate_adapter(entry_adapter, entry_where)
+            _validate_params(entry_params, entry_where)
+            _validate_edges(entry_edges, entry_where)
+
+            result.append(dict(
+                processor=entry_processor,
+                edges=entry_edges,
+                method=combo.get('method', method),
+                adapter=entry_adapter,
+                params=entry_params,
+                tag=list(combo.get('tag', common_tag)),
+                desc=combo.get('desc'),
+            ))
+        self._combos = result
+
+    def combos(self):
+        """Every combo as ``Trial`` constructor kwargs, minus ``name``.
+
+        Returns:
+            list[dict]: each with ``processor``/``edges``/``method``/
+            ``adapter``/``params``/``tag``/``desc``.
+        """
+        return [dict(c, edges=dict(c['edges']), params=dict(c['params']), tag=list(c['tag']))
+                for c in self._combos]

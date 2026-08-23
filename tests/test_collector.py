@@ -99,7 +99,7 @@ def built_exp(tmp_path, sample_data):
     """Stage built; Trial 'dt' defined but not yet exp()'d."""
     project = Project(tmp_path / 'proj_built', data=sample_data)
     version = _pipeline_version(project)
-    e = project.add_experimenter('exp_built',
+    e = project.set_experimenter('exp_built',
                              sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42), pipeline_version=version)
     e.build()
     trial = Trial('dt', TREE, EDGES, params={'max_depth': 3, 'random_state': 42})
@@ -111,7 +111,7 @@ def built_exp_inner(tmp_path, sample_data):
     """Same as built_exp, plus an inner CV split (KFold, 3 folds)."""
     project = Project(tmp_path / 'proj_inner', data=sample_data)
     version = _pipeline_version(project)
-    e = project.add_experimenter('exp_inner',
+    e = project.set_experimenter('exp_inner',
                              sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42),
                              sp_v=KFold(n_splits=3, shuffle=True, random_state=42), pipeline_version=version)
     e.build()
@@ -124,7 +124,7 @@ def multi_head_exp(tmp_path, sample_data):
     """Two Trials ('dt1', 'dt2') reading the same stage, neither exp()'d yet."""
     project = Project(tmp_path / 'proj_multi', data=sample_data)
     version = _pipeline_version(project)
-    e = project.add_experimenter('exp_multi',
+    e = project.set_experimenter('exp_multi',
                              sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42), pipeline_version=version)
     e.build()
     trial1 = Trial('dt1', TREE, EDGES, params={'max_depth': 3, 'random_state': 42})
@@ -943,7 +943,7 @@ class TestRegistryIsPerRun:
 
     @staticmethod
     def _run_one(project, name, version, trial):
-        e = project.add_experimenter(
+        e = project.set_experimenter(
             name,
             sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42), pipeline_version=version)
         e.build()
@@ -1127,7 +1127,7 @@ class TestProcessCollector:
     def proba_exp(self, tmp_path, sample_data):
         project = Project(tmp_path / 'proj_proba', data=sample_data)
         version = _pipeline_version(project)
-        e = project.add_experimenter('exp_proba',
+        e = project.set_experimenter('exp_proba',
                                  sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=42), pipeline_version=version)
         e.build()
         trial = Trial('dt', TREE, EDGES, method='predict_proba', params={'max_depth': 3, 'random_state': 42})

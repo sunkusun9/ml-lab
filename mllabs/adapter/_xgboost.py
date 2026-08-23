@@ -96,6 +96,13 @@ class XGBoostAdapter(ModelAdapter):
             elif self.eval_mode == 'both':
                 fit_params['eval_set'] = [(fit_params['X'], fit_params['y']), (unwrap(train_v_X), unwrap(train_v_y))]
 
+            train_v_w = valid_data.get('sample_weight') if valid_data else None
+            train_v_w_native = unwrap(train_v_w.squeeze()) if train_v_w is not None else None
+            eval_weight = self._eval_weight_list(
+                fit_params.get('sample_weight'), train_v_w_native, self.eval_mode)
+            if eval_weight is not None:
+                fit_params['sample_weight_eval_set'] = eval_weight
+
         return fit_params
 
     def _get_feature_importances(processor, importance_type):

@@ -14,16 +14,22 @@ def adapter():
     return LightGBMAdapter(eval_mode='none', verbose=0)
 
 
-def make_train_data():
+def make_train_data(weight=None):
     X = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
     y = pd.Series([0, 1, 0])
-    return {'X': X, 'y': y}
+    data = {'X': X, 'y': y}
+    if weight is not None:
+        data['sample_weight'] = pd.Series(weight)
+    return data
 
 
-def make_valid_data():
+def make_valid_data(weight=None):
     X = pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})
     y = pd.Series([0, 1, 0])
-    return {'X': X, 'y': y}
+    data = {'X': X, 'y': y}
+    if weight is not None:
+        data['sample_weight'] = pd.Series(weight)
+    return data
 
 
 class TestGetParams:
@@ -100,6 +106,44 @@ class TestGetFitParamsEarlyStopping:
         train_data = make_train_data()
         fit_params = adapter.get_fit_params(train_data, params={})
         assert 'eval_set' not in fit_params
+
+
+class TestGetFitParamsEvalWeight:
+    def test_eval_sample_weight_both_mode(self):
+        adapter = LightGBMAdapter(eval_mode='both', verbose=0)
+        train_data = make_train_data(weight=[1.0, 1.0, 2.0])
+        valid_data = make_valid_data(weight=[1.0, 2.0, 3.0])
+        fit_params = adapter.get_fit_params(train_data, valid_data, params={})
+        weights = fit_params['eval_sample_weight']
+        assert len(weights) == 2
+        assert list(weights[0]) == [1.0, 1.0, 2.0]
+        assert list(weights[1]) == [1.0, 2.0, 3.0]
+
+    def test_eval_sample_weight_valid_mode_is_valid_weight_only(self):
+        adapter = LightGBMAdapter(eval_mode='valid', verbose=0)
+        train_data = make_train_data(weight=[1.0, 1.0, 2.0])
+        valid_data = make_valid_data(weight=[1.0, 2.0, 3.0])
+        fit_params = adapter.get_fit_params(train_data, valid_data, params={})
+        weights = fit_params['eval_sample_weight']
+        assert len(weights) == 1
+        assert list(weights[0]) == [1.0, 2.0, 3.0]
+
+    def test_no_eval_sample_weight_without_weight_edge(self):
+        adapter = LightGBMAdapter(eval_mode='both', verbose=0)
+        fit_params = adapter.get_fit_params(make_train_data(), make_valid_data(), params={})
+        assert 'eval_sample_weight' not in fit_params
+
+    def test_missing_valid_weight_is_padded_with_none(self):
+        """train_data carries a weight but valid_data doesn't (edges applied
+        oddly, or a hand-built call) — the valid entry stays None (uniform)
+        rather than the whole param being dropped or the list shrinking."""
+        adapter = LightGBMAdapter(eval_mode='both', verbose=0)
+        train_data = make_train_data(weight=[1.0, 1.0, 2.0])
+        valid_data = make_valid_data()
+        fit_params = adapter.get_fit_params(train_data, valid_data, params={})
+        weights = fit_params['eval_sample_weight']
+        assert list(weights[0]) == [1.0, 1.0, 2.0]
+        assert weights[1] is None
 
 
 class TestParamsEqualWithDictEarlyStopping:

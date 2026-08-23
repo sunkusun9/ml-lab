@@ -95,3 +95,114 @@ class TestAdaptersShareTheHelper:
 
         s = adapter_cls.result_objs['evals_result'][0](FakeProcessor())
         assert s[(0, 'AUC', 'validation')] == 0.5
+
+
+class TestEvalWeightList:
+    """ModelAdapter._eval_weight_list — positions eval weights to match the
+    eval_set list eval_mode builds, for LightGBM/XGBoost (list-of-weights
+    adapters; CatBoost folds weight into a Pool instead, tested per-adapter
+    below)."""
+
+    def test_neither_side_returns_none(self):
+        from mllabs.adapter._base import ModelAdapter
+        assert ModelAdapter._eval_weight_list(None, None, 'both') is None
+
+    def test_valid_mode_returns_valid_weight_only(self):
+        from mllabs.adapter._base import ModelAdapter
+        assert ModelAdapter._eval_weight_list('train_w', 'valid_w', 'valid') == ['valid_w']
+
+    def test_both_mode_returns_train_then_valid(self):
+        from mllabs.adapter._base import ModelAdapter
+        assert ModelAdapter._eval_weight_list('train_w', 'valid_w', 'both') == ['train_w', 'valid_w']
+
+    def test_missing_side_is_none_not_dropped(self):
+        """None stays in its position (uniform weight for just that eval
+        set) rather than shrinking the list, which would desync it from
+        eval_set's own length."""
+        from mllabs.adapter._base import ModelAdapter
+        assert ModelAdapter._eval_weight_list('train_w', None, 'both') == ['train_w', None]
+        assert ModelAdapter._eval_weight_list(None, 'valid_w', 'both') == [None, 'valid_w']
+
+    def test_unknown_mode_returns_none(self):
+        from mllabs.adapter._base import ModelAdapter
+        assert ModelAdapter._eval_weight_list('t', 'v', 'none') is None
+
+
+class TestXGBoostEvalWeight:
+    def _adapter(self, eval_mode='both'):
+        pytest.importorskip('xgboost', reason='xgboost not installed')
+        from mllabs.adapter._xgboost import XGBoostAdapter
+        return XGBoostAdapter(eval_mode=eval_mode, verbose=0)
+
+    def test_eval_sample_weight_both_mode(self):
+        adapter = self._adapter('both')
+        train_data = {'X': pd.DataFrame({'a': [1, 2, 3]}), 'y': pd.Series([0, 1, 0]),
+                      'sample_weight': pd.Series([1.0, 1.0, 2.0])}
+        valid_data = {'X': pd.DataFrame({'a': [4, 5, 6]}), 'y': pd.Series([1, 0, 1]),
+                      'sample_weight': pd.Series([1.0, 2.0, 3.0])}
+        fit_params = adapter.get_fit_params(train_data, valid_data, params={})
+        weights = fit_params['sample_weight_eval_set']
+        assert len(weights) == 2
+        assert list(weights[0]) == [1.0, 1.0, 2.0]
+        assert list(weights[1]) == [1.0, 2.0, 3.0]
+
+    def test_no_weight_key_without_weight_edge(self):
+        adapter = self._adapter('both')
+        train_data = {'X': pd.DataFrame({'a': [1, 2, 3]}), 'y': pd.Series([0, 1, 0])}
+        valid_data = {'X': pd.DataFrame({'a': [4, 5, 6]}), 'y': pd.Series([1, 0, 1])}
+        fit_params = adapter.get_fit_params(train_data, valid_data, params={})
+        assert 'sample_weight_eval_set' not in fit_params
+
+
+class TestCatBoostEvalWeight:
+    def _adapter(self, eval_mode='both'):
+        pytest.importorskip('catboost', reason='catboost not installed')
+        from mllabs.adapter._catboost import CatBoostAdapter
+        return CatBoostAdapter(eval_mode=eval_mode, verbose=0)
+
+    def test_eval_set_becomes_pool_when_weighted(self):
+        from catboost import Pool
+        adapter = self._adapter('both')
+        train_data = {'X': pd.DataFrame({'a': [1, 2, 3]}), 'y': pd.Series([0, 1, 0]),
+                      'sample_weight': pd.Series([1.0, 1.0, 2.0])}
+        valid_data = {'X': pd.DataFrame({'a': [4, 5, 6]}), 'y': pd.Series([1, 0, 1]),
+                      'sample_weight': pd.Series([1.0, 2.0, 3.0])}
+        fit_params = adapter.get_fit_params(train_data, valid_data, params={})
+        eval_set = fit_params['eval_set']
+        assert len(eval_set) == 2
+        assert all(isinstance(p, Pool) for p in eval_set)
+
+    def test_eval_set_stays_plain_tuples_without_weight(self):
+        adapter = self._adapter('both')
+        train_data = {'X': pd.DataFrame({'a': [1, 2, 3]}), 'y': pd.Series([0, 1, 0])}
+        valid_data = {'X': pd.DataFrame({'a': [4, 5, 6]}), 'y': pd.Series([1, 0, 1])}
+        fit_params = adapter.get_fit_params(train_data, valid_data, params={})
+        eval_set = fit_params['eval_set']
+        assert len(eval_set) == 2
+        assert all(isinstance(p, tuple) for p in eval_set)
+
+
+class TestNNAdapterEvalWeight:
+    """NNAdapter only ever builds one eval_set entry (no LightGBM/XGBoost
+    'both' second slot for train), so its eval weight is a single array,
+    not a positional list — no _eval_weight_list involved."""
+
+    def _adapter(self, eval_mode='valid'):
+        pytest.importorskip('tensorflow', reason='tensorflow not installed')
+        from mllabs.adapter._nn import NNAdapter
+        return NNAdapter(eval_mode=eval_mode, verbose=0)
+
+    def test_eval_sample_weight_set_when_valid_has_weight(self):
+        adapter = self._adapter()
+        train_data = {'X': pd.DataFrame({'a': [1, 2, 3]}), 'y': pd.Series([0, 1, 0])}
+        valid_data = {'X': pd.DataFrame({'a': [4, 5, 6]}), 'y': pd.Series([1, 0, 1]),
+                      'sample_weight': pd.Series([1.0, 2.0, 3.0])}
+        fit_params = adapter.get_fit_params(train_data, valid_data, params={})
+        assert list(fit_params['eval_sample_weight']) == [1.0, 2.0, 3.0]
+
+    def test_no_eval_sample_weight_without_weight_edge(self):
+        adapter = self._adapter()
+        train_data = {'X': pd.DataFrame({'a': [1, 2, 3]}), 'y': pd.Series([0, 1, 0])}
+        valid_data = {'X': pd.DataFrame({'a': [4, 5, 6]}), 'y': pd.Series([1, 0, 1])}
+        fit_params = adapter.get_fit_params(train_data, valid_data, params={})
+        assert 'eval_sample_weight' not in fit_params

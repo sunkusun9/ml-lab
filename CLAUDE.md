@@ -51,7 +51,7 @@ Project(path, data, cache_maxsize)   경로·데이터·캐시·resolver 소유 
 
 - **Project** (`_project.py`): 디렉토리 레이아웃 + 데이터셋 + `pipeline`/`TrialStore`/`ProjectStore`/`cache`, 그리고 자기가 내준 Experimenter/Trainer를 이름으로 들고 있음(같은 이름은 같은 객체). 별도 `save()`는 없다 — 각 컴포넌트가 이미 write-through
 - **PipelineBuilder / Pipeline** (`_pipeline.py`): 가변 빌더 + `build()`가 만드는 불변 **노드 전용** 그래프
-- **Trial / GridTrials** (`_trial.py`): 평가할 구성 하나 / 그 구성들을 만들어내는 생성기 하나. Pipeline 밖에 있음
+- **Trial / GridTrials / ListTrials** (`_trial.py`): 평가할 구성 하나 / 그 구성들을 만들어내는 생성기 둘. Pipeline 밖에 있음
 - **TrialStore** (`_trial_store.py`): `trials`(정의) + `experiment_hist`(fold별 실행 이력). 저작은 `Project.set_trial`, 실행은 `Experimenter.exp`가 **이름으로** 꺼내 씀
 - **Predictor** (`_predictor.py`): Trainer가 학습하는 끝지점 출력 노드. Trial과 같은 실행 정의 + 출처(`src_trial`/`src_experimenter`)
 - **PredictorStore** (`_predictor_store.py`): `predictors`(정의 + `status`) 하나뿐 — fold별 이력은 Trainer의 두 번째 `NodeStore`가 가짐
@@ -185,7 +185,13 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   - **이름을 전혀 안 만든다** — 예전 자유함수 `make_trials`가 `{name}_{idx}`를 combo 개수 기반 zero-pad로 파생시켰던 게 결함이었다(#132): 1개→2개면 원래 이름이 사라지고, 10개→11개면 자릿수가 늘어 **전부** 밀리고, grid 값이 하나 늘면 같은 idx가 다른 조합을 가리키게 됐다. `GridTrials`는 애초에 이름 개념이 없어서 이 결함이 구조적으로 불가능하다 — 이름은 순전히 `Project.make_trials` 쪽(`TrialStore.next_name`) 책임
   - `params`(전 combo 공통) + `param_grid`(`{param: [values]}`) 카테시안 곱, grid 키 정렬 기준 결정적 순서
   - `_validate_processor`/`_validate_adapter`/`_validate_params`로 생성자에서 spec 검증 (Pipeline과 동일 규칙)
-  - **`GridTrials` 하나만이 아니다** — `combos() -> list[dict]`만 지키면 다른 생성기도 같은 자리에 낄 수 있다(모델 계열 bake-off, edges 스윕 등). 지금은 `GridTrials`만 구현, 나머지는 실제로 필요해지면
+  - **`GridTrials` 하나만이 아니다** — `combos() -> list[dict]`만 지키면 다른 생성기도 같은 자리에 낄 수 있다. `_validate_edges(edges, where)`(`_trial.py`)로 edges 구조 검증을 뽑아둬서 `GridTrials`/`ListTrials`가 같은 검증을 공유
+
+- **`ListTrials(combos, processor=None, edges=None, method='predict', adapter=None, params=None, tag=None)`** — `GridTrials`가 못 하는 자리(모델 계열 bake-off처럼 combo마다 `processor` 자체가 다른 경우)를 위한 생성기. *combos*는 `Trial` 생성자 kwargs를 `name` 뺀 채로 손으로 나열한 리스트(`processor`/`edges`/`method`/`adapter`/`params`/`tag`/`desc`) — 아무것도 필수가 아니고, 생성자의 `processor`/`edges`/`method`/`adapter`/`params`/`tag`가 각 엔트리의 공통 기본값이 된다
+  - **`processor`/`method`/`adapter`/`tag`/`desc`는 통째로 override** — 엔트리가 지정하면 공통값을 완전히 대체. `desc`만 공통 기본값이 없다(손으로 쓰는 리스트라 조합마다 설명을 다는 게 자연스러워서)
+  - **`params`/`edges`는 키 단위로 병합** — `{**공통, **엔트리}`, 공통에 있고 엔트리에 없는 키는 남고, 둘 다 있으면 엔트리가 이긴다. `Trial.chain`의 `_combine_edges`(DSL 문자열 `+`/`-` 상속)와는 다른, 더 단순한 dict-level override
+  - `processor`는 최소 하나(공통 또는 엔트리)는 있어야 함 — 최종 병합된 값마다 `GridTrials`와 동일하게 `_validate_processor`/`_validate_adapter`/`_validate_params`/`_validate_edges`로 생성자에서 검증
+  - 이름은 여기서도 안 만든다 — `GridTrials`와 같은 이유로 `Project.make_trials`(`TrialStore.next_name`) 책임
 
 ### compare_specs (`_describer.py`)
 여러 `ProcessorSpec`의 공통점/차이점을 분석하는 도구. `{name: spec}`을 받는다 — Trial이면
@@ -200,7 +206,7 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 
 ### Project (`_project.py`)
 디렉토리 레이아웃 + **데이터셋** + 프로젝트 전역인 것 소유, 그리고 **자기가 내준 것을 들고 있음**.
-`add_experimenter()`/`add_trainer()`가 하는 일:
+`set_experimenter()`/`set_trainer()`가 하는 일:
 1. 경로(`exp_path`/`trainer_path`)와 `cache`, 데이터셋 제공
 2. `ProjectStore`에 이름 등록 + 자기 레지스트리에 객체 보관
 3. `pipeline_version`을 `load_pipeline()`으로 `Pipeline` 객체로 바꿔 채택시킴
@@ -212,13 +218,15 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
 - **데이터셋**: `data` property(첫 접근에 `data.pkl`에서 읽음 — 이름·이력 조회는 데이터를 안 건드림). 형식은 pkl(pandas/polars/cudf/numpy 다 되고 프로젝트가 이미 pipeline/splitter를 피클로 저장). 없으면 `_resolve_data`가 `ValueError`로 안내
 - **`set_data(data)`는 그냥 저장이 아니다 — 채택 커밋 지점**(`Experimenter.set_pipeline`/`Trainer.set_pipeline`과 같은 자리). 덮어쓰기 전에 `old = self.data`를 잡아, 이 프로젝트가 관리하는 각 Experimenter/Trainer의 **자기 adopted `pipeline`**으로 `pipeline.stale_nodes_for_data(old, new)`(`_pipeline.py`, "Staleness" 섹션 참조)를 호출해 영향받는 노드를 `reset_nodes(...)`한 뒤에 새 데이터를 쓴다. 이전 데이터가 없으면(`old is None`) 비교할 대상이 없어 아무것도 안 지운다 — 빈 Pipeline과 diff하는 것과 같은 이유. 호출 뒤 `self._experimenters`/`self._trainers`를 비워서, 이미 손에 든 인스턴스도 다음 접근에서 새 데이터로 재오픈되게 만든다(안 그러면 아티팩트는 리셋됐는데 메모리 속 객체는 옛 데이터로 다시 split을 낸 상태로 남는다)
 - **`ext_data`**: `ExtDataProvider`(`{path}/ext_data/`) — `data`와 달리 **여러 개**를 이름으로 등록해두는 자리라 메모리에 캐싱 안 하고 요청마다 디스크에서 새로 읽음. 자세한 내용은 "ExtDataProvider" 섹션
-- **`aug_data`는 이제 Project가 안 갖고 있다** — `project.ext_data.register(name, df)`로 등록해두고, `add_experimenter(..., aug_data='@ext:name')`처럼 참조 문자열로 넘긴다. `Project.__init__`에도 `aug_data` 파라미터가 없다 — 관리할 별도 상태가 아니라 `ext_data`의 이름 있는 항목 하나일 뿐이라서
-- **`resolver`**: `Resolver(ext_data=self.ext_data)` — `add_experimenter`/`add_trainer`가 만드는 Experimenter/Trainer에 그대로 주입돼, Collector 구성과 Processor 실행 양쪽에서 `'@ext:name'`을 같은 방식으로 푼다("Resolver" 섹션 참조)
+- **`aug_data`는 이제 Project가 안 갖고 있다** — `project.ext_data.register(name, df)`로 등록해두고, `set_experimenter(..., aug_data='@ext:name')`처럼 참조 문자열로 넘긴다. `Project.__init__`에도 `aug_data` 파라미터가 없다 — 관리할 별도 상태가 아니라 `ext_data`의 이름 있는 항목 하나일 뿐이라서
+- **`resolver`**: `Resolver(ext_data=self.ext_data)` — `set_experimenter`/`set_trainer`가 만드는 Experimenter/Trainer에 그대로 주입돼, Collector 구성과 Processor 실행 양쪽에서 `'@ext:name'`을 같은 방식으로 푼다("Resolver" 섹션 참조)
 - 경로: `pipeline_path`(property), `exp_path(name)`, `trainer_path(name)` — **collector 경로 없음**(레지스트리는 Experimenter 소유), **inferencer 경로도 없음**(아래 "Inferencer는 프로젝트 밖")
 - **레지스트리**: `experimenters`/`trainers` — `{name: 객체}`. 접근할 때마다 `list_*()`를 훑어 **아직 안 들고 있는 이름만** 연다(그래서 데이터셋이 필요). `list_experimenters()`/`list_trainers()`는 이름만 답하는 싼 질문이라 별개로 남는다
   - **`add_*`가 만든 객체가 곧 레지스트리가 돌려주는 객체다** — "안 들고 있는 것만 연다"의 요점이 이것. 한 디렉토리에 살아있는 인스턴스가 둘이면 각자 자기 Collectors와 노드 캐시를 들고 있어서, 한쪽으로 가한 변경이 다른 쪽엔 안 보인다(`Project.pipeline`이 builder 하나를 고수하는 것과 같은 이유)
   - 그래서 "다 훑었나" 플래그가 없다 — dict는 **내가 든 것** 하나만 뜻하고, 접근당 비용은 sqlite 쿼리 하나
-- **`add_experimenter(name, pipeline_version=None, aug_data=None, **kw)` / `add_trainer(...)`**: **추가 전용** — 이미 있는 이름이면 `ValueError`. 생성은 split을 다시 계산하고 provenance를 리셋하므로 기존 것 위에 하면 재개가 아니라 피해다(#128). 기존 것은 `project.experimenters[name]`으로
+- **`set_experimenter(name, pipeline_version=None, aug_data=None, exist='error', **kw)` / `set_trainer(...)`**: get-or-create. `exist`는 `set_collector`와 같은 세 모드 — `'error'`(기본, 이미 있으면 `ValueError`), `'skip'`(있으면 그대로 반환), `'replace'`(지우고 무조건 새로 만듦). **`'diff'` 모드는 없다** — `set_grp`/`set_node`의 `'diff'`는 필드 단위 in-place 갱신이라 값싸지만, 여기서 "재생성"은 split 재계산 + provenance 리셋이라(#128) 결과가 같은지 미리 알아보는 것 자체가 다시 만드는 것만큼 비싸다. `sp`/`sp_v`도 ref-spec이 아니라 산 객체라 `==` 비교를 신뢰할 수 없어서 필드 diff가 애초에 성립 안 함
+  - `exist='error'`가 기본인 이유는 옛 `add_*`와 호출부 하위호환을 맞추기 위해서가 아니라, 실수로 덮어쓰는 사고를 막는 게 여전히 맞는 기본값이라서다 — `'skip'`/`'replace'`는 명시적 opt-in
+  - `'skip'`은 이 프로젝트가 관리하는 이름일 때만 기존 것을 반환한다. 디렉토리는 있는데 색인엔 없는 경우(`stored_at`은 참, `managed`엔 없음)는 "돌려줄 기존 것"이 뭔지 답할 수 없어 그대로 `ValueError` — `'error'`/`'replace'`는 두 경우 다 처리(전자는 거부, 후자는 둘 다 지움)
   - **`data` 파라미터가 없다 — Experimenter/Trainer별 데이터 override는 없어졌다(#148).** 항상 `self._resolve_data()`(= 이 프로젝트의 `data`)를 쓴다. 이게 있어야 `set_data`가 "이 프로젝트가 관리하는 전부"를 대상으로 데이터 변경의 영향을 답할 수 있다 — 일부 Experimenter가 다른 데이터를 쓰면 그 답이 거짓이 된다
   - `aug_data`는 그대로 Experimenter/Trainer에 전달만 한다(project 레벨 기본값으로의 폴백 없음) — 산 데이터셋이든 `'@ext:name'` 문자열이든 상관없이. 재오픈(`experimenters`/`trainers` property → `_open_experimenter`/`_open_trainer`)은 애초에 `aug_data`를 안 넘긴다 — 원래 미퍼시스트였던 값이라 project가 대신 기억해줄 방법이 없다(#131)
   - **존재 판정이 두 질문이다**: `ProjectStore`가 "이 프로젝트가 무엇을 관리하나"(멤버십), `ExperimenterStore.stored_at`/`TrainerStore.stored_at`이 "그 디렉토리가 이미 찼나"(점유). 색인엔 없는데 디스크엔 있는 건 모순이 아니라 "우리 것은 아니지만 자리는 찼다"는 정확한 사실이고, `add_*`는 둘 다 거부한다
@@ -240,18 +248,19 @@ PipelineBuilder  — 가변. grps 계층, SQLite(pipeline.db), set_grp/set_node
   - 스탬프가 동결과 맞물린다: 파이프라인이 넘어간 뒤 성공 이력 있는 이름을 다시 등록하면 **버전이 달라져서 "변경"으로 잡히고** 그대로 `ValueError`. 옛 결과가 그걸 만든 적 없는 버전을 설명하게 되는 걸 관례가 아니라 기계가 막는다
   - `set_trials`는 **전부 검사한 뒤에 쓴다** — 하나가 얼려 있으면 아무것도 안 바뀐다(절반만 등록되면 반환한 작업 목록이 거짓이 됨). **스탬프가 먼저** 도는 이유는 미스탬프 Trial은 저장된 것과 필드가 하나 달라서, 찍기 전에 비교하면 전부 "변경"으로 나오기 때문
   - 문지기 없는 저수준 경로는 `trials.register()` — 테스트가 재정의 동작을 직접 확인할 때 씀(스탬프도 안 찍히므로 `exp()`가 거부한다. 테스트 헬퍼들이 직접 채워 넣는 이유)
-- **`make_trials(name, generator, pipeline_version=None)`**: `generator.combos()`(예: `GridTrials`)가 내놓은 각 combo에 `self.trials.next_name(name)`으로 이름을 채번해 `Trial`을 만들고 `self.set_trials(...)`로 등록까지 한 호출로. `pipeline_version`은 배치 전체에 동일 적용(안 주면 combo마다 `set_trial`이 최신 published로 채움). `chain_trial`과 같은 자리 — "채번 + 구성 + 등록"을 한데 묶어서, 스윕을 키워도 이미 등록된 이름은 절대 안 건드린다(매 호출이 항상 새 이름만 만들어내므로)
+- **`make_trials(name, generator, pipeline_version=None)`**: `generator.combos()`(예: `GridTrials`/`ListTrials`)가 내놓은 각 combo에 `self.trials.next_name(name)`으로 이름을 채번해 `Trial`을 만들고 `self.set_trials(...)`로 등록까지 한 호출로. `pipeline_version`은 배치 전체에 동일 적용(안 주면 combo마다 `set_trial`이 최신 published로 채움). `chain_trial`과 같은 자리 — "채번 + 구성 + 등록"을 한데 묶어서, 스윕을 키워도 이미 등록된 이름은 절대 안 건드린다(매 호출이 항상 새 이름만 만들어내므로)
 - **`chain_trial(src_name, name=None, pipeline_version=None, **overrides)`**: 등록된 Trial 하나에서 파생시켜 바로 등록. `self.trials.get_by_name(src_name)`으로 원본을 찾고(없으면 `KeyError`), `name`이 없으면 `self.trials.next_name(src_name)`으로 채운 뒤 `Trial.chain(...)` → `self.set_trial(...)`로 넘긴다 — freeze gate와 버전 스탬핑이 여느 저작과 똑같이 적용됨. 이름 충돌을 막는 별도 로직은 없다: `next_name`이 이미 등록된 걸 피해가지 않고, `set_trial`의 freeze gate가 유일한 안전망(성공 이력 없는 이름끼리 겹치면 조용히 덮어써진다 — 손으로 지은 이름이 겹칠 때와 같은 리스크)
 - **`error_trials(experimenter=None)`**: Trial 실행 실패를 fold당 dict 하나로 — `trial_name`/`experimenter`/`outer_idx`/`inner_idx`/`pipeline_version` + 평탄화된 `type`/`message`/`traceback`. `Experimenter.error_nodes`의 Trial판이고 **여기 있는 이유는 이력의 주인이 여기라서**(노드 이력은 Experimenter, Trial 이력은 프로젝트). 깨끗하면 `[]`
 - **`pending_trials(experimenter=None)`**: 등록된 Trial 중 **에러났거나 이력이 아예 없는** 이름 목록. 둘 다 "아직 돌려야 할 것"이라 한 목록으로 낸다 — 손으로 쓰면 후자만 잡아서 실패한 게 조용히 빠진다(#130이 노트북에서 지목한 실제 버그)
   - **일부러 거칠다**: fold 일부만 돌다 끊긴 건 안 잡는다 — 그걸 판정하려면 fold 그리드와 대조해야 하는데 이 store는 그걸 모른다. 반환된 이름을 그냥 돌려도 안전하다(`exp()`가 끝난 fold를 건너뜀)
 - **`set_collector(experimenter, name, collector, connector, path=None, params=None, exist='skip')`**: 지정한 Experimenter의 `collectors`(`Collectors.set_collector`)에 그대로 위임하는 얇은 대행 메소드. **소유가 아니다** — Project는 여전히 Collector 레지스트리를 안 갖는다(#136, "Project owns no collector registry" 그대로 유지). `project.experimenters[experimenter].collectors.set_collector(...)`를 손으로 안 써도 되게 해주는 편의일 뿐, `chain_trial`이 `self.trials`를 대신 만져주는 것과 같은 자리
+- **`get_collector(experimenter, name)` / `build(experimenter, ...)` / `exp(experimenter, trials, ...)`**: 같은 자리의 대행 메소드 셋 — 각각 `Experimenter.collectors.get_collector`/`Experimenter.build`/`Experimenter.exp`에 인자 그대로 위임. `set_collector`처럼 소유권은 없고 `project.experimenters[experimenter].X(...)`의 2단 접근을 줄여주는 편의일 뿐이라, Experimenter를 여러 개 관리할 때 이름 하나로 조회/빌드/실행을 바로 걸 수 있다. 게이트를 추가하는 게 아니므로 `Experimenter.exp`/`build`가 이미 언제나 호출 가능하다는 성질(상태 게이트 없음)은 그대로 유지
 - **`collect_errors(experimenter=None, collectors=None)`**: 수집 실패를 fold당 dict 하나로. 세 번째 에러 읽기이고(노드는 `Experimenter.error_nodes`, Trial은 위 `error_trials`), **유일하게 Experimenter를 거쳐야 읽는다** — Collector 이력은 레지스트리 소유고 레지스트리는 Experimenter별이라, 자기 store가 없어 `Experimenter.collect_errors`에 묻는다
   - 팬아웃하면서 **`experimenter` 키를 얹는다** — `collect_hist`엔 그 컬럼이 일부러 없고(어느 것이냐는 db가 어디 있느냐로 답한다), 여러 레지스트리를 가로지를 때만 필요해지는 값이라
 - **`stale_nodes(pipeline=None, experimenter=None, trainer=None, data=None)`**: 그 정의를 채택하면 어느 노드의 아티팩트가 날아가는지를 **채택 전에** 본다 → `{'experimenters': {name: [노드...]}, 'trainers': {name: [노드...]}}`. `Experimenter.stale_nodes`/`Trainer.stale_nodes` 위임
   - **키가 나뉜 이유**: `exp/{name}`과 `trainers/{name}`은 별개 네임스페이스라 한 이름이 양쪽에 있을 수 있고, 평평한 dict면 둘 중 하나가 말없이 사라진다. 이름을 주면 준 것만 답하고 반대쪽은 빈 dict
   - **양쪽 다 노드만 답한다 — Trainer에겐 과소평가다**: 채택은 Predictor 폐기도 일으키는데 그건 terminal이다. 전체 가격은 `publish_pipeline(dry_run=True, trainers=True)`
-  - `pipeline=None`이면 **working copy**를 `self.pipeline.draft()`로 스냅샷 떠서 쓴다 — draft는 등록을 안 하므로 조회가 버전을 찍지 않는다. 찍으면 `add_experimenter`/`add_trainer`의 기본값이 최신이라 **미리보기가 다음 채택 대상을 바꿔버린다**
+  - `pipeline=None`이면 **working copy**를 `self.pipeline.draft()`로 스냅샷 떠서 쓴다 — draft는 등록을 안 하므로 조회가 버전을 찍지 않는다. 찍으면 `set_experimenter`/`set_trainer`의 기본값이 최신이라 **미리보기가 다음 채택 대상을 바꿔버린다**
   - `load_pipeline()`을 넘기면 반대 방향 질문이 된다 — 각 Experimenter가 최신보다 얼마나 뒤처졌나
   - 노드 전용. Trial은 채택이 안 건드리므로 여기 안 나온다
   - **`data`**: `set_data(data)`를 지금 부르면 뭐가 stale해지는지 같은 방식으로 미리 본다 — 각 Experimenter/Trainer의 자기 `pipeline`으로 `pipeline.stale_nodes_for_data(wrap(run.data), wrap(data))`를 호출해 `pipeline` 파라미터가 이미 낸 stale 집합과 합집합한다("Staleness — 데이터 변경" 섹션 참조). `None`(기본)이면 이 축은 안 물어서, 이 파라미터가 생기기 전과 동작이 같다
@@ -298,8 +307,8 @@ trial_seq(id)  -- 오토인크리먼트뿐, next_name()의 전역 카운터
   - 복원은 **`Experimenter.load_experimenter(path, data, data_key=None, aug_data=None, cache=None, trial_store=None, resolver=None)`** staticmethod. `{path}/__exp.db`가 없으면 `KeyError` — store를 만들기 **전에** 검사한다(안 그러면 없는 Experimenter의 디렉토리와 빈 db를 만들어놓고 실패함). `aug_data`는 **미퍼시스트**라 여기서도 다시 넘겨야 하고(저장된 Experimenter가 대신 기억해주지 않음), 넘긴다면 `resolver`도 같이 넘겨야 `'@ext:name'`이 풀린다
   - `Project.experimenter(...)`가 하는 일은 경로 + `cache` + ProjectStore 이름 등록 + (버전을 줬으면) `set_pipeline` 뿐
 - **이름이 식별자**: 경로는 `{project}/exp/{name}`, `TrialStore` 이력의 키도 이 이름. UUID 없음
-- **Pipeline은 객체로 지정** — `set_pipeline(pipeline)`이 이미 로드된 `Pipeline`을 받아 채택하며 **`require_published_pipeline`으로 draft를 거부**(Trainer와 같은 게이트, 버전 제한은 없음). 예전엔 아무 status나 받았는데 — 편집 중인 정의로 실험하는 게 실험의 목적이라는 근거였다 — Trial이 버전을 들고 오면서 무너졌다: 채택한 draft는 대조할 번호가 없다. 이 클래스는 버전으로 파이프라인을 **로드할 방법 자체가 없다**(project 참조가 없음) — 번호로 지정하려면 `Project.add_experimenter(..., pipeline_version=)`. `pipeline_version`은 **property**로 `self.pipeline`에서 읽는다(복사본을 두지 않으므로 어긋날 값이 없음)
-  - 채택한 Pipeline은 **실험 디렉토리의 `pipeline.pkl`로 저장되고 `load_experimenter()`가 그걸 다시 읽는다** — Project 없이도 마지막에 채택한 Pipeline이 복원됨. **생성자는 안 읽는다** — `Pipeline.empty()`로 두고 `_save()`가 meta를 기본값으로 덮어쓰므로, 기존 디렉토리에 대고 생성자를 부르면 provenance가 사라진다. `Project.add_experimenter`가 이미 있는 이름을 거부하는 이유(#128)
+- **Pipeline은 객체로 지정** — `set_pipeline(pipeline)`이 이미 로드된 `Pipeline`을 받아 채택하며 **`require_published_pipeline`으로 draft를 거부**(Trainer와 같은 게이트, 버전 제한은 없음). 예전엔 아무 status나 받았는데 — 편집 중인 정의로 실험하는 게 실험의 목적이라는 근거였다 — Trial이 버전을 들고 오면서 무너졌다: 채택한 draft는 대조할 번호가 없다. 이 클래스는 버전으로 파이프라인을 **로드할 방법 자체가 없다**(project 참조가 없음) — 번호로 지정하려면 `Project.set_experimenter(..., pipeline_version=)`. `pipeline_version`은 **property**로 `self.pipeline`에서 읽는다(복사본을 두지 않으므로 어긋날 값이 없음)
+  - 채택한 Pipeline은 **실험 디렉토리의 `pipeline.pkl`로 저장되고 `load_experimenter()`가 그걸 다시 읽는다** — Project 없이도 마지막에 채택한 Pipeline이 복원됨. **생성자는 안 읽는다** — `Pipeline.empty()`로 두고 `_save()`가 meta를 기본값으로 덮어쓰므로, 기존 디렉토리에 대고 생성자를 부르면 provenance가 사라진다. `Project.set_experimenter`가 이미 있는 이름을 거부하는 이유(#128)
   - **미채택 상태는 `None`이 아니라 `Pipeline.empty()`다** — 파이프라인이 없는 건 결손이 아니라 정상 상태다(Trial은 DataSource를 직접 읽으므로 노드가 하나도 없어도 `exp()`가 돈다). 객체로 말하면 소비자가 전부 분기 없이 맞는다: `build()`는 job이 없고, `topo_order()`는 빈 리스트, `check_data_compatibility`는 공허 통과 — `_require_pipeline()` 같은 게이트가 필요 없다. 프로젝트 안에서는 이게 곧 v0
   - 버전 전환 시 `pipeline.diff_from(self.pipeline)`으로 stale 판정 → `reset_nodes()`로 해당 노드 아티팩트만 제거. Trial은 건드리지 않음("Staleness" 섹션)
     - **단, 지금 것이 비어 있으면 diff를 아예 안 한다**(`if not self.pipeline.is_empty`). 빈 Pipeline은 "아직 아무것도 채택 안 함"이지 "빌드된 게 없음"이 아니다 — 리로드가 저장된 Pipeline을 다시 채택할 때 placeholder와 비교하면 디스크의 아티팩트를 전부 지워버린다. 반대 방향(실제 → v0)은 정상 판정이라 전부 stale이 맞다
@@ -673,7 +682,7 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
   - **db 없는 빌더**(`PipelineBuilder()`, `copy()`가 만드는 사본 포함)는 발급할 곳이 없어 `build()`가 `ValueError`다. 스냅샷이 필요하면 `draft()`
 - **`draft()`는 `build()`와 같은 스냅샷을 등록 없이 낸다**(`version=None, status='draft'`). 정의를 *보기* 위한 것 — `Project.stale_nodes`가 "지금 편집한 걸 채택하면 뭘 잃나"를 묻는 데 쓴다. 묻는 행위가 커밋이 되면 안 되므로. 채택은 불가: 번호가 없으면 그걸로 돈 실행이 무엇에 대한 것인지 말할 수 없고, Trial/Predictor를 대조할 대상도 없다
 - **강등이 없어서 pickle된 status가 영구히 정확하다.** `publish()`가 pickle 뜨기 전에 `status = PUBLISHED`를 박고, 그걸 뒤집는 호출이 없다 — 이미 내준 사본을 갱신할 방법이 없으므로 강등 가능한 상태를 두면 객체가 거짓말을 하게 된다. 상태를 둘로 줄인 이유 중 하나가 이것
-- **삭제는 최신만 불가**(`Project.remove_pipeline_version`). 최신이 곧 "번호를 안 주면 이것"이라, 지우면 다음 `add_experimenter`가 조용히 다른 정의를 채택한다. 그 외 버전은 자유 — 지워도 그걸로 돌린 것은 안 깨진다(각자 `pipeline.pkl` 사본을 가짐)
+- **삭제는 최신만 불가**(`Project.remove_pipeline_version`). 최신이 곧 "번호를 안 주면 이것"이라, 지우면 다음 `set_experimenter`가 조용히 다른 정의를 채택한다. 그 외 버전은 자유 — 지워도 그걸로 돌린 것은 안 깨진다(각자 `pipeline.pkl` 사본을 가짐)
 - **publish는 built Pipeline과 빌더를 둘 다 저장**한다(`v{n}.pkl` / `v{n}_builder.pkl`). `build()`가 grp 상속을 해소해버려서 built 스냅샷은 편집 가능한 정의로 되돌아올 수 없기 때문 — 되돌리기 기능 자체는 아직 없고, 빌더 스냅샷이 그 문을 열어둔 것
 
 **게이트는 두 층이다.**
@@ -711,7 +720,7 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
 
 - **판정·커밋이 `Project.set_data()` 한 곳**: 덮어쓰기 전에 `old = self.data`를 잡아, 이 프로젝트가 관리하는 **각 Experimenter/Trainer 자기 자신의 adopted `pipeline`**으로 `stale_nodes_for_data(old, new)`를 호출하고 stale한 것만 그 자리에서 `reset_nodes(...)`한 뒤 새 데이터를 쓴다. 미리보기는 `Project.stale_nodes(data=...)`가 같은 계산을 그대로 노출("Project" 섹션 참조) — `set_pipeline`/`stale_nodes(pipeline=)`와 같은 "미리보기가 실제와 같은 코드" 원칙
 - **Predictor는 폐기가 아니라 reset이다** — Pipeline 버전 교체와 의도적으로 다른 지점. 데이터가 바뀌어도 Pipeline **정의**는 그대로라 `Trainer.reset_nodes`가 쓰는 경로 그대로(`init`으로 복귀, 다음 `train()`이 새 데이터로 재학습) 재사용한다 — `retiring`/`RETIRED`로 보내지 않는다. 데이터 변경으로 모델이 실제로 달라질 수 있다는 점에서 완전히 정밀한 처리는 아니지만, 지금 범위는 **노드 단위 staleness 감지**로 한정했다(#148)
-- **Experimenter별/Trainer별 데이터 override는 없다(#148로 제거)** — `add_experimenter`/`add_trainer`에 `data` 파라미터가 없다. 전부 `Project.data`를 그대로 쓰기 때문에 `set_data`가 이 프로젝트가 관리하는 전부를 대상으로 답할 수 있다 — override가 있었다면 일부는 다른 데이터를 쓰고 있어서 이 계산 자체가 거짓이 됐을 것
+- **Experimenter별/Trainer별 데이터 override는 없다(#148로 제거)** — `set_experimenter`/`set_trainer`에 `data` 파라미터가 없다. 전부 `Project.data`를 그대로 쓰기 때문에 `set_data`가 이 프로젝트가 관리하는 전부를 대상으로 답할 수 있다 — override가 있었다면 일부는 다른 데이터를 쓰고 있어서 이 계산 자체가 거짓이 됐을 것
 - `set_data` 호출 뒤 `self._experimenters`/`self._trainers`를 비운다 — 아티팩트는 reset했는데 메모리 속 객체가 옛 데이터로 만든 split을 계속 들고 있으면 다음 `build()`/`exp()`/`train()`이 새 데이터가 아니라 옛 데이터로 도는 모순이 생기므로, 다음 접근에서 새 데이터로 재오픈되게 강제한다
 
 ## Trial/Predictor 버전 스탬프 — 정의가 자기 버전을 들고 다닌다
@@ -771,6 +780,10 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
 - `get_process_data(data)`: `process()` 입력 데이터 변환 — base: `unwrap(data)`
   - `LightGBMAdapter`: polars→pandas 변환 (LightGBM polars 미지원); `early_stopping` dict 수락 → 내부에서 `lgb_early_stopping` 콜백으로 변환 (params에 콜백 인스턴스를 넣을 수 없으므로 이 dict 형태가 유일한 지정 방법)
   - `CatBoostAdapter`: `_catboost_supports_polars()` (>=1.3.0) 기반 분기 — 구버전이면 polars→pandas (`get_fit_params`도 동일 적용)
+- **`eval_set`의 sample weight**: `sample_weight` edge가 있으면 train 쪽은 원래도 `fit_params['sample_weight']`로 갔지만, `eval_mode`(`'valid'`/`'both'`)가 만드는 `eval_set`의 validation 쪽은 지금까지 weight가 안 실렸다 — `valid_data['sample_weight']`를 아무도 안 읽었기 때문. 이제 셋 다 읽는다
+  - **LightGBM/XGBoost**: `eval_set`과 같은 순서의 weight 리스트 — `ModelAdapter._eval_weight_list(train_w, valid_w, eval_mode)`(`_base.py`, 두 어댑터 공유)가 `'valid'`→`[valid_w]`, `'both'`→`[train_w, valid_w]`로 위치를 맞춰 만든다. 한쪽만 있으면 없는 자리는 `None`(그 eval_set만 uniform weight — 자리를 비우면 `eval_set`과 길이가 어긋나므로 그대로 유지). 양쪽 다 없으면 파라미터 자체를 안 만든다(`eval_sample_weight`/`sample_weight_eval_set`, 기존 무weight 동작과 100% 동일). LightGBM은 `fit_params['eval_sample_weight']`, XGBoost는 `fit_params['sample_weight_eval_set']`
+  - **CatBoost**: 별도 weight 파라미터가 없다 — weight는 `Pool`에 귀속된 속성이라, train/valid 중 하나라도 weight가 있으면 `eval_set` 전체를 `Pool(X, y, weight=w)`(`w=None`도 허용, uniform) 리스트로 통일하고, 아무 쪽도 없으면 지금처럼 plain tuple 그대로 둔다(불필요하게 Pool을 안 만듦)
+  - **`NNAdapter`(`mllabs.nn`)도 같은 공백을 갖고 있었다** — "mllabs.nn 패키지" 섹션 `fit`의 `eval_sample_weight` 참조
 - `result_objs`: `{name: (callable, mergeable_bool)}`
 - **`stack_evals_result(evals_result)`(`_base.py`)**: `{split: {metric: [iteration별 값]}}` → 하나의 stacked Series. XGBoost/LightGBM/CatBoost/NN 네 어댑터의 `_get_evals_result`가 전부 이걸 쓴다
   - **한 split 안에서 metric 곡선 길이가 달라도 된다** — 각 곡선을 `pd.Series`로 감싸므로 iteration 인덱스로 정렬되고 짧은 쪽은 NaN으로 패딩됨. (`pd.DataFrame({metric: list})`로 만들면 `ValueError: All arrays must be of the same length`) 실제 사례: CatBoost `eval_metric='AUC'` + early stopping에서 loss와 AUC의 기록 길이가 어긋남
@@ -933,7 +946,7 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
 ```
 - **Experimenter/Trainer는 각자 `pipeline.pkl` 사본을 소유한다** — 자기 디렉토리만으로 재개 가능한 것이 목적. `pipeline_version`은 **provenance**로만 남는다(이 사본이 어느 버전에서 왔는지)
   - 실제 I/O는 `_common.save_pipeline`/`load_pipeline` 한 곳. Experimenter는 `ExperimenterStore`를 통해, Trainer는 직접 호출
-  - `Project.experimenters`/`trainers`가 복원할 때 **버전을 resolve하지 않는다** — 각자 자기 사본을 읽는다. 버전으로 지정하는 건 `add_experimenter()`/`add_trainer()`의 `pipeline_version=`뿐
+  - `Project.experimenters`/`trainers`가 복원할 때 **버전을 resolve하지 않는다** — 각자 자기 사본을 읽는다. 버전으로 지정하는 건 `set_experimenter()`/`set_trainer()`의 `pipeline_version=`뿐
 - **NodeStore는 project 전역이 아니라 Experimenter/Trainer 하나당 하나** — 프로젝트 전역 노드 이력 레지스트리는 없다. `Experimenter.node_store`/`Trainer.node_store`가 생성자에서 자기 base path로 만들어 모든 fold가 공유
 
 ## 패키지 정보
@@ -948,7 +961,9 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
   - `embedding_dims`: `{col: dim}` dict로 per-column override
   - `head`: head factory 클래스 (default=`SimpleConcatHead`), `head_params`: head factory에 전달할 kwargs dict
   - `hidden`: `DenseHidden` 인스턴스 또는 dict (kwargs로 전달) 또는 None(기본값)
-  - `fit(X, y, eval_set=None, callbacks=None)`: constructor callbacks + fit callbacks + early stopping 순서로 합산
+  - `fit(X, y, eval_set=None, callbacks=None, sample_weight=None, eval_sample_weight=None)`: constructor callbacks + fit callbacks + early stopping 순서로 합산
+    - **`eval_sample_weight`**: `eval_set`의 (유일한) validation 쪽 weight — `_make_tf_dataset`이 `sample_weight`가 있으면 `(inputs, target, weight)` 3-tuple `tf.data.Dataset`을 만들고, Keras `Model.fit`은 `validation_data`로 받은 데이터셋이 3-tuple이면 val_loss/val_metrics에 그대로 적용한다. LightGBM/XGBoost의 `eval_sample_weight`/`sample_weight_eval_set`처럼 위치 리스트가 아니라 **배열 하나**인 이유는 NN의 `eval_set`이 애초에 항목 하나뿐이라서(그 셋엔 있는 `'both'`처럼 train을 두 번째 eval_set으로 넣는 개념 자체가 없음)
+    - **`validation_fraction>0`(명시적 `eval_set` 없이 자동 분할)일 때도 같은 문제가 있었다** — `_split_val`이 `sample_weight`를 `train_idx`로만 슬라이스하고 `val_idx` 쪽은 버렸다. 이제 `sw_val`도 같이 잘라 `val_ds`에 넣는다. 이건 어댑터의 `valid_data`와 무관한, `NNEstimator` 자체의 train-pool 자동 분할 기능이라 별개 경로다
   - `evals_result_`: `{'train': {metric: [...]}, 'valid': {metric: [...]}}` (history 저장)
   - Pickle: `__getstate__`/`__setstate__` — weights만 저장, `col_info_` 기반 architecture 재빌드
 - 컴포넌트: `SimpleConcatHead`, `FTTransformerHead`, `DenseHidden`, `LogitOutput`, `BinaryLogitOutput`, `RegressionOutput`
@@ -956,4 +971,4 @@ published라서 `versions` 테이블에 status 컬럼도 없다(행의 존재가
     - cat embedding → d_model projection, cont feature → per-feature learned (w, b) tokenization
     - CLS token prepend + N × FTBlock (pre-LN, MHA + FFN/GELU, residual dropout) → CLS token 반환
     - 파라미터: `d_model=192`, `n_heads=8`, `n_layers=3`, `ffn_factor=4/3`, `attention_dropout=0.2`, `ffn_dropout=0.1`, `residual_dropout=0.0`
-- `NNAdapter` (`adapter/_nn.py`): eval_set 전달 + `_ProgressCallback` (epoch 진행률 로깅) + `evals_result` result_obj
+- `NNAdapter` (`adapter/_nn.py`): eval_set 전달(+ `valid_data['sample_weight']`가 있으면 `eval_sample_weight`도) + `_ProgressCallback` (epoch 진행률 로깅) + `evals_result` result_obj

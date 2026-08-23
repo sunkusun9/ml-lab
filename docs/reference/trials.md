@@ -8,6 +8,8 @@ to the same `ProcessorSpec` — what differs is the question each answers.
 
 ::: mllabs.GridTrials
 
+::: mllabs.ListTrials
+
 ::: mllabs.Predictor
 
 ::: mllabs.PredictorStore

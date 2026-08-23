@@ -244,7 +244,7 @@ class PipelineStore:
         """Delete a stored version and both its pickles. Not the latest one.
 
         The latest is what an omitted version number resolves to, so deleting
-        it would silently move that pointer: the next ``add_experimenter`` would
+        it would silently move that pointer: the next ``set_experimenter`` would
         adopt a different definition than the one before it did, with nothing
         in the call to say so. Any older version goes freely — every
         Experimenter and Trainer keeps its own Pipeline copy, so what is lost is

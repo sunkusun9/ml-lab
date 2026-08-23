@@ -231,7 +231,7 @@ class Trainer:
 
         Takes the Pipeline object directly rather than a version number —
         this class has no way to load one by version itself (see the class
-        docstring); ``Project.add_trainer()`` resolves that before calling
+        docstring); ``Project.set_trainer()`` resolves that before calling
         this. ``self.pipeline_version`` is read straight off *pipeline* (its
         ``.version``), never tracked separately.
 
