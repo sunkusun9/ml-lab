@@ -11,6 +11,23 @@ _CHAINABLE_FIELDS = frozenset(
 )
 
 
+def _validate_edge_value_types(edges, where):
+    """Type-only check: every value in *edges* is a DSL string, if present.
+
+    Unlike :func:`_validate_edges`, an empty dict is fine here — this runs on
+    a combo's own (possibly partial) edges before it is combined with a
+    shared default via ``_combine_edges``, which expects string values and
+    would otherwise fail with a raw ``AttributeError`` instead of a clear
+    ``TypeError``.
+    """
+    for key, dsl_string in edges.items():
+        if not isinstance(dsl_string, str):
+            raise TypeError(
+                f"{where}: edges[{key!r}] must be a DSL string, got "
+                f"{type(dsl_string).__name__}"
+            )
+
+
 def _validate_edges(edges, where):
     """Shape check shared by every combo generator: a non-empty
     ``{key: dsl_string}`` dict. Structural only — same as
@@ -19,12 +36,7 @@ def _validate_edges(edges, where):
     """
     if not isinstance(edges, dict) or not edges:
         raise ValueError(f"{where}: edges must be a non-empty {{key: dsl_string}} dict")
-    for key, dsl_string in edges.items():
-        if not isinstance(dsl_string, str):
-            raise TypeError(
-                f"{where}: edges[{key!r}] must be a DSL string, got "
-                f"{type(dsl_string).__name__}"
-            )
+    _validate_edge_value_types(edges, where)
 
 
 class Trial:
@@ -297,10 +309,12 @@ class ListTrials:
     entry that sets one replaces the shared default outright. ``params``/
     ``edges`` are structured, so an entry's own dict is merged key-by-key
     over the shared one instead — the shared value survives for any key the
-    entry does not mention, and the entry's value wins where both define the
-    same key. This is a plain dict merge, not DSL-string combination
-    (``Trial.chain``'s ``+``/``-`` inheritance is a separate, more specific
-    tool)::
+    entry does not mention. ``params`` is a plain dict merge: the entry's
+    value wins outright where both define the same key. ``edges`` is
+    combined the same way :meth:`Trial.chain` combines its own — an entry's
+    per-key value starting with ``'+'``/``'-'`` continues the shared value's
+    (already-resolved) DSL string for that key rather than replacing it;
+    anything else replaces it outright::
 
         gen = ListTrials(
             [
@@ -367,7 +381,9 @@ class ListTrials:
                 )
             entry_adapter = combo.get('adapter', adapter)
             entry_params = {**common_params, **combo.get('params', {})}
-            entry_edges = {**common_edges, **combo.get('edges', {})}
+            entry_own_edges = combo.get('edges', {})
+            _validate_edge_value_types(entry_own_edges, entry_where)
+            entry_edges = _combine_edges(entry_own_edges, common_edges)
 
             _validate_processor(entry_processor, entry_where)
             _validate_adapter(entry_adapter, entry_where)

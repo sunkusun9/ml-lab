@@ -168,6 +168,20 @@ class TestListTrials:
         ).combos()
         assert combos[0]['edges'] == {'X': 'scaler:(*)', 'y': '{other_target}'}
 
+    def test_entry_edges_plus_prefix_extends_shared_edges(self):
+        combos = ListTrials(
+            [{'processor': TREE, 'edges': {'X': '+ {extra}'}}],
+            edges=EDGES,
+        ).combos()
+        assert combos[0]['edges'] == {'X': 'scaler:(*) + {extra}', 'y': '{target}'}
+
+    def test_entry_edges_minus_prefix_extends_shared_edges(self):
+        combos = ListTrials(
+            [{'processor': TREE, 'edges': {'X': '- {noisy}'}}],
+            edges=EDGES,
+        ).combos()
+        assert combos[0]['edges'] == {'X': 'scaler:(*) - {noisy}', 'y': '{target}'}
+
     def test_edges_and_params_not_shared_between_combos(self):
         combos = ListTrials(
             [{'processor': TREE}, {'processor': TREE}],
