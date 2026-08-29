@@ -40,9 +40,10 @@ def store(tmp_path):
     return TrialStore(tmp_path / 'ts')
 
 
-def _trial(name='dt', params=None, pipeline_version=None):
-    return Trial(name, TREE, EDGES, params=params or {'max_depth': 3},
-                 pipeline_version=pipeline_version)
+def _trial(name='dt', params=None, pipeline_version=None, processor=TREE,
+           desc=None, tag=None):
+    return Trial(name, processor, EDGES, params=params or {'max_depth': 3},
+                 pipeline_version=pipeline_version, desc=desc, tag=tag)
 
 
 def _named_grid(names, **grid_kw):
@@ -588,6 +589,59 @@ class TestTrialRegistration:
         with_src = _trial()
         with_src.src_trial = 'somewhere-else'
         assert store.has(with_src)
+
+
+class TestListTrialsFiltering:
+    """list_trials() filters, AND-combined, all done in SQL."""
+
+    LGBM = 'lightgbm.LGBMClassifier'
+
+    def test_no_filters_returns_everything(self, store):
+        store.register(_trial('a'))
+        store.register(_trial('b', processor=self.LGBM))
+        assert {t.name for t in store.list_trials()} == {'a', 'b'}
+
+    def test_filter_by_processor(self, store):
+        store.register(_trial('a'))
+        store.register(_trial('b', processor=self.LGBM))
+        assert [t.name for t in store.list_trials(processor=self.LGBM)] == ['b']
+
+    def test_filter_by_name(self, store):
+        store.register(_trial('a'))
+        store.register(_trial('b'))
+        assert [t.name for t in store.list_trials(name='a')] == ['a']
+
+    def test_filter_by_pipeline_version(self, store):
+        store.register(_trial('a', pipeline_version=0))
+        store.register(_trial('b', pipeline_version=1))
+        assert [t.name for t in store.list_trials(pipeline_version=1)] == ['b']
+
+    def test_filter_by_src_trial(self, store):
+        store.register(_trial('a'))
+        store.register(_trial('a').chain('a_stk'))
+        assert [t.name for t in store.list_trials(src_trial='a')] == ['a_stk']
+
+    def test_filter_by_desc_is_a_substring_match(self, store):
+        store.register(_trial('a', desc='xgboost baseline'))
+        store.register(_trial('b', desc='lgbm tuned'))
+        assert [t.name for t in store.list_trials(desc='base')] == ['a']
+
+    def test_filter_by_tag_is_exact_membership(self, store):
+        """tag='b' must not match a Trial tagged 'ab' — a raw substring
+        search on the stored JSON text would."""
+        store.register(_trial('a', tag=['ab']))
+        store.register(_trial('b', tag=['b', 'other']))
+        assert [t.name for t in store.list_trials(tag='b')] == ['b']
+
+    def test_filters_combine_with_and(self, store):
+        store.register(_trial('a', processor=self.LGBM, pipeline_version=0))
+        store.register(_trial('b', processor=self.LGBM, pipeline_version=1))
+        store.register(_trial('c', processor=TREE, pipeline_version=1))
+        assert [t.name for t in store.list_trials(processor=self.LGBM, pipeline_version=1)] == ['b']
+
+    def test_no_match_returns_empty_list(self, store):
+        store.register(_trial('a'))
+        assert store.list_trials(processor=self.LGBM) == []
 
 
 class TestTrialStoreNaming:

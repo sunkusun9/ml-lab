@@ -205,10 +205,43 @@ class TrialStore(ArtifactStore):
             ).fetchone()
         return self._row_to_trial(row) if row else None
 
-    def list_trials(self):
+    def list_trials(self, name=None, processor=None, method=None,
+                     pipeline_version=None, src_trial=None, tag=None, desc=None):
+        """Trial definitions, filtered in SQL.
+
+        Every given filter is AND-combined; ``None`` (the default) skips it
+        — same dynamic-WHERE shape as :meth:`get_hist`/:meth:`remove_hist`,
+        so a bare ``list_trials()`` still returns everything.
+
+        ``name``/``processor``/``method``/``pipeline_version``/``src_trial``
+        match exactly. ``desc`` is a substring match (``LIKE '%...%'`` — it
+        is free text, so exact match would rarely find anything). ``tag``
+        checks membership in the stored tag list via SQLite's JSON1
+        ``json_each`` (``tag`` is a JSON array column): a raw substring
+        search on the column text could false-match one tag against a
+        substring of another (e.g. ``'b'`` inside ``'ab'``'s JSON encoding).
+        """
+        where, params = [], []
+        for column, value in (('name', name), ('processor', processor),
+                              ('method', method),
+                              ('pipeline_version', pipeline_version),
+                              ('src_trial', src_trial)):
+            if value is not None:
+                where.append(f"{column} = ?")
+                params.append(value)
+        if desc is not None:
+            where.append("desc LIKE ?")
+            params.append(f"%{desc}%")
+        if tag is not None:
+            where.append("EXISTS (SELECT 1 FROM json_each(tag) WHERE value = ?)")
+            params.append(tag)
+        sql = "SELECT * FROM trials"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY rowid"
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute("SELECT * FROM trials ORDER BY rowid").fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [self._row_to_trial(r) for r in rows]
 
     @staticmethod
