@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 import numpy as np
 import pandas as pd
@@ -226,6 +228,15 @@ class TestBuild:
         exp.build()
         assert exp.node_store.get_info('scaler')[(0, 0)]['build_id'] == build_id
 
+    def test_build_records_when_processing_started(self, exp, pipeline):
+        """started_at is _process()'s own clock — when it began running, not
+        when the row landed in node_hist (that's recorded_at, see TestNodeStore)."""
+        _setup_stage(pipeline, exp)
+        exp.build()
+        started_at = exp.node_store.get_info('scaler')[(0, 0)]['started_at']
+        assert started_at is not None
+        datetime.fromisoformat(started_at)  # doesn't raise
+
     def test_build_error_continues(self, exp, pipeline):
         pipeline.set_grp('good', processor='sklearn.preprocessing.StandardScaler',
                          method='transform', edges={'X': '{f1}'})
@@ -250,6 +261,7 @@ class TestBuild:
         assert err['type'] == 'TypeError'
         assert 'test error msg' in err['message']
         assert 'traceback' in err
+        assert info['started_at'] is not None  # stamped on the error path too
 
     def test_unknown_column_in_edges_errors_at_build_not_definition(self, exp, pipeline):
         # set_grp only validates DSL structure — an edges string referencing a
@@ -803,6 +815,19 @@ class TestNodeStore:
         store.reset_node('node1', 0, 0)
         assert not node_path.exists()
         assert store.status('node1', 0, 0) is None
+
+    def test_recorded_at_is_stamped_automatically(self, tmp_path):
+        store = NodeStore(tmp_path)
+        store.record('node1', 0, 0, status='built')
+        recorded_at = store.get_hist(node_name='node1')[0]['recorded_at']
+        assert recorded_at is not None
+        datetime.fromisoformat(recorded_at)  # doesn't raise
+
+    def test_recorded_at_can_be_given_explicitly(self, tmp_path):
+        store = NodeStore(tmp_path)
+        store.record('node1', 0, 0, status='built',
+                     recorded_at='2026-01-01T00:00:00+00:00')
+        assert store.get_hist(node_name='node1')[0]['recorded_at'] == '2026-01-01T00:00:00+00:00'
 
     def test_record_and_get_hist(self, tmp_path):
         store = NodeStore(tmp_path)

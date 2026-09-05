@@ -5,6 +5,8 @@ import sqlite3
 import pickle as pkl
 from pathlib import Path
 
+from ._common import utc_now
+
 _SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS node_hist (
         node_name        TEXT NOT NULL,
@@ -12,6 +14,7 @@ _SCHEMA_SQL = """
         inner_idx        INTEGER NOT NULL,
         pipeline_version INTEGER,
         status           TEXT,
+        recorded_at      TEXT,
         info             TEXT,
         PRIMARY KEY (node_name, outer_idx, inner_idx)
     );
@@ -200,7 +203,8 @@ class NodeStore(ArtifactStore):
     # History (was NodeInfoStore) — instance, SQLite-backed
     # -------------------------------------------------------------------------
 
-    def record(self, node_name, outer_idx, inner_idx, pipeline_version=None, status=None, info=None):
+    def record(self, node_name, outer_idx, inner_idx, pipeline_version=None, status=None,
+               recorded_at=None, info=None):
         """Upsert one fold's outcome.
 
         Args:
@@ -208,17 +212,24 @@ class NodeStore(ArtifactStore):
             outer_idx (int), inner_idx (int): Fold coordinates.
             pipeline_version (int, optional): The Pipeline version this ran against.
             status (str, optional): ``'built'`` or ``'error'``.
+            recorded_at (str, optional): When this row was written — UTC
+                ISO-8601, same format as ``CollectHist.collect_date``.
+                Defaults to now. Distinct from ``info['started_at']`` (when
+                ``_process()`` began running): a row can be written well
+                after the run that produced it started.
             info (dict, optional): Everything ``_process()``/``_prep_error_info``
                 produced besides ``status`` — ``build_id``,
-                ``definition``, ``fit_time``, ``edges``, ``train_shape``,
-                ``warnings``, and, on failure, ``error``. JSON-encoded.
+                ``definition``, ``started_at``, ``fit_time``, ``edges``,
+                ``train_shape``, ``warnings``, and, on failure, ``error``.
+                JSON-encoded.
         """
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO node_hist "
-                "(node_name, outer_idx, inner_idx, pipeline_version, status, info) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(node_name, outer_idx, inner_idx, pipeline_version, status, "
+                "recorded_at, info) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (node_name, outer_idx, inner_idx, pipeline_version, status,
+                 recorded_at or utc_now(),
                  json.dumps(info) if info is not None else None),
             )
 

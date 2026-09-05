@@ -1,8 +1,20 @@
 """Shared helpers between Experimenter and Trainer."""
 import pickle as pkl
+from datetime import datetime, timezone
 from pathlib import Path
 
 PIPELINE_FILE = 'pipeline.pkl'
+
+
+def utc_now():
+    """Current UTC time as an ISO-8601 string, seconds resolution.
+
+    The one timestamp format shared by every history table that stamps when a
+    row was written (``CollectHist.collect_date``, ``node_hist``/
+    ``experiment_hist``'s ``recorded_at``) — so a row from one table reads the
+    same as a row from another.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
 def save_pipeline(path, pipeline):

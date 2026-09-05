@@ -688,8 +688,37 @@ class Project:
         """
         return self.experimenters[experimenter].collectors.get_collector(name)
 
+    def get_collect_hist(self, experimenter, collector_name=None, node_name=None,
+                         status=None, pipeline_version=None):
+        """Collection history rows for *experimenter*, whichever filters are given.
+
+        Same proxy relationship as :meth:`get_collector` — saves the reach
+        through ``project.experimenters[experimenter].collectors.hist`` for
+        the common case of reading one Experimenter's ``CollectHist``.
+        Unlike :meth:`collect_errors`, this does not fan out across every
+        Experimenter or add one back in: it hands back exactly what
+        ``CollectHist.get_hist`` would, for the one named.
+
+        Args:
+            experimenter (str): Name of the Experimenter whose collect
+                history to read.
+            collector_name, node_name, status, pipeline_version: Passed
+                straight to ``CollectHist.get_hist`` — see there for what
+                each filters on.
+
+        Returns:
+            list[dict]: Matching rows, in ``CollectHist.get_hist``'s order.
+
+        Raises:
+            KeyError: If this project manages no Experimenter named
+                *experimenter*.
+        """
+        return self.experimenters[experimenter].collectors.hist.get_hist(
+            collector_name=collector_name, node_name=node_name,
+            status=status, pipeline_version=pipeline_version)
+
     def build(self, experimenter, nodes=None, rebuild=False, n_jobs=1,
-             gpu_id_list=None, logger=None):
+             gpu_id_list=None, logger=None, os_log=True):
         """Build Stage nodes on *experimenter*. A thin proxy to
         ``Experimenter.build`` — see there for what each argument means.
 
@@ -697,16 +726,35 @@ class Project:
         the common case of driving one Experimenter's build from the
         project, the same way :meth:`set_collector` does for its registry.
 
+        Args:
+            os_log (bool): Wrap the call in ``Experimenter.os_log()`` so
+                native library chatter (TensorFlow, LightGBM, CatBoost,
+                cuDNN/XLA — anything writing straight to fd 1/2) is captured
+                to ``{exp_path}/__worker_logs/`` instead of interleaving with
+                the console. Default ``True`` — a driver call like this one
+                is exactly where that noise shows up uninvited; pass
+                ``False`` to skip it, or reach ``Experimenter.os_log()``
+                directly for a custom ``log_path`` or to span several calls
+                under one capture.
+
         Raises:
             KeyError: If this project manages no Experimenter named
                 *experimenter*.
+            RuntimeError: If *experimenter* already has OS log capture open
+                (e.g. this call is nested inside the caller's own
+                ``with e.os_log():``) — the same guard ``open_os_log`` always
+                enforces, just surfaced through the proxy.
         """
-        return self.experimenters[experimenter].build(
-            nodes=nodes, rebuild=rebuild, n_jobs=n_jobs,
-            gpu_id_list=gpu_id_list, logger=logger)
+        e = self.experimenters[experimenter]
+        if os_log:
+            with e.os_log():
+                return e.build(nodes=nodes, rebuild=rebuild, n_jobs=n_jobs,
+                               gpu_id_list=gpu_id_list, logger=logger)
+        return e.build(nodes=nodes, rebuild=rebuild, n_jobs=n_jobs,
+                       gpu_id_list=gpu_id_list, logger=logger)
 
     def exp(self, experimenter, trials, collectors=None, n_jobs=1,
-           gpu_id_list=None, logger=None):
+           gpu_id_list=None, logger=None, os_log=True):
         """Run *trials* on *experimenter*. A thin proxy to
         ``Experimenter.exp`` — see there for what each argument means.
 
@@ -714,16 +762,27 @@ class Project:
         the common case of driving one Experimenter's run from the project,
         the same way :meth:`set_collector` does for its registry.
 
+        Args:
+            os_log (bool): Same as :meth:`build`'s — wraps the call in
+                ``Experimenter.os_log()`` so native chatter from a Trial's
+                processor goes to a log file instead of the console. Default
+                ``True``.
+
         Raises:
             KeyError: If this project manages no Experimenter named
                 *experimenter*, or if a name in *trials* is not registered
                 in :attr:`trials`.
             RuntimeError: If *experimenter* has no ``trial_store`` (only
-                possible for one opened outside this project's registry).
+                possible for one opened outside this project's registry), or
+                if it already has OS log capture open — see :meth:`build`.
         """
-        return self.experimenters[experimenter].exp(
-            trials, collectors=collectors, n_jobs=n_jobs,
-            gpu_id_list=gpu_id_list, logger=logger)
+        e = self.experimenters[experimenter]
+        if os_log:
+            with e.os_log():
+                return e.exp(trials, collectors=collectors, n_jobs=n_jobs,
+                            gpu_id_list=gpu_id_list, logger=logger)
+        return e.exp(trials, collectors=collectors, n_jobs=n_jobs,
+                     gpu_id_list=gpu_id_list, logger=logger)
 
     def collect_errors(self, experimenter=None, collectors=None):
         """Collection failures across the project, one dict each.
@@ -884,6 +943,39 @@ class Project:
         self.trials.remove_hist(trial_name=name)
         for exp in self.experimenters.values():
             exp.remove_trial_result(name)
+
+    def remove_error_trials(self, experimenter=None):
+        """Find every Trial with an errored fold and remove it entirely.
+
+        Finds names the same way :meth:`error_trials` does — an errored fold
+        under *experimenter*, or anywhere if unset — then drops each one
+        through :meth:`remove_trial`, which always reaches every Experimenter
+        that ran it, not just the one *experimenter* narrowed the search to.
+        Only the search is scoped, not the removal: :meth:`remove_trial`
+        already refuses a subset (leaving one Experimenter out would leave
+        results behind for a Trial the project no longer defines), and this
+        does not reopen that decision.
+
+        A Trial with an errored fold under one Experimenter but a successful
+        one under another is removed all the same — this asks "did this ever
+        error anywhere in scope", not "did this only ever error".
+
+        Args:
+            experimenter (str, optional): Only search this Experimenter's
+                history for errors. ``None`` searches every one's.
+
+        Returns:
+            list[str]: Names removed, alphabetical (the order
+            ``TrialStore.get_hist`` returns them in). Empty when nothing
+            errored.
+        """
+        names = dict.fromkeys(
+            r['trial_name']
+            for r in self.trials.get_hist(experimenter=experimenter, status='error')
+        )
+        for name in names:
+            self.remove_trial(name)
+        return list(names)
 
     # ------------------------------------------------------------------
     # pipeline versions

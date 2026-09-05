@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 import numpy as np
 import pandas as pd
@@ -435,6 +437,39 @@ class TestGetCollector:
             project.get_collector('nope', 'acc')
 
 
+class TestGetCollectHist:
+    """Project.get_collect_hist — same proxy relationship as get_collector,
+    sparing project.experimenters[name].collectors.hist.get_hist(...)."""
+
+    def _run(self, project, builder, name='run_a'):
+        version = builder.build().version
+        e = project.set_experimenter(
+            name,
+            sp=ShuffleSplit(n_splits=2, test_size=0.2, random_state=0), pipeline_version=version,
+        )
+        e.build()
+        e.collectors.set_collector('acc', 'mllabs.MetricCollector', 'mllabs._connector.Connector',
+                                   params={'output_var': None, 'metric_func': {'__callable__': 'test_project.dummy_metric'}})
+        project.set_trial(_trial())
+        e.exp(['dt'])
+        return e
+
+    def test_reads_back_the_history(self, project, builder, sample_data):
+        e = self._run(project, builder)
+        rows = project.get_collect_hist('run_a')
+        assert rows == e.collectors.hist.get_hist()
+        assert rows and rows[0]['collector_name'] == 'acc'
+
+    def test_filters_are_passed_through(self, project, builder, sample_data):
+        self._run(project, builder)
+        assert project.get_collect_hist('run_a', collector_name='acc')
+        assert project.get_collect_hist('run_a', collector_name='nope') == []
+
+    def test_unknown_experimenter_raises(self, project):
+        with pytest.raises(KeyError, match='nope'):
+            project.get_collect_hist('nope')
+
+
 class TestProjectBuildProxy:
     """Project.build — a thin proxy onto Experimenter.build, sparing the
     project.experimenters[name].build(...) two-hop reach."""
@@ -448,6 +483,18 @@ class TestProjectBuildProxy:
     def test_unknown_experimenter_raises(self, project):
         with pytest.raises(KeyError, match='nope'):
             project.build('nope')
+
+    def test_os_log_defaults_to_capturing_native_chatter(self, project, builder, sample_data):
+        version = builder.build().version
+        e = project.set_experimenter('run_a', pipeline_version=version)
+        project.build('run_a')
+        assert (e.path / '__worker_logs' / 'master.log').exists()
+
+    def test_os_log_false_skips_capture(self, project, builder, sample_data):
+        version = builder.build().version
+        e = project.set_experimenter('run_a', pipeline_version=version)
+        project.build('run_a', os_log=False)
+        assert not (e.path / '__worker_logs' / 'master.log').exists()
 
 
 class TestProjectExpProxy:
@@ -468,6 +515,28 @@ class TestProjectExpProxy:
     def test_unknown_experimenter_raises(self, project):
         with pytest.raises(KeyError, match='nope'):
             project.exp('nope', ['dt'])
+
+    def test_os_log_defaults_to_capturing_native_chatter(self, project, builder, sample_data):
+        version = builder.build().version
+        e = project.set_experimenter(
+            'run_a', sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=0),
+            pipeline_version=version,
+        )
+        e.build()
+        project.set_trial(_trial())
+        project.exp('run_a', ['dt'])
+        assert (e.path / '__worker_logs' / 'master.log').exists()
+
+    def test_os_log_false_skips_capture(self, project, builder, sample_data):
+        version = builder.build().version
+        e = project.set_experimenter(
+            'run_a', sp=ShuffleSplit(n_splits=1, test_size=0.2, random_state=0),
+            pipeline_version=version,
+        )
+        e.build()
+        project.set_trial(_trial())
+        project.exp('run_a', ['dt'], os_log=False)
+        assert not (e.path / '__worker_logs' / 'master.log').exists()
 
 
 class TestChainTrial:
@@ -729,6 +798,17 @@ class TestExperimentHist:
         store.record('dt', 'exp-1', 0, 0, status='built')
         store.remove_hist(trial_name='dt')
         assert store.get_by_name('dt') is not None
+
+    def test_recorded_at_is_stamped_automatically(self, store):
+        store.record('dt', 'exp-1', 0, 0, status='built')
+        recorded_at = store.get_hist(trial_name='dt')[0]['recorded_at']
+        assert recorded_at is not None
+        datetime.fromisoformat(recorded_at)  # doesn't raise
+
+    def test_recorded_at_can_be_given_explicitly(self, store):
+        store.record('dt', 'exp-1', 0, 0, status='built',
+                     recorded_at='2026-01-01T00:00:00+00:00')
+        assert store.get_hist(trial_name='dt')[0]['recorded_at'] == '2026-01-01T00:00:00+00:00'
 
 
 class TestProjectEndToEnd:
@@ -1573,6 +1653,61 @@ class TestRemoveTrial:
         assert project.set_trial(_trial()) == 'dt'
         e.exp(['dt'])
         assert project.trials.get_status('dt', 'run_a') == {(0, 0): 'built', (1, 0): 'built'}
+
+
+class TestRemoveErrorTrials:
+    """Searches error_trials' way, then deletes remove_trial's way — the
+    search may narrow to one Experimenter, but removal never does (that
+    contract already belongs to remove_trial)."""
+
+    def test_nothing_errored_removes_nothing(self, project):
+        project.set_trial(_trial())
+        assert project.remove_error_trials() == []
+        assert project.trials.get_by_name('dt') is not None
+
+    def test_removes_an_errored_trials_definition_and_history(self, project):
+        project.set_trial(_trial())
+        project.trials.record('dt', 'run_a', 0, 0, status='error')
+        assert project.remove_error_trials() == ['dt']
+        assert project.trials.get_by_name('dt') is None
+        assert project.trials.get_hist(trial_name='dt') == []
+
+    def test_a_built_trial_is_left_alone(self, project):
+        project.set_trial(_trial())
+        project.trials.record('dt', 'run_a', 0, 0, status='built')
+        assert project.remove_error_trials() == []
+        assert project.trials.get_by_name('dt') is not None
+
+    def test_search_narrows_to_one_experimenter(self, project):
+        project.set_trial(_trial())
+        project.trials.record('dt', 'run_b', 0, 0, status='error')
+        assert project.remove_error_trials(experimenter='run_a') == []
+        assert project.trials.get_by_name('dt') is not None
+
+    def test_removal_still_reaches_every_run_once_found(self, project):
+        """Erroring under one run and succeeding under another is still an
+        error in scope — removal is not narrowed to where it errored."""
+        project.set_trial(_trial())
+        project.trials.record('dt', 'run_a', 0, 0, status='error')
+        project.trials.record('dt', 'run_b', 0, 0, status='built')
+
+        assert project.remove_error_trials(experimenter='run_a') == ['dt']
+
+        assert project.trials.get_by_name('dt') is None
+        assert project.trials.get_hist(trial_name='dt') == []
+
+    def test_an_unregistered_error_is_swept_too(self, project):
+        """History with no matching definition — remove_trial is already a
+        no-op for a name never registered, so this costs nothing extra."""
+        project.trials.record('gone', 'run_a', 0, 0, status='error')
+        assert project.remove_error_trials() == ['gone']
+
+    def test_multiple_errored_trials_come_back_together(self, project):
+        project.set_trial(_trial('dt'))
+        project.set_trial(_trial('dt2'))
+        project.trials.record('dt', 'run_a', 0, 0, status='error')
+        project.trials.record('dt2', 'run_a', 0, 0, status='error')
+        assert project.remove_error_trials() == ['dt', 'dt2']
 
 
 class TestTrainerUnderProject:

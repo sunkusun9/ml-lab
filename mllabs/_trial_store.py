@@ -34,8 +34,8 @@ force a rerun.
 
 ``experiment_hist`` also carries an ``info`` column — everything
 ``_process()``/``_prep_error_info`` produced besides ``status``
-(``build_id``, ``definition``, ``fit_time``, ``edges``, ``train_shape``,
-``warnings``, and, on failure, ``error``), JSON-encoded, recorded by
+(``build_id``, ``definition``, ``started_at``, ``fit_time``, ``edges``,
+``train_shape``, ``warnings``, and, on failure, ``error``), JSON-encoded, recorded by
 ``TrialHistTracker``. It is a Trial's only post-mortem, and is queryable
 across folds and Experimenters without walking directories. See
 ``NodeStore.node_hist`` (``_store.py``) for the node-side equivalent, which
@@ -46,6 +46,7 @@ import re
 import sqlite3
 from pathlib import Path
 
+from ._common import utc_now
 from ._store import ArtifactStore
 from ._trial import Trial
 
@@ -69,6 +70,7 @@ _SCHEMA_SQL = """
         inner_idx        INTEGER NOT NULL,
         pipeline_version INTEGER,
         status           TEXT,
+        recorded_at      TEXT,
         info             TEXT,
         PRIMARY KEY (trial_name, experimenter, outer_idx, inner_idx)
     );
@@ -271,7 +273,7 @@ class TrialStore(ArtifactStore):
     # ------------------------------------------------------------------
 
     def record(self, trial_name, experimenter, outer_idx, inner_idx,
-               pipeline_version=None, status=None, info=None):
+               pipeline_version=None, status=None, recorded_at=None, info=None):
         """Upsert one fold's outcome.
 
         Args:
@@ -281,18 +283,25 @@ class TrialStore(ArtifactStore):
             pipeline_version (int, optional): The Pipeline version this ran
                 against (the Experimenter's ``pipeline_version``).
             status (str, optional): ``'built'`` or ``'error'``.
+            recorded_at (str, optional): When this row was written — UTC
+                ISO-8601, same format as ``CollectHist.collect_date``.
+                Defaults to now. Distinct from ``info['started_at']`` (when
+                ``_process()`` began running): a row can be written well
+                after the run that produced it started.
             info (dict, optional): Everything ``_process()``/``_write_prep_error``
                 produced besides ``status`` — ``build_id``,
-                ``definition``, ``fit_time``, ``edges``, ``train_shape``,
-                ``warnings``, and, on failure, ``error``. JSON-encoded.
+                ``definition``, ``started_at``, ``fit_time``, ``edges``,
+                ``train_shape``, ``warnings``, and, on failure, ``error``.
+                JSON-encoded.
         """
         with sqlite3.connect(str(self.db_path)) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO experiment_hist "
                 "(trial_name, experimenter, outer_idx, inner_idx, "
-                "pipeline_version, status, info) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "pipeline_version, status, recorded_at, info) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (trial_name, experimenter, outer_idx, inner_idx,
-                 pipeline_version, status, json.dumps(info) if info is not None else None),
+                 pipeline_version, status, recorded_at or utc_now(),
+                 json.dumps(info) if info is not None else None),
             )
 
     def get_hist(self, trial_name=None, experimenter=None, pipeline_version=None,

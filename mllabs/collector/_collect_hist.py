@@ -1,7 +1,8 @@
 import json
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
+
+from .._common import utc_now
 
 _SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS collect_hist (
@@ -19,10 +20,6 @@ _SCHEMA_SQL = """
 """
 
 _KEY_COLUMNS = ('collector_name', 'node_name', 'outer_idx', 'inner_idx')
-
-
-def utc_now():
-    return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
 class CollectHist:

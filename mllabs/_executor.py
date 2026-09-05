@@ -11,6 +11,7 @@ _mp_ctx = multiprocessing.get_context('spawn')
 
 _JOIN_TIMEOUT = 10
 
+from ._common import utc_now
 from ._node_processor import ProgressMonitor
 from ._pipeline import _definition_of
 from ._resolver import Resolver
@@ -66,6 +67,7 @@ def _process(spec, train_data, valid_data, fit_process, monitor, gpu_id_list=Non
     method = spec.method
 
     start_time = time.time()
+    started_at = utc_now()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
@@ -98,6 +100,7 @@ def _process(spec, train_data, valid_data, fit_process, monitor, gpu_id_list=Non
             info = {
                 'build_id': str(uuid.uuid4()),
                 'definition': _definition_of(spec),
+                'started_at': started_at,
                 'fit_time': time.time() - start_time,
                 'train_shape': None,
                 'edges': spec.edges,
@@ -118,6 +121,7 @@ def _process(spec, train_data, valid_data, fit_process, monitor, gpu_id_list=Non
     info = {
         'build_id': str(uuid.uuid4()),
         'definition': _definition_of(spec),
+        'started_at': started_at,
         'fit_time': elapsed_time,
         'train_shape': ref_data.get_shape() if ref_data is not None else None,
         'edges': spec.edges,
